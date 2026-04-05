@@ -50,6 +50,9 @@ def sinkhorn_flashstyle_alternating(
     check_every: int = 5,
     return_n_iters: bool = False,
     ott_convention: bool = False,
+    # Adaptive padding: mask convergence check to unpadded slices
+    n_orig: Optional[int] = None,
+    m_orig: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, int]:
     """FlashSinkhorn with alternating (Gauss-Seidel) updates.
 
@@ -220,8 +223,10 @@ def sinkhorn_flashstyle_alternating(
 
             # Early stopping check
             if threshold is not None and (i + 1) % check_every == 0:
-                f_change = (f_hat - prev_f_hat).abs().max().item()
-                g_change = (g_hat - prev_g_hat).abs().max().item()
+                _no = n_orig if n_orig is not None else len(f_hat)
+                _mo = m_orig if m_orig is not None else len(g_hat)
+                f_change = (f_hat[:_no] - prev_f_hat[:_no]).abs().max().item()
+                g_change = (g_hat[:_mo] - prev_g_hat[:_mo]).abs().max().item()
                 if max(f_change, g_change) < threshold:
                     break
                 prev_f_hat.copy_(f_hat)
@@ -262,8 +267,10 @@ def sinkhorn_flashstyle_alternating(
 
             # Early stopping check
             if threshold is not None and (i + 1) % check_every == 0:
-                f_change = (f_hat - prev_f_hat).abs().max().item()
-                g_change = (g_hat - prev_g_hat).abs().max().item()
+                _no = n_orig if n_orig is not None else len(f_hat)
+                _mo = m_orig if m_orig is not None else len(g_hat)
+                f_change = (f_hat[:_no] - prev_f_hat[:_no]).abs().max().item()
+                g_change = (g_hat[:_mo] - prev_g_hat[:_mo]).abs().max().item()
                 if max(f_change, g_change) < threshold:
                     break
                 prev_f_hat.copy_(f_hat)
@@ -326,6 +333,9 @@ def sinkhorn_flashstyle_symmetric(
     label_cost_matrix: Optional[torch.Tensor] = None,  # W: [V, V] label distances
     lambda_x: float = 1.0,  # Weight for Euclidean cost
     lambda_y: float = 0.0,  # Weight for label cost (0 = Euclidean only)
+    # Adaptive padding: mask convergence check to unpadded slices
+    n_orig: Optional[int] = None,
+    m_orig: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, int]:
     """FlashSinkhorn with GeomLoss-style symmetric updates.
 
@@ -523,8 +533,10 @@ def sinkhorn_flashstyle_symmetric(
                     prev_f = f_hat.clone()
                     prev_g = g_hat.clone()
                 else:
-                    f_change = (f_hat - prev_f).abs().max().item()
-                    g_change = (g_hat - prev_g).abs().max().item()
+                    _no = n_orig if n_orig is not None else len(f_hat)
+                    _mo = m_orig if m_orig is not None else len(g_hat)
+                    f_change = (f_hat[:_no] - prev_f[:_no]).abs().max().item()
+                    g_change = (g_hat[:_mo] - prev_g[:_mo]).abs().max().item()
                     if max(f_change, g_change) < threshold:
                         break
                     prev_f.copy_(f_hat)
@@ -649,8 +661,10 @@ def sinkhorn_flashstyle_symmetric(
                     prev_f = f_hat.clone()
                     prev_g = g_hat.clone()
                 else:
-                    f_change = (f_hat - prev_f).abs().max().item()
-                    g_change = (g_hat - prev_g).abs().max().item()
+                    _no = n_orig if n_orig is not None else len(f_hat)
+                    _mo = m_orig if m_orig is not None else len(g_hat)
+                    f_change = (f_hat[:_no] - prev_f[:_no]).abs().max().item()
+                    g_change = (g_hat[:_mo] - prev_g[:_mo]).abs().max().item()
                     if max(f_change, g_change) < threshold:
                         break
                     prev_f.copy_(f_hat)

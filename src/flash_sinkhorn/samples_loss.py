@@ -8,6 +8,7 @@ The autograd machinery (``_SinkhornCostFn``, ``_SinkhornGradFn``) lives in
 """
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple, Union
 
@@ -192,6 +193,55 @@ def _process_args(*args, normalize: bool) -> _ParsedInputs:
 
 
 # ---------------------------------------------------------------------------
+# Adaptive padding helpers
+# ---------------------------------------------------------------------------
+
+
+def _pad_inputs(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    multiple: int,
+    label_x: Optional[torch.Tensor] = None,
+    label_y: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+           Optional[torch.Tensor], Optional[torch.Tensor], int, int]:
+    """Pad point clouds and weights to next multiple of ``multiple``.
+
+    Zero-weight padding is mathematically exact for Sinkhorn: phantom points
+    carry no mass, so they do not affect the transport plan or OT cost.
+    """
+    n, d = x.shape
+    m = y.shape[0]
+    pad_n = (multiple - n % multiple) % multiple
+    pad_m = (multiple - m % multiple) % multiple
+    if pad_n == 0 and pad_m == 0:
+        return x, y, a, b, label_x, label_y, n, m
+    if pad_n > 0:
+        x = torch.cat([x, x.new_zeros(pad_n, d)])
+        a = torch.cat([a, a.new_zeros(pad_n)])
+        if label_x is not None:
+            label_x = torch.cat([label_x, label_x.new_zeros(pad_n, dtype=label_x.dtype)])
+    if pad_m > 0:
+        y = torch.cat([y, y.new_zeros(pad_m, d)])
+        b = torch.cat([b, b.new_zeros(pad_m)])
+        if label_y is not None:
+            label_y = torch.cat([label_y, label_y.new_zeros(pad_m, dtype=label_y.dtype)])
+    return x, y, a, b, label_x, label_y, n, m
+
+
+def _trim_potentials(
+    f: torch.Tensor,
+    g: torch.Tensor,
+    n_orig: int,
+    m_orig: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Trim padded potentials back to original size."""
+    return f[:n_orig], g[:m_orig]
+
+
+# ---------------------------------------------------------------------------
 # SamplesLoss: public API
 # ---------------------------------------------------------------------------
 
@@ -303,6 +353,8 @@ class SamplesLoss(torch.nn.Module):
         inner_iterations: int = 10,
         # Deprecated: FlashSinkhorn is now the only backend
         use_flashstyle: Optional[bool] = None,
+        # Adaptive padding for variable-size OT
+        pad_to_multiple: Optional[int] = None,
     ):
         super().__init__()
 
@@ -413,6 +465,15 @@ class SamplesLoss(torch.nn.Module):
         self.threshold = None if threshold is None else float(threshold)
         self.inner_iterations = int(inner_iterations)
 
+        # Adaptive padding
+        self.pad_to_multiple = None if pad_to_multiple is None else int(pad_to_multiple)
+        if self.pad_to_multiple is not None:
+            if self.pad_to_multiple < 32 or self.pad_to_multiple % 32 != 0:
+                raise ValueError(
+                    "pad_to_multiple must be a positive multiple of 32 "
+                    f"(e.g. 32, 64, 128), got {pad_to_multiple}"
+                )
+
     def _make_config(self) -> _SinkhornConfig:
         """Create a frozen config snapshot for autograd."""
         return _SinkhornConfig(
@@ -482,16 +543,67 @@ class SamplesLoss(torch.nn.Module):
 
         config = self._make_config()
 
-        def _raw_cost(xb, yb, ab, bb, lx, ly):
+        # --- Adaptive padding ---
+        should_pad = self.pad_to_multiple is not None
+
+        x, y, a, b = parsed.x, parsed.y, parsed.a, parsed.b
+        lx_used, ly_used = label_x, label_y
+        n_orig = x.shape[-2] if parsed.batched else x.shape[0]
+        m_orig = y.shape[-2] if parsed.batched else y.shape[0]
+
+        # Pre-compute eps_list from UNPADDED geometry
+        if not parsed.batched:
+            _precomputed_eps_list = tuple(self._eps_list_for_inputs(parsed.x, parsed.y))
+        else:
+            _precomputed_eps_list = None
+
+        if should_pad:
+            if parsed.batched:
+                B, N, D = x.shape
+                M = y.shape[1]
+                pad_n = (self.pad_to_multiple - N % self.pad_to_multiple) % self.pad_to_multiple
+                pad_m = (self.pad_to_multiple - M % self.pad_to_multiple) % self.pad_to_multiple
+                if pad_n > 0:
+                    x = torch.cat([x, x.new_zeros(B, pad_n, D)], dim=1)
+                    a = torch.cat([a, a.new_zeros(B, pad_n)], dim=1)
+                    if lx_used is not None:
+                        lx_used = torch.cat([lx_used, lx_used.new_zeros(pad_n, dtype=lx_used.dtype)])
+                if pad_m > 0:
+                    y = torch.cat([y, y.new_zeros(B, pad_m, D)], dim=1)
+                    b = torch.cat([b, b.new_zeros(B, pad_m)], dim=1)
+                    if ly_used is not None:
+                        ly_used = torch.cat([ly_used, ly_used.new_zeros(pad_m, dtype=ly_used.dtype)])
+            else:
+                x, y, a, b, lx_used, ly_used, _, _ = _pad_inputs(
+                    x, y, a, b, self.pad_to_multiple,
+                    label_x=label_x, label_y=label_y,
+                )
+            config = dataclasses.replace(config, n_orig=n_orig, m_orig=m_orig)
+
+        def _raw_cost(xb, yb, ab, bb, lx, ly,
+                      override_n_orig=None, override_m_orig=None,
+                      xb_unpadded=None, yb_unpadded=None):
             """Compute raw OT cost via autograd-wrapped Sinkhorn solver."""
-            eps_list = tuple(self._eps_list_for_inputs(xb, yb))
+            cfg = config
+            if override_n_orig is not None or override_m_orig is not None:
+                cfg = dataclasses.replace(
+                    config,
+                    n_orig=override_n_orig if override_n_orig is not None else config.n_orig,
+                    m_orig=override_m_orig if override_m_orig is not None else config.m_orig,
+                )
+            if _precomputed_eps_list is not None:
+                eps_list = _precomputed_eps_list
+            elif xb_unpadded is not None:
+                eps_list = tuple(self._eps_list_for_inputs(xb_unpadded, yb_unpadded))
+            else:
+                eps_list = tuple(self._eps_list_for_inputs(xb, yb))
             return _SinkhornCostFn.apply(
                 xb, yb, ab, bb,
-                eps_list, config,
+                eps_list, cfg,
                 lx, ly, self.label_cost_matrix,
             )
 
-        def _cost(xb, yb, ab, bb):
+        def _cost(xb, yb, ab, bb, xb_unpadded=None, yb_unpadded=None):
             """Compute OT cost, with debiasing if enabled.
 
             Debiased Sinkhorn divergence (when debias=True):
@@ -502,13 +614,24 @@ class SamplesLoss(torch.nn.Module):
             - OT(x, x): label_x for BOTH source and target
             - OT(y, y): label_y for BOTH source and target
             """
-            cost_xy = _raw_cost(xb, yb, ab, bb, label_x, label_y)
+            cost_xy = _raw_cost(xb, yb, ab, bb, lx_used, ly_used,
+                                xb_unpadded=xb_unpadded, yb_unpadded=yb_unpadded)
 
             if not self.debias:
                 return cost_xy
 
-            cost_xx = _raw_cost(xb, xb, ab, ab, label_x, label_x)
-            cost_yy = _raw_cost(yb, yb, bb, bb, label_y, label_y)
+            cost_xx = _raw_cost(
+                xb, xb, ab, ab, lx_used, lx_used,
+                override_n_orig=n_orig if should_pad else None,
+                override_m_orig=n_orig if should_pad else None,
+                xb_unpadded=xb_unpadded, yb_unpadded=xb_unpadded,
+            )
+            cost_yy = _raw_cost(
+                yb, yb, bb, bb, ly_used, ly_used,
+                override_n_orig=m_orig if should_pad else None,
+                override_m_orig=m_orig if should_pad else None,
+                xb_unpadded=yb_unpadded, yb_unpadded=yb_unpadded,
+            )
             return cost_xy - 0.5 * cost_xx - 0.5 * cost_yy
 
         # --- Batched path ---
@@ -516,7 +639,7 @@ class SamplesLoss(torch.nn.Module):
             if self.potentials:
                 f_list = []
                 g_list = []
-                for xb, yb, ab, bb in zip(parsed.x, parsed.y, parsed.a, parsed.b):
+                for xb, yb, ab, bb in zip(x, y, a, b):
                     fb, gb = sinkhorn_flashstyle_symmetric(
                         xb, yb, ab, bb,
                         blur=self.blur,
@@ -531,14 +654,18 @@ class SamplesLoss(torch.nn.Module):
                         rho_x=self.rho_x,
                         rho_y=self.rho_y,
                         last_extrapolation=self.last_extrapolation,
-                        label_x=label_x,
-                        label_y=label_y,
+                        label_x=lx_used,
+                        label_y=ly_used,
                         label_cost_matrix=self.label_cost_matrix,
                         lambda_x=self.lambda_x,
                         lambda_y=self.lambda_y,
                         threshold=self.threshold,
                         check_every=self.inner_iterations,
+                        n_orig=n_orig if should_pad else None,
+                        m_orig=m_orig if should_pad else None,
                     )
+                    if should_pad:
+                        fb, gb = _trim_potentials(fb, gb, n_orig, m_orig)
                     f_list.append(fb)
                     g_list.append(gb)
                 f_b = torch.stack(f_list, dim=0).view(parsed.a_view_shape)
@@ -546,19 +673,22 @@ class SamplesLoss(torch.nn.Module):
                 return f_b, g_b
 
             costs = [
-                _cost(xb, yb, ab, bb)
-                for xb, yb, ab, bb in zip(parsed.x, parsed.y, parsed.a, parsed.b)
+                _cost(xb, yb, ab, bb,
+                      xb_unpadded=xb_orig, yb_unpadded=yb_orig)
+                for xb, yb, ab, bb, xb_orig, yb_orig in zip(
+                    x, y, a, b, parsed.x, parsed.y,
+                )
             ]
             return torch.stack(costs, dim=0)
 
         # --- Potentials path ---
         if self.potentials:
-            eps_list = tuple(self._eps_list_for_inputs(parsed.x, parsed.y))
+            eps_list = _precomputed_eps_list
             if self.backend == "alternating":
                 eps = float(eps_list[-1])
                 n_iters = len(eps_list)
                 f, g = sinkhorn_flashstyle_alternating(
-                    parsed.x, parsed.y, parsed.a, parsed.b,
+                    x, y, a, b,
                     eps=eps,
                     n_iters=n_iters,
                     cost_scale=self.cost_scale,
@@ -567,10 +697,12 @@ class SamplesLoss(torch.nn.Module):
                     autotune=self.autotune,
                     allow_tf32=self.allow_tf32,
                     use_exp2=self.use_exp2,
+                    n_orig=n_orig if should_pad else None,
+                    m_orig=m_orig if should_pad else None,
                 )
             else:
                 f, g = sinkhorn_flashstyle_symmetric(
-                    parsed.x, parsed.y, parsed.a, parsed.b,
+                    x, y, a, b,
                     blur=self.blur,
                     scaling=self.scaling,
                     use_epsilon_scaling=self.use_epsilon_scaling,
@@ -583,15 +715,19 @@ class SamplesLoss(torch.nn.Module):
                     rho_x=self.rho_x,
                     rho_y=self.rho_y,
                     last_extrapolation=self.last_extrapolation,
-                    label_x=label_x,
-                    label_y=label_y,
+                    label_x=lx_used,
+                    label_y=ly_used,
                     label_cost_matrix=self.label_cost_matrix,
                     lambda_x=self.lambda_x,
                     lambda_y=self.lambda_y,
                     threshold=self.threshold,
                     check_every=self.inner_iterations,
+                    n_orig=n_orig if should_pad else None,
+                    m_orig=m_orig if should_pad else None,
                 )
+            if should_pad:
+                f, g = _trim_potentials(f, g, n_orig, m_orig)
             return f.view(parsed.a_view_shape), g.view(parsed.b_view_shape)
 
         # --- Standard cost path ---
-        return _cost(parsed.x, parsed.y, parsed.a, parsed.b)
+        return _cost(x, y, a, b)

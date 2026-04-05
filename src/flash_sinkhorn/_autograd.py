@@ -74,6 +74,9 @@ class _SinkhornConfig:
     # Early stopping
     threshold: Optional[float]
     inner_iterations: int
+    # Adaptive padding: original unpadded sizes for masked early stopping
+    n_orig: Optional[int] = None
+    m_orig: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +337,8 @@ class _SinkhornCostFn(torch.autograd.Function):
                 autotune=config.autotune,
                 allow_tf32=config.allow_tf32,
                 use_exp2=config.use_exp2,
+                n_orig=config.n_orig,
+                m_orig=config.m_orig,
             )
             f_grad, g_grad = f_cost, g_cost
 
@@ -385,6 +390,8 @@ class _SinkhornCostFn(torch.autograd.Function):
                 lambda_y=config.lambda_y,
                 threshold=config.threshold,
                 check_every=config.inner_iterations,
+                n_orig=config.n_orig,
+                m_orig=config.m_orig,
             )
         else:
             f_cost, g_cost = sinkhorn_flashstyle_symmetric(
@@ -411,6 +418,8 @@ class _SinkhornCostFn(torch.autograd.Function):
                 lambda_y=config.lambda_y,
                 threshold=config.threshold,
                 check_every=config.inner_iterations,
+                n_orig=config.n_orig,
+                m_orig=config.m_orig,
             )
             f_grad, g_grad = f_cost, g_cost
 
