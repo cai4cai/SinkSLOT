@@ -126,6 +126,13 @@ Control marginal relaxation via `reach`, `reach_x`, and `reach_y` parameters. Th
 | `allow_tf32` | `bool` | `True` | Allow TF32 for matmuls. Set `False` for strict FP32. |
 | `use_exp2` | `bool` | `True` | Use exp2/log2 (FlashAttention-like, more stable). |
 
+#### Performance
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `half_cost` | `bool` | `False` | Use halved cost C(x,y) = ‖x−y‖²/2 (matches GeomLoss p=2 default). |
+| `pad_to_multiple` | `int` or `None` | `None` | Pad point clouds to next multiple of this value before Triton kernels. Eliminates JIT recompilation overhead when solving OT with varying (n, m) sizes. Must be a positive multiple of 32 (recommended: 128). |
+
 #### Kernel Tuning (Advanced)
 
 | Parameter | Type | Default | Description |
@@ -351,6 +358,36 @@ cost = loss(x, y)
 | 1e-3 | 16 ms | **3.4x** | 0.00% |
 | 1e-6 | 26 ms | **2.1x** | 0.00% |
 
+### Adaptive Padding (Variable-Size OT)
+
+```python
+# When solving OT many times with different (n, m), Triton JIT
+# recompilation can dominate runtime. Pad to fixed multiples to
+# share cached kernels across different problem sizes.
+loss = SamplesLoss(
+    "sinkhorn",
+    blur=0.1,
+    half_cost=True,
+    pad_to_multiple=128,  # Pad n and m to next multiple of 128
+)
+
+# All sizes now hit the same cached Triton kernels
+for x_i, y_i, a_i, b_i in variable_size_problems:
+    cost = loss(a_i, x_i, b_i, y_i)  # No recompilation!
+```
+
+**How it works:**
+- Appends zero-weight phantom points to reach the next multiple
+- Mathematically exact: zero-mass points do not affect the transport plan
+- Gradients flow correctly through `torch.cat` (autograd handles trimming)
+- Potentials (`potentials=True`) are automatically trimmed to original size
+- Early stopping convergence checks are masked to unpadded entries
+
+**Recommended values:**
+- `pad_to_multiple=128`: Best recompilation reduction (recommended)
+- `pad_to_multiple=64`: Lower memory overhead for small n
+- `pad_to_multiple=None`: No padding (default, backward compatible)
+
 ---
 
 ## Low-Level Kernel API
@@ -470,6 +507,7 @@ f, g = sinkhorn_potentials_sqeuclid(
 | Semi-unbalanced OT | Yes (`reach_x` ≠ `reach_y`) | No |
 | Debiased Sinkhorn | Yes (`debias=True`) | Yes |
 | Early stopping | Yes (`threshold`, 2-4x speedup) | No (epsilon-scaling only) |
+| Adaptive padding | Yes (`pad_to_multiple`, variable-size OT) | No |
 | Gradient | Analytic (no backprop) | Analytic (no backprop) |
 | HVP | Yes (CG solver) | No |
 | Memory | O(nd) streaming | O(n + m) symmetric or O(nm) tensorized |
