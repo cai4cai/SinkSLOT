@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="FlashSinkhorn.png" alt="FlashSinkhorn" width="100%">
+  <img src="https://raw.githubusercontent.com/ot-triton-lab/flash-sinkhorn/main/FlashSinkhorn.png" alt="FlashSinkhorn" width="100%">
 </p>
 
 # FlashSinkhorn
