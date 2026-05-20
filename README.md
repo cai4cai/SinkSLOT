@@ -263,10 +263,11 @@ Results are saved to `output/paper_benchmarks/forward/` and `output/paper_benchm
 If you find FlashSinkhorn useful in your research, please cite our paper:
 
 ```bibtex
-@article{ye2026flashsinkhorn,
-  title={FlashSinkhorn: IO-Aware Entropic Optimal Transport},
+@inproceedings{ye2026flashsinkhorn,
+  title={FlashSinkhorn: IO-Aware Entropic Optimal Transport on GPU},
   author={Ye, Felix X.-F. and Li, Xingjie and Yu, An and Chang, Ming-Ching and Chu, Linsong and Wertheimer, Davis},
-  journal={arXiv preprint arXiv:2602.03067},
+  booktitle={Proceedings of the 43rd International Conference on Machine Learning (ICML)},
+  note={Spotlight},
   year={2026},
   url={https://arxiv.org/abs/2602.03067}
 }
