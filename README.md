@@ -267,7 +267,7 @@ If you find FlashSinkhorn useful in your research, please cite our paper:
   title={FlashSinkhorn: IO-Aware Entropic Optimal Transport on GPU},
   author={Ye, Felix X.-F. and Li, Xingjie and Yu, An and Chang, Ming-Ching and Chu, Linsong and Wertheimer, Davis},
   booktitle={Proceedings of the 43rd International Conference on Machine Learning (ICML)},
-  note={Spotlight},
+  note={Oral Presentation},
   year={2026},
   url={https://arxiv.org/abs/2602.03067}
 }
