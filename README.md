@@ -12,6 +12,13 @@
 
 FlashSinkhorn computes Sinkhorn OT using FlashAttention-style streaming—**never materializing the n×m cost matrix**—enabling **O(nd) memory** instead of O(n²).
 
+## News
+
+- **2026-05** 🎉 FlashSinkhorn accepted to **ICML 2026 as an Oral** (top 0.7%, 168 of ~24k submissions).
+- **2026-04** Released [v0.3.3](https://github.com/ot-triton-lab/flash-sinkhorn/releases/tag/v0.3.3).
+- **2026-02** FlashSinkhorn (v0.3.0) released; preprint on [arXiv](https://arxiv.org/abs/2602.03067).
+- **2025-12** Initial release (v0.1.0).
+
 ## Features
 
 - **FlashSinkhorn kernels** — shifted-potential formulation inspired by FlashAttention. On A100 GPUs, achieves up to **32× forward-pass** and **161× end-to-end** speedups over state-of-the-art online baselines on point-cloud OT
