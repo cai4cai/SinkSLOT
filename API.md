@@ -439,7 +439,7 @@ result = apply_plan_mat_flashstyle(
 #### Potential Conversion
 
 ```python
-from flash_sinkhorn.kernels import (
+from flash_sinkhorn.kernels.sinkhorn_flashstyle_sqeuclid import (
     standard_to_shifted_potentials,
     shifted_to_standard_potentials,
 )
@@ -454,9 +454,11 @@ f, g = shifted_to_standard_potentials(f_shift, g_shift, x, y, cost_scale=0.5)
 ### GeomLoss-Style (Symmetric Updates) — Legacy
 
 ```python
-from flash_sinkhorn.kernels import sinkhorn_geomloss_symmetric_potentials_sqeuclid
+from flash_sinkhorn.kernels.sinkhorn_triton_geomloss_sqeuclid import (
+    sinkhorn_geomloss_online_potentials_sqeuclid,
+)
 
-f, g = sinkhorn_geomloss_symmetric_potentials_sqeuclid(
+f, g = sinkhorn_geomloss_online_potentials_sqeuclid(
     x, y, a, b,
     blur=0.1,
     scaling=0.5,
@@ -494,6 +496,55 @@ f, g = sinkhorn_potentials_sqeuclid(
     allow_tf32=False,
 )
 ```
+
+### C-Transform / Semi-Dual OT (Non-Entropic)
+
+The hard (non-entropic) Kantorovich c-transform and its differentiable semi-dual
+objective — building blocks for the Wasserstein Patch Prior (WPP) and other semi-dual
+OT methods. The `n×m` cost matrix is never materialized (O(nd) memory), and gradients
+are analytic via Danskin's theorem (no entropic smoothing).
+
+```python
+import torch
+from flash_sinkhorn import c_transform_fwd, c_transform_cost
+
+x   = torch.randn(4096, 64, device="cuda")   # source points  [n, d]
+y   = torch.randn(2048, 64, device="cuda")   # target points  [m, d]
+psi = torch.randn(2048,     device="cuda")   # dual potential [m]
+
+# --- (1) c_transform_fwd: raw values + argmin (non-differentiable) ---
+#   c_i   = min_j    [ cost_scale * ||x_i - y_j||² - psi_j ]
+#   idx_i = argmin_j [ cost_scale * ||x_i - y_j||² - psi_j ]
+c_values, argmin_idx = c_transform_fwd(
+    x, y, psi,
+    cost_scale=1.0,     # 1.0 -> ||x-y||²,  0.5 -> ||x-y||²/2 (GeomLoss convention)
+    allow_tf32=True,
+    autotune=True,
+)
+# c_values: [n] float32   argmin_idx: [n] int64
+
+# --- (2) c_transform_cost: differentiable semi-dual objective ---
+#   L(x, psi) = Σ_i a_i * c^psi(x_i) + Σ_j b_j * psi_j
+x   = x.requires_grad_(True)
+psi = psi.requires_grad_(True)
+loss = c_transform_cost(
+    x, y, psi,
+    cost_scale=1.0,
+    a=None,             # source weights [n], default uniform 1/n
+    b=None,             # target weights [m], default uniform 1/m
+)
+grad_x, grad_psi = torch.autograd.grad(loss, [x, psi])
+#   grad_x_i   = a_i * 2 * cost_scale * (x_i - y_{j*(i)})
+#   grad_psi_j = b_j - Σ_{i: j*(i)=j} a_i
+```
+
+**Notes**
+- Differentiable w.r.t. `x` and `psi` only; `y` must not require grad (raises `NotImplementedError`).
+- Weights `a`, `b` must not require grad.
+- Tie-breaking: smallest-`j` wins across tiles.
+- Raw kernel: `from flash_sinkhorn.kernels import c_transform_kernel` computes the inner
+  `min_j[-2*cost_scale*⟨x_i, y_j⟩ + bias_j]` over a precomputed `bias = cost_scale*||y||² - psi`;
+  `c_transform_fwd` wraps it and adds back `cost_scale*||x_i||²`.
 
 ---
 
@@ -574,7 +625,7 @@ Convert between conventions:
 from flash_sinkhorn.hvp import geomloss_to_ott_potentials
 f_hat, g_hat = geomloss_to_ott_potentials(f, g, a, b, eps=0.1)
 
-from flash_sinkhorn.kernels import standard_to_shifted_potentials, shifted_to_standard_potentials
+from flash_sinkhorn.kernels.sinkhorn_flashstyle_sqeuclid import standard_to_shifted_potentials, shifted_to_standard_potentials
 f_shift, g_shift = standard_to_shifted_potentials(f, g, x, y, cost_scale=0.5)
 f, g = shifted_to_standard_potentials(f_shift, g_shift, x, y, cost_scale=0.5)
 ```

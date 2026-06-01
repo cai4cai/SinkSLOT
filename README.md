@@ -26,6 +26,7 @@ FlashSinkhorn computes Sinkhorn OT using FlashAttention-style streaming—**neve
 - **GeomLoss-compatible API** (`SamplesLoss`)
 - **Analytic gradients** (no backprop through Sinkhorn iterations)
 - **Hessian-vector products** via streaming CG solver
+- **C-transform / semi-dual OT** — streaming hard-argmin Kantorovich c-transform with analytic Danskin gradients, for WPP and other semi-dual methods (`c_transform_fwd`, `c_transform_cost`)
 - **Half-cost support** (`half_cost=True`) for exact GeomLoss parity
 - **Unbalanced/semi-unbalanced OT** via `reach` parameter
 - **Large-D support** (d > 1024) with tiled gradient kernel
@@ -169,9 +170,11 @@ Low-level FlashSinkhorn API:
 from flash_sinkhorn.kernels import (
     sinkhorn_flashstyle_symmetric,     # Full symmetric solver
     sinkhorn_flashstyle_alternating,   # Full alternating solver
-    flashsinkhorn_symmetric_step,      # Single fused iteration
     apply_plan_vec_flashstyle,         # Transport plan @ vector (shifted potentials)
     apply_plan_mat_flashstyle,         # Transport plan @ matrix (shifted potentials)
+)
+from flash_sinkhorn.kernels.sinkhorn_flashstyle_sqeuclid import (
+    flashsinkhorn_symmetric_step,      # Single fused iteration
 )
 ```
 
@@ -216,6 +219,37 @@ from flash_sinkhorn.kernels.sinkhorn_triton_grad_sqeuclid import (
 )
 from flash_sinkhorn.hvp import hvp_x_sqeuclid_from_potentials
 ```
+
+### C-Transform / Semi-Dual OT
+
+The non-entropic Kantorovich **c-transform** (hard argmin) and its differentiable
+semi-dual objective — building blocks for the Wasserstein Patch Prior (WPP) and other
+semi-dual OT methods. Like the Sinkhorn kernels, the `n×m` cost matrix is never
+materialized (O(nd) memory), and gradients are analytic (no entropic smoothing).
+
+```python
+import torch
+from flash_sinkhorn import c_transform_fwd, c_transform_cost
+
+x = torch.randn(4096, 64, device="cuda")     # source points [n, d]
+y = torch.randn(2048, 64, device="cuda")     # target points [m, d]
+psi = torch.randn(2048, device="cuda")        # dual potential on y [m]
+
+# (1) Raw c-transform: values + argmin indices (non-differentiable)
+#     c_i = min_j [ cost_scale * ||x_i - y_j||² - psi_j ]
+c_values, argmin_idx = c_transform_fwd(x, y, psi, cost_scale=1.0)
+
+# (2) Differentiable semi-dual objective (Danskin's theorem):
+#     L(x, psi) = Σ_i a_i * c^psi(x_i) + Σ_j b_j * psi_j   (a, b default uniform)
+x = x.requires_grad_(True)
+psi = psi.requires_grad_(True)
+loss = c_transform_cost(x, y, psi, cost_scale=1.0)
+grad_x, grad_psi = torch.autograd.grad(loss, [x, psi])
+```
+
+Differentiable w.r.t. `x` and `psi` (not `y`). Use `cost_scale=0.5` for the
+`||x-y||²/2` (GeomLoss) convention. For the raw streaming kernel, see
+`flash_sinkhorn.kernels.c_transform_kernel`.
 
 ## Key Concepts
 
