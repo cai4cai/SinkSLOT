@@ -193,7 +193,6 @@ def _flashsinkhorn_lse_autotune_configs() -> Sequence[triton.Config]:
 
 @triton.heuristics({
     "EVEN_N": lambda args: args["m"] % args["BLOCK_N"] == 0,
-    "EVEN_M": lambda args: args["n"] % args["BLOCK_M"] == 0,
 })
 @triton.jit
 def _flashsinkhorn_lse_raw_kernel_impl(
@@ -222,7 +221,6 @@ def _flashsinkhorn_lse_raw_kernel_impl(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     EVEN_N: tl.constexpr,
-    EVEN_M: tl.constexpr,
 ):
     """Compute f̂_i = -ε · damping · LSE_j[coord_scale * x_i·y_j / ε + bias_j]
 
@@ -316,7 +314,6 @@ _flashsinkhorn_lse_raw_kernel_autotune = triton.autotune(
 
 @triton.heuristics({
     "EVEN_N": lambda args: args["m"] % args["BLOCK_N"] == 0,
-    "EVEN_M": lambda args: args["n"] % args["BLOCK_M"] == 0,
 })
 @triton.jit
 def _flashsinkhorn_lse_fused_kernel_impl(
@@ -345,7 +342,6 @@ def _flashsinkhorn_lse_fused_kernel_impl(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     EVEN_N: tl.constexpr,
-    EVEN_M: tl.constexpr,
 ):
     """Fused LSE kernel that computes bias in SRAM (matches symmetric kernel interface).
 
