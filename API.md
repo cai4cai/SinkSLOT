@@ -444,11 +444,16 @@ from flash_sinkhorn.kernels.sinkhorn_flashstyle_sqeuclid import (
     shifted_to_standard_potentials,
 )
 
+# The conversion helpers take the precomputed (scaled) squared norms, not x/y:
+cost_scale = 0.5  # 0.5 for half_cost (GeomLoss parity), else 1.0
+alpha = cost_scale * (x ** 2).sum(dim=1)  # [n]
+beta = cost_scale * (y ** 2).sum(dim=1)   # [m]
+
 # Convert GeomLoss potentials to shifted (for flashstyle apply kernels)
-f_shift, g_shift = standard_to_shifted_potentials(f, g, x, y, cost_scale=0.5)
+f_shift, g_shift = standard_to_shifted_potentials(f, g, alpha, beta)
 
 # Convert shifted back to GeomLoss standard
-f, g = shifted_to_standard_potentials(f_shift, g_shift, x, y, cost_scale=0.5)
+f, g = shifted_to_standard_potentials(f_shift, g_shift, alpha, beta)
 ```
 
 ### GeomLoss-Style (Symmetric Updates) — Legacy
@@ -626,8 +631,10 @@ from flash_sinkhorn.hvp import geomloss_to_ott_potentials
 f_hat, g_hat = geomloss_to_ott_potentials(f, g, a, b, eps=0.1)
 
 from flash_sinkhorn.kernels.sinkhorn_flashstyle_sqeuclid import standard_to_shifted_potentials, shifted_to_standard_potentials
-f_shift, g_shift = standard_to_shifted_potentials(f, g, x, y, cost_scale=0.5)
-f, g = shifted_to_standard_potentials(f_shift, g_shift, x, y, cost_scale=0.5)
+alpha = 0.5 * (x ** 2).sum(dim=1)  # cost_scale * ||x||²  (cost_scale=0.5 here for half_cost)
+beta = 0.5 * (y ** 2).sum(dim=1)   # cost_scale * ||y||²
+f_shift, g_shift = standard_to_shifted_potentials(f, g, alpha, beta)
+f, g = shifted_to_standard_potentials(f_shift, g_shift, alpha, beta)
 ```
 
 ### Numerical Stability
