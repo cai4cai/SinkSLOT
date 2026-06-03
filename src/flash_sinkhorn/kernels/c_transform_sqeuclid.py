@@ -94,12 +94,7 @@ def _default_block_sizes(n: int, m: int, d: int) -> Tuple[int, int, int, int]:
     else:
         block_n = 32
 
-    if d >= 64:
-        block_k = 32
-    elif d >= 32:
-        block_k = 16
-    else:
-        block_k = 16
+    block_k = 32 if d >= 64 else 16
 
     num_warps = 8 if n >= 128 else 4
     return block_m, block_n, block_k, num_warps
@@ -111,7 +106,6 @@ def _default_block_sizes(n: int, m: int, d: int) -> Tuple[int, int, int, int]:
 
 @triton.heuristics({
     "EVEN_N": lambda args: args["m"] % args["BLOCK_N"] == 0,
-    "EVEN_M": lambda args: args["n"] % args["BLOCK_M"] == 0,
 })
 @triton.jit
 def _c_transform_kernel_impl(
@@ -139,7 +133,6 @@ def _c_transform_kernel_impl(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     EVEN_N: tl.constexpr,
-    EVEN_M: tl.constexpr,
 ):
     """Streaming min + argmin over cost_scale*||x_i - y_j||² - ψ_j.
 
