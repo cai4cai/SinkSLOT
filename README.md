@@ -7,6 +7,7 @@
 [![PyPI](https://img.shields.io/pypi/v/flash-sinkhorn)](https://pypi.org/project/flash-sinkhorn/)
 [![Python](https://img.shields.io/pypi/pyversions/flash-sinkhorn)](https://pypi.org/project/flash-sinkhorn/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Hugging Face Kernels](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Kernels%20Hub-ffb000)](https://huggingface.co/kernels/yexf308/flash-sinkhorn)
 
 **Streaming Entropic Optimal Transport in PyTorch + Triton**
 
@@ -42,6 +43,11 @@ pip install -e ".[dev]"
 ```
 
 **Requirements:** PyTorch ≥2.5, Triton ≥3.1, CUDA 12.x
+
+Prefer not to install the package? FlashSinkhorn is also published on the
+[Hugging Face Kernels Hub](https://huggingface.co/kernels/yexf308/flash-sinkhorn)
+and can be loaded on the fly with `kernels.get_kernel` — no cloning or
+`pip install` required. See [Hugging Face Kernels Hub](#hugging-face-kernels-hub) below.
 
 ## Quick Start
 
@@ -312,13 +318,13 @@ kernel-builder build-and-upload
 ```
 
 The build configuration publishes version 1 to
-[`ot-triton-lab/flash-sinkhorn`](https://huggingface.co/kernels/ot-triton-lab/flash-sinkhorn).
+[`yexf308/flash-sinkhorn`](https://huggingface.co/kernels/yexf308/flash-sinkhorn).
 Consumers can load it without cloning this repository:
 
 ```python
 from kernels import get_kernel
 
-flash_sinkhorn = get_kernel("ot-triton-lab/flash-sinkhorn", version=1)
+flash_sinkhorn = get_kernel("yexf308/flash-sinkhorn", version=1)
 loss = flash_sinkhorn.SamplesLoss(loss="sinkhorn", blur=0.1, debias=True)
 ```
 
