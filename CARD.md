@@ -18,7 +18,7 @@ the full cost matrix.
 ```python
 from kernels import get_kernel
 
-flash_sinkhorn = get_kernel("ot-triton-lab/flash-sinkhorn", version=1)
+flash_sinkhorn = get_kernel("yexf308/flash-sinkhorn", version=1)
 loss = flash_sinkhorn.SamplesLoss(loss="sinkhorn", blur=0.1, debias=True)
 ```
 
