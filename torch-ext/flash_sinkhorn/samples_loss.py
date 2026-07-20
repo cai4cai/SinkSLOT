@@ -16,9 +16,9 @@ import torch
 
 import warnings
 
-from flash_sinkhorn._autograd import _SinkhornConfig, _SinkhornCostFn
-from flash_sinkhorn.kernels._common import epsilon_schedule, max_diameter
-from flash_sinkhorn.kernels.sinkhorn_flashstyle_sqeuclid import (
+from ._autograd import _SinkhornConfig, _SinkhornCostFn
+from .kernels._common import epsilon_schedule, max_diameter
+from .kernels.sinkhorn_flashstyle_sqeuclid import (
     sinkhorn_flashstyle_alternating,
     sinkhorn_flashstyle_symmetric,
 )

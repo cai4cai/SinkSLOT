@@ -19,8 +19,8 @@ from typing import Optional, Tuple
 
 import torch
 
-from flash_sinkhorn.cg import CGInfo, conjugate_gradient
-from flash_sinkhorn.kernels.sinkhorn_triton_apply_sqeuclid import (
+from .cg import CGInfo, conjugate_gradient
+from .kernels.sinkhorn_triton_apply_sqeuclid import (
     apply_plan_vec_flashstyle,
     apply_plan_mat_flashstyle,
 )
@@ -275,7 +275,7 @@ def implicit_grad_x(
             stacklevel=2,
         )
 
-    from flash_sinkhorn.kernels.sinkhorn_flashstyle_sqeuclid import (
+    from .kernels.sinkhorn_flashstyle_sqeuclid import (
         sinkhorn_flashstyle_symmetric,
         standard_to_shifted_potentials,
     )

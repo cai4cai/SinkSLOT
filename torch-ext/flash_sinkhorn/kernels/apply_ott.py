@@ -17,13 +17,13 @@ import torch
 import triton
 import triton.language as tl
 
-from flash_sinkhorn.kernels._common import (
+from ._common import (
     _apply_mat_autotune_configs,
     _cache_key_bucket,
     _default_block_sizes,
     _validate_device,
 )
-from flash_sinkhorn.kernels._triton_helpers import _tiled_dot
+from ._triton_helpers import _tiled_dot
 
 
 # =============================================================================
@@ -253,7 +253,7 @@ def apply_plan_vec_sqeuclid(
                   If False, use manual block sizes (useful for reproducible benchmarks).
     """
     # Lazy import to avoid circular dependency (apply_ott -> apply_flash)
-    from flash_sinkhorn.kernels.apply_flash import apply_plan_vec_flashstyle
+    from .apply_flash import apply_plan_vec_flashstyle
 
     import warnings
     warnings.warn(
@@ -368,7 +368,7 @@ def apply_plan_mat_sqeuclid(
                   If False, use manual block sizes (useful for reproducible benchmarks).
     """
     # Lazy import to avoid circular dependency (apply_ott -> apply_flash)
-    from flash_sinkhorn.kernels.apply_flash import apply_plan_mat_flashstyle
+    from .apply_flash import apply_plan_mat_flashstyle
 
     import warnings
     warnings.warn(

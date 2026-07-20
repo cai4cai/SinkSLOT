@@ -49,11 +49,11 @@ import torch
 import triton
 import triton.language as tl
 
-from flash_sinkhorn.kernels._common import (
+from ._common import (
     _cache_key_bucket,
     log_weights,
 )
-from flash_sinkhorn.kernels._triton_helpers import (
+from ._triton_helpers import (
     _final_lse,
     _online_softmax_rescale,
     _online_softmax_rescale_axis0,
@@ -1363,7 +1363,7 @@ def standard_to_shifted_potentials(
 # HIGH-LEVEL SOLVER FUNCTIONS — moved to flash_sinkhorn.sinkhorn_solvers
 # =============================================================================
 # Backwards-compatible re-exports: all existing import paths continue to work.
-from flash_sinkhorn.sinkhorn_solvers import (  # noqa: E402, F401
+from ..sinkhorn_solvers import (  # noqa: E402, F401
     sinkhorn_flashstyle_alternating,
     sinkhorn_flashstyle_symmetric,
 )

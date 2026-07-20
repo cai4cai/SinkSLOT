@@ -16,27 +16,27 @@ __all__ = [
     "inverse_hvp_x_sqeuclid_from_potentials",
 ]
 
-from flash_sinkhorn.cg import conjugate_gradient
-from flash_sinkhorn.kernels.sinkhorn_triton_cg_python_batched import (
+from .cg import conjugate_gradient
+from .kernels.sinkhorn_triton_cg_python_batched import (
     python_batched_cg_solve,
     compiled_cg_solve,
 )
-from flash_sinkhorn.kernels.sinkhorn_triton_cg_dense import (
+from .kernels.sinkhorn_triton_cg_dense import (
     hvp_dense_cg,
     DenseCgInfo,
 )
 # Import from _common for utility functions
-from flash_sinkhorn.kernels._common import log_weights
+from .kernels._common import log_weights
 # Import FlashSinkhorn for the solver (no longer using deprecated geomloss module)
-from flash_sinkhorn.kernels.sinkhorn_flashstyle_sqeuclid import (
+from .kernels.sinkhorn_flashstyle_sqeuclid import (
     sinkhorn_flashstyle_symmetric,
 )
-from flash_sinkhorn.kernels.sinkhorn_triton_apply_sqeuclid import (
+from .kernels.sinkhorn_triton_apply_sqeuclid import (
     apply_plan_vec_flashstyle,
     apply_plan_mat_flashstyle,
     mat5_sqeuclid,  # Keep OTT-style for now, converts internally
 )
-from flash_sinkhorn.kernels.sinkhorn_triton_apply_fused_sqeuclid import (
+from .kernels.sinkhorn_triton_apply_fused_sqeuclid import (
     fused_schur_matvec_sqeuclid,
 )
 
@@ -424,7 +424,7 @@ def hvp_x_sqeuclid_from_potentials(
                 atol=cg_atol,
                 use_compile=True,
             )
-            from flash_sinkhorn.cg import CGInfo
+            from .cg import CGInfo
             cg_info = CGInfo(
                 cg_converged=batched_info.cg_converged,
                 cg_iters=batched_info.cg_iters,
@@ -447,7 +447,7 @@ def hvp_x_sqeuclid_from_potentials(
                 x0=cg_x0,
             )
             # Convert PythonBatchedCgInfo to CGInfo-like object
-            from flash_sinkhorn.cg import CGInfo
+            from .cg import CGInfo
             cg_info = CGInfo(
                 cg_converged=batched_info.cg_converged,
                 cg_iters=batched_info.cg_iters,
