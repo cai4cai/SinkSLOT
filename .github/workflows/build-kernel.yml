@@ -1,0 +1,38 @@
+name: Build and publish kernel
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "torch-ext/**"
+      - "build.toml"
+      - "flake.nix"
+      - "flake.lock"
+      - "CARD.md"
+      - ".github/workflows/build-kernel.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and publish with Hugging Face Jobs
+        uses: huggingface/kernel-builder-job@main
+        with:
+          token: ${{ secrets.HF_TOKEN }}
+          namespace: yexf308
+          flavor: cpu-xl
+          timeout: "21600"
+          script: |
+            # HF Jobs enables shell tracing by default. Disable it before
+            # exporting the token so that it is never printed in job logs.
+            set +x
+            export HF_TOKEN="${{ secrets.HF_TOKEN }}"
+            export GIT_LFS_SKIP_SMUDGE=1
+            git clone "${{ github.server_url }}/${{ github.repository }}" kernel
+            cd kernel
+            git checkout "${{ github.sha }}"
+            nix run github:huggingface/kernels#kernel-builder -- build-and-upload \
+              --max-jobs 4 \
+              --cores 8

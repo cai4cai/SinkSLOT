@@ -25,7 +25,7 @@ import triton
 import triton.language as tl
 
 # Import the new FlashSinkhorn implementation
-from flash_sinkhorn.kernels.sinkhorn_flashstyle_sqeuclid import (
+from .sinkhorn_flashstyle_sqeuclid import (
     sinkhorn_flashstyle_alternating,
 )
 

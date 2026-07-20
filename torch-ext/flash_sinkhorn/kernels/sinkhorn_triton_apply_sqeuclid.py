@@ -6,12 +6,12 @@ After Phase C reorganization, the actual implementations live in:
 
 All existing imports from this module continue to work.
 """
-from flash_sinkhorn.kernels.apply_ott import (  # noqa: F401
+from .apply_ott import (  # noqa: F401
     apply_plan_vec_sqeuclid,
     apply_plan_mat_sqeuclid,
     mat5_sqeuclid,
 )
-from flash_sinkhorn.kernels.apply_flash import (  # noqa: F401
+from .apply_flash import (  # noqa: F401
     apply_plan_mat_flashstyle,
     apply_plan_vec_flashstyle,
 )

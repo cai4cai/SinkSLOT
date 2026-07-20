@@ -6,9 +6,9 @@ import torch
 import triton
 import triton.language as tl
 
-from flash_sinkhorn.kernels._common import _cache_key_bucket
-from flash_sinkhorn.kernels._triton_helpers import _tiled_dot
-from flash_sinkhorn.kernels._common import log_weights
+from ._common import _cache_key_bucket
+from ._triton_helpers import _tiled_dot
+from ._common import log_weights
 
 
 def _grad_autotune_configs() -> Sequence[triton.Config]:

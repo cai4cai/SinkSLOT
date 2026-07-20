@@ -23,9 +23,9 @@ import triton
 import triton.language as tl
 
 # Import the non-fused implementation for fallback
-from flash_sinkhorn.kernels._triton_helpers import _tiled_dot
-from flash_sinkhorn.kernels.sinkhorn_triton_apply_sqeuclid import apply_plan_vec_flashstyle
-from flash_sinkhorn.kernels.sinkhorn_flashstyle_sqeuclid import standard_to_shifted_potentials
+from ._triton_helpers import _tiled_dot
+from .sinkhorn_triton_apply_sqeuclid import apply_plan_vec_flashstyle
+from .sinkhorn_flashstyle_sqeuclid import standard_to_shifted_potentials
 
 
 def _get_max_resident_blocks(device: torch.device) -> int:

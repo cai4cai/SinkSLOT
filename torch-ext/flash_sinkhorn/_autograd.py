@@ -15,11 +15,11 @@ from typing import Optional, Tuple
 
 import torch
 
-from flash_sinkhorn.hvp import geomloss_to_ott_potentials, hvp_x_sqeuclid_from_potentials
-from flash_sinkhorn.kernels.sinkhorn_triton_grad_sqeuclid import (
+from .hvp import geomloss_to_ott_potentials, hvp_x_sqeuclid_from_potentials
+from .kernels.sinkhorn_triton_grad_sqeuclid import (
     sinkhorn_geomloss_online_grad_sqeuclid,
 )
-from flash_sinkhorn.kernels.sinkhorn_flashstyle_sqeuclid import (
+from .kernels.sinkhorn_flashstyle_sqeuclid import (
     sinkhorn_flashstyle_alternating,
     sinkhorn_flashstyle_symmetric,
 )

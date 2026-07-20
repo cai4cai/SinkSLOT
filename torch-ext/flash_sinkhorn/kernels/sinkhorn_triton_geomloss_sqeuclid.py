@@ -22,10 +22,10 @@ from typing import Optional, Sequence, Tuple, Union
 import torch
 
 # Import from _common for backward compatibility (re-export)
-from flash_sinkhorn.kernels._common import dampening, epsilon_schedule, log_weights, max_diameter
+from ._common import dampening, epsilon_schedule, log_weights, max_diameter
 
 # Import the new FlashSinkhorn implementation
-from flash_sinkhorn.kernels.sinkhorn_flashstyle_sqeuclid import (
+from .sinkhorn_flashstyle_sqeuclid import (
     sinkhorn_flashstyle_symmetric,
 )
 

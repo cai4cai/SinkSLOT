@@ -25,8 +25,8 @@ from typing import Optional
 
 import torch
 
-from flash_sinkhorn.kernels._common import _validate_device
-from flash_sinkhorn.kernels.c_transform_sqeuclid import c_transform_kernel
+from .kernels._common import _validate_device
+from .kernels.c_transform_sqeuclid import c_transform_kernel
 
 
 def c_transform_fwd(

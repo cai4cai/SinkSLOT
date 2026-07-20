@@ -299,6 +299,29 @@ python -m flash_sinkhorn.bench.bench_forward --sizes 10000 --dims 64 --no-geomlo
 
 Results are saved to `output/paper_benchmarks/forward/` and `output/paper_benchmarks/backward/`.
 
+## Hugging Face Kernels Hub
+
+FlashSinkhorn can be loaded as a JIT-compiled Triton kernel from the Hugging
+Face Kernels Hub. To build and publish the configured kernel project, install
+the [kernel builder](https://huggingface.co/docs/kernels/builder/build) and run:
+
+```bash
+kernel-builder check-config
+kernel-builder build-and-copy -L
+kernel-builder build-and-upload
+```
+
+The build configuration publishes version 1 to
+[`ot-triton-lab/flash-sinkhorn`](https://huggingface.co/kernels/ot-triton-lab/flash-sinkhorn).
+Consumers can load it without cloning this repository:
+
+```python
+from kernels import get_kernel
+
+flash_sinkhorn = get_kernel("ot-triton-lab/flash-sinkhorn", version=1)
+loss = flash_sinkhorn.SamplesLoss(loss="sinkhorn", blur=0.1, debias=True)
+```
+
 ## Citation
 
 If you find FlashSinkhorn useful in your research, please cite our paper:

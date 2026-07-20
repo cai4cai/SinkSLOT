@@ -18,8 +18,8 @@ from typing import Optional, Sequence, Tuple
 
 import torch
 
-from flash_sinkhorn.kernels._common import dampening, epsilon_schedule, log_weights, max_diameter
-from flash_sinkhorn.kernels.sinkhorn_flashstyle_sqeuclid import (
+from .kernels._common import dampening, epsilon_schedule, log_weights, max_diameter
+from .kernels.sinkhorn_flashstyle_sqeuclid import (
     flashsinkhorn_lse,
     flashsinkhorn_lse_fused,
     flashsinkhorn_symmetric_step,

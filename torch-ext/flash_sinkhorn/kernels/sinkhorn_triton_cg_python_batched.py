@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 import torch
 
-from flash_sinkhorn.kernels.sinkhorn_triton_apply_sqeuclid import apply_plan_vec_flashstyle
+from .sinkhorn_triton_apply_sqeuclid import apply_plan_vec_flashstyle
 
 
 @dataclass

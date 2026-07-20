@@ -32,11 +32,11 @@ import torch
 import triton
 import triton.language as tl
 
-from flash_sinkhorn.kernels._common import (
+from ._common import (
     _cache_key_bucket,
     _validate_device,
 )
-from flash_sinkhorn.kernels._triton_helpers import _tiled_dot
+from ._triton_helpers import _tiled_dot
 
 
 # =============================================================================
