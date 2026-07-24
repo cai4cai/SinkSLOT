@@ -1218,9 +1218,6 @@ def bench_sparsink(
             n_iters=n_iters, dataset=dataset, tf32=allow_tf32, sample_size=sample_size,
         )
 
-    # Their kernel is exp(-C/eps); ours carries a (x) b inside. The duals differ by
-    # exactly eps*(H(a) + H(b)), so add it back to compare against the shared reference.
-    convention_shift = -eps * float((a * log_a).sum() + (b * log_b).sum())
 
     reference = None
     if rmae_check:
@@ -1246,7 +1243,16 @@ def bench_sparsink(
         nnzs.append(rows.numel())
         empties += empty
         if empty == 0:
-            losses.append(float((a * f).sum() + (b * g).sum()) + convention_shift)
+            # Report the plan's KL-convention entropic value <T,C> + eps*KL(T || a (x) b),
+            # matching the shared reference and the other methods. Not the dual of the
+            # sparsified problem: the rescaling K/q is a cost shift C -> C + eps*log q, so
+            # that dual measures the shifted OT, carrying a spurious eps*<T, log q> term
+            # (see analysis.md). T = diag(u) K_tilde diag(v) on the sampled support.
+            log_T = log_values + (f[rows] + g[cols]) / eps
+            T = log_T.exp()
+            transport = (T * cost[rows, cols]).sum()
+            kl = (T * (log_T - log_a[rows] - log_b[cols])).sum()
+            losses.append(float(transport + eps * kl))
 
     rmae_pct = None
     rmae_std = None
