@@ -369,22 +369,53 @@ def seg_lse_online(indptr, colidx, lam, phi, psi, n, block=None, num_warps=None,
 # --------------------------------------------------------------------------
 
 
-def _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters):
-    """Fixed-iteration v5: alternating fused half-steps over prebuilt CSR/CSC.
+def _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
+            n_iters, stop=None):
+    """v5: alternating fused half-steps over prebuilt CSR/CSC.
 
     Potentials are absorbed (phi = f/eps, psi = g/eps): lam already carries
     log P^SOT - C/eps, so seg_lse_online with base=log_a returns log_a - LSE
     directly, which is the next phi. The excluded potential is zeroed on its own
-    axis (z_n, z_m). No stopping rule -- the benchmark compares equal work.
+    axis (z_n, z_m).
+
+    Returns (phi, psi, iters_run, converged, final_viol). With `stop` None or
+    stop.mode == "fixed" it runs exactly n_iters (converged/final_viol None).
+    With stop.mode in {"marginal", "potential"} it runs up to stop.max_iter and
+    stops on the total-variation marginal violation: after the column half-step
+    the column marginals are exactly b, so only the row marginal deviates, and
+    r = a * exp(phi - phi_next) where phi_next is the next row LSE -- one extra
+    LSE, no O(nnz) work. (potential mode falls back to the marginal check here;
+    the u/v-change rule is Spar-Sink's and is applied there.)
     """
     r_blk, r_w = launch_cfg(r_idx.numel(), n)
     c_blk, c_w = launch_cfg(c_idx.numel(), m)
     phi, psi = torch.zeros_like(log_a), torch.zeros_like(log_b)
     z_n, z_m = torch.zeros_like(log_a), torch.zeros_like(log_b)
-    for _ in range(n_iters):
+
+    if stop is None or getattr(stop, "mode", "fixed") == "fixed":
+        for _ in range(n_iters):
+            seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi)
+            seg_lse_online(c_ptr, c_idx, c_lam, z_m, phi, m, c_blk, c_w, base=log_b, out=psi)
+        return phi, psi, n_iters, None, None
+
+    a = log_a.exp()
+    phi_next = torch.empty_like(log_a)
+    it = 0
+    converged = False
+    viol = float("inf")
+    while it < stop.max_iter:
         seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi)
         seg_lse_online(c_ptr, c_idx, c_lam, z_m, phi, m, c_blk, c_w, base=log_b, out=psi)
-    return phi, psi
+        it += 1
+        if it % stop.check_every == 0 or it == stop.max_iter:
+            seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi_next)
+            row_marg = a * (phi - phi_next).exp()          # col marginal is exactly b
+            viol = float((row_marg - a).abs().sum())
+            mass = float(row_marg.sum())
+            if viol <= stop.tol and abs(mass - 1.0) <= stop.mass_tol:
+                converged = True
+                break
+    return phi, psi, it, converged, viol
 
 
 def build_support(x, y, a, b, eps, L, seed=0):
@@ -408,6 +439,6 @@ def run_sinkslot(x, y, a, b, eps, L, n_iters, seed=0):
     rows, cols, lam = build_support(x, y, a, b, eps, L, seed=seed)
     r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n)
     c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m)
-    phi, psi = _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
-                       a.log(), b.log(), n, m, n_iters)
+    phi, psi, _, _, _ = _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
+                                a.log(), b.log(), n, m, n_iters)
     return phi, psi, rows, cols, lam

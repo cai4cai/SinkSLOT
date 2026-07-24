@@ -165,6 +165,9 @@ class TimingResult:
     rmae_pct: Optional[float] = None  # |loss - ref| / ref * 100, vs converged entropic OT at same eps
     dataset: str = "gaussian"  # point-cloud distribution; see sample_point_cloud()
     tf32: bool = False  # TF32 matmuls enabled (10-bit mantissa) vs strict FP32
+    iters_run: Optional[int] = None    # iterations actually executed (= n_iters in fixed mode)
+    converged: Optional[bool] = None   # reached the stop threshold before max_iter (None in fixed)
+    final_viol: Optional[float] = None # TV marginal violation at stop (diagnostic)
     srot_slices: Optional[int] = None  # SROT only: number of random 1-D projections (L)
     setup_ms: Optional[float] = None  # per-method setup excluded from mean_ms (SROT plan, sparsink sampling)
     sample_size: Optional[int] = None  # Spar-Sink/Rand-Sink only: requested subsample size s
@@ -196,6 +199,7 @@ def timing_result_to_json(r: TimingResult) -> str:
         "gpu_memory_mb": r.gpu_memory_mb, "oom": r.oom,
         "n_iters": r.n_iters, "rmae_pct": r.rmae_pct, "dataset": r.dataset,
         "tf32": r.tf32, "srot_slices": r.srot_slices, "setup_ms": r.setup_ms,
+        "iters_run": r.iters_run, "converged": r.converged, "final_viol": r.final_viol,
         "sample_size": r.sample_size, "nnz": r.nnz,
         "empty_lines": r.empty_lines, "rmae_std": r.rmae_std,
         "valid_replicates": r.valid_replicates,
@@ -401,6 +405,41 @@ def _cached_entropic_ot_reference(
     return _ref_cost_cache[key]
 
 
+from dataclasses import dataclass as _dataclass
+
+
+@_dataclass
+class StopCfg:
+    """Early-stopping configuration threaded into the solver loops.
+
+    mode="fixed" runs exactly n_iters. mode="marginal" runs up to max_iter,
+    stopping when the total-variation marginal violation <= tol and |mass-1| <=
+    mass_tol. mode="potential" stops on ||du||_1+||dv||_1 <= tol (Spar-Sink's rule).
+    Checked every `check_every` iterations. `fixed(n)` is the no-stopping default.
+    """
+    mode: str = "fixed"
+    max_iter: int = 10000
+    tol: float = 1e-4
+    potential_tol: float = 1e-6
+    mass_tol: float = 1e-6
+    check_every: int = 10
+
+    @staticmethod
+    def fixed() -> "StopCfg":
+        return StopCfg(mode="fixed")
+
+
+def _marginal_tv(row_marg: torch.Tensor, col_marg: torch.Tensor,
+                 a: torch.Tensor, b: torch.Tensor) -> float:
+    """Total-variation marginal violation sum|P1 - a| + |P^T1 - b|.
+
+    L1/TV rather than max: it lives in [0, 4] regardless of n, so a fixed
+    threshold means the same relative accuracy at every problem size (an absolute
+    max threshold loosens as n grows, inverting cross-n timing).
+    """
+    return float((row_marg - a).abs().sum() + (col_marg - b).abs().sum())
+
+
 def _rmae_pct(loss_value: float, reference: float) -> float:
     """Relative mean absolute error, in percent, against the converged entropic solve."""
     return abs(loss_value - reference) / max(abs(reference), 1e-12) * 100.0
@@ -546,8 +585,8 @@ def build_sot_plan(
 
 def _srot_sinkhorn(
     cost: torch.Tensor, log_pi: torch.Tensor, log_a: torch.Tensor, log_b: torch.Tensor,
-    eps: float, n_iters: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    eps: float, n_iters: int, stop: "StopCfg" = None,
+):
     """`n_iters` log-domain Sinkhorn sweeps against the pi_SOT reference plan.
 
     Fixed point is pi = pi_SOT * exp((f (+) g - C)/eps) with marginals a, b, giving
@@ -555,15 +594,43 @@ def _srot_sinkhorn(
         f_i = eps * [log a_i - logsumexp_j(log pi_ij + (g_j - C_ij)/eps)]
         g_j = eps * [log b_j - logsumexp_i(log pi_ij + (f_i - C_ij)/eps)]
 
-    which reduces to the standard updates when pi_SOT = a (x) b. No early stopping: the
-    benchmark compares equal work across methods.
+    which reduces to the standard updates when pi_SOT = a (x) b.
+
+    Returns (f, g, iters_run, converged, final_viol). stop None / "fixed" runs
+    n_iters. "marginal"/"potential" run to stop.max_iter, stopping on the TV
+    marginal violation (row marginal = exp(f/eps + LSE_row(g)); col is exactly b).
     """
     f = torch.zeros_like(log_a)
     g = torch.zeros_like(log_b)
-    for _ in range(n_iters):
-        f = eps * (log_a - torch.logsumexp(log_pi + (g.unsqueeze(0) - cost) / eps, dim=1))
-        g = eps * (log_b - torch.logsumexp(log_pi + (f.unsqueeze(1) - cost) / eps, dim=0))
-    return f, g
+
+    def _row_lse(gv):
+        return torch.logsumexp(log_pi + (gv.unsqueeze(0) - cost) / eps, dim=1)
+
+    def _col_lse(fv):
+        return torch.logsumexp(log_pi + (fv.unsqueeze(1) - cost) / eps, dim=0)
+
+    if stop is None or getattr(stop, "mode", "fixed") == "fixed":
+        for _ in range(n_iters):
+            f = eps * (log_a - _row_lse(g))
+            g = eps * (log_b - _col_lse(f))
+        return f, g, n_iters, None, None
+
+    a = log_a.exp()
+    it = 0
+    converged = False
+    viol = float("inf")
+    while it < stop.max_iter:
+        f = eps * (log_a - _row_lse(g))
+        g = eps * (log_b - _col_lse(f))
+        it += 1
+        if it % stop.check_every == 0 or it == stop.max_iter:
+            row_marg = (f / eps + _row_lse(g)).exp()      # col marginal is exactly b
+            viol = float((row_marg - a).abs().sum())
+            mass = float(row_marg.sum())
+            if viol <= stop.tol and abs(mass - 1.0) <= stop.mass_tol:
+                converged = True
+                break
+    return f, g, it, converged, viol
 
 
 _srot_ref_cache: Dict[str, float] = {}
@@ -711,6 +778,7 @@ def bench_flashsinkhorn(
     allow_tf32: bool = False,
     rmae_check: bool = True,
     dataset: str = "gaussian",
+    stop: "StopCfg" = None,
 ) -> TimingResult:
     """Benchmark FlashSinkhorn with fixed iterations.
 
@@ -732,18 +800,22 @@ def bench_flashsinkhorn(
     a = a / a.sum()
     b = b / b.sum()
 
+    _stop = stop or StopCfg.fixed()
+    _fs_kwargs = {} if _stop.mode == "fixed" else {"threshold": _stop.tol, "inner_iterations": _stop.check_every}
+    _fs_iters = n_iters if _stop.mode == "fixed" else _stop.max_iter
     loss_fn = SamplesLoss(
         "sinkhorn",
         backend=backend,
         use_epsilon_scaling=False,
         eps=eps,
-        n_iters=n_iters,
+        n_iters=_fs_iters,
         debias=False,
         potentials=False,
         normalize=False,
         autotune=True,  # Enable Triton kernel tuning (~2-3s first call overhead)
         last_extrapolation=False,  # Match GeomLoss benchmark setting
         allow_tf32=allow_tf32,
+        **_fs_kwargs,
     )
 
     method_name = f"flash_{backend}"
@@ -781,6 +853,8 @@ def bench_flashsinkhorn(
         return TimingResult(
             method_name, n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False,
             n_iters=n_iters, rmae_pct=rmae_pct,
+            iters_run=(n_iters if _stop.mode == "fixed" else None),
+            converged=None,
         )
     except torch.cuda.OutOfMemoryError:
         return TimingResult(method_name, n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
@@ -975,6 +1049,7 @@ def bench_srot(
     rmae_check: bool = True,
     slices: int = 50,
     delta: float = 1e-8,
+    stop: "StopCfg" = None,
 ) -> TimingResult:
     """Benchmark SROT with fixed iterations.
 
@@ -1031,11 +1106,14 @@ def bench_srot(
             n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices,
         )
 
+    _stop = stop or StopCfg.fixed()
+
     def run():
-        _srot_sinkhorn(cost, log_pi, log_a, log_b, eps, n_iters)
+        _srot_sinkhorn(cost, log_pi, log_a, log_b, eps, n_iters, _stop)
 
     try:
-        f, g = _srot_sinkhorn(cost, log_pi, log_a, log_b, eps, n_iters)
+        f, g, iters_run, converged, final_viol = _srot_sinkhorn(
+            cost, log_pi, log_a, log_b, eps, n_iters, _stop)
         loss_value = float((a * f).sum() + (b * g).sum())
         torch.cuda.synchronize()
     except torch.cuda.OutOfMemoryError:
@@ -1065,6 +1143,7 @@ def bench_srot(
             "srot", n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False,
             n_iters=n_iters, rmae_pct=rmae_pct, dataset=dataset, tf32=allow_tf32,
             srot_slices=slices, setup_ms=setup_ms,
+            iters_run=iters_run, converged=converged, final_viol=final_viol,
         )
     except torch.cuda.OutOfMemoryError:
         return TimingResult(
@@ -1141,7 +1220,8 @@ def build_sparse_kernel(
 def _sparsink_sinkhorn(
     rows: torch.Tensor, cols: torch.Tensor, log_values: torch.Tensor,
     log_a: torch.Tensor, log_b: torch.Tensor, eps: float, n_iters: int,
-) -> Tuple[torch.Tensor, torch.Tensor, int]:
+    stop: "StopCfg" = None,
+):
     """`n_iters` log-domain sweeps over the sampled support only -- O(nnz) per sweep.
 
     Each half-update is a segmented logsumexp over the kept entries, grouped by row
@@ -1170,10 +1250,42 @@ def _sparsink_sinkhorn(
 
     empty = int(n - rows.unique().numel() + m - cols.unique().numel())
 
-    for _ in range(n_iters):
-        f = eps * (log_a - segmented_lse(log_values + g[cols] / eps, rows, n))
-        g = eps * (log_b - segmented_lse(log_values + f[rows] / eps, cols, m))
-    return f, g, empty
+    def _row_lse(gv):
+        return segmented_lse(log_values + gv[cols] / eps, rows, n)
+
+    def _col_lse(fv):
+        return segmented_lse(log_values + fv[rows] / eps, cols, m)
+
+    if stop is None or getattr(stop, "mode", "fixed") == "fixed":
+        for _ in range(n_iters):
+            f = eps * (log_a - _row_lse(g))
+            g = eps * (log_b - _col_lse(f))
+        return f, g, empty, n_iters, None, None
+
+    a = log_a.exp()
+    it = 0
+    converged = False
+    viol = float("inf")
+    while it < stop.max_iter:
+        f_prev, g_prev = f, g
+        f = eps * (log_a - _row_lse(g))
+        g = eps * (log_b - _col_lse(f))
+        it += 1
+        if it % stop.check_every == 0 or it == stop.max_iter:
+            row_marg = (f / eps + _row_lse(g)).exp()
+            viol = float((row_marg - a).abs().sum())
+            mass = float(row_marg.sum())
+            if stop.mode == "potential":
+                # Spar-Sink's rule: ||du||_1 + ||dv||_1 on the scaling vectors u=exp(f/eps).
+                du = float(((f / eps).exp() - (f_prev / eps).exp()).abs().sum())
+                dv = float(((g / eps).exp() - (g_prev / eps).exp()).abs().sum())
+                if du + dv <= stop.potential_tol:
+                    converged = True
+                    break
+            elif viol <= stop.tol and abs(mass - 1.0) <= stop.mass_tol:
+                converged = True
+                break
+    return f, g, empty, it, converged, viol
 
 
 def bench_sparsink(
@@ -1187,6 +1299,7 @@ def bench_sparsink(
     method: str = "spar_sink",
     sample_size: int = 2000,
     replicates: int = 10,
+    stop: "StopCfg" = None,
 ) -> TimingResult:
     """Benchmark Spar-Sink / Rand-Sink with fixed iterations.
 
@@ -1229,8 +1342,10 @@ def bench_sparsink(
     build_sparse_kernel(cost, a, b, eps, method=method, sample_size=sample_size, seed=0)
     torch.cuda.synchronize()
 
+    _stop = stop or StopCfg.fixed()
     losses, nnzs, empties = [], [], 0
     build_ms = []
+    iters_list, conv_list, viol_list = [], [], []
     for r in range(replicates):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -1240,9 +1355,15 @@ def bench_sparsink(
         torch.cuda.synchronize()
         build_ms.append((time.perf_counter() - t0) * 1e3)
 
-        f, g, empty = _sparsink_sinkhorn(rows, cols, log_values, log_a, log_b, eps, n_iters)
+        f, g, empty, iters_r, conv_r, viol_r = _sparsink_sinkhorn(
+            rows, cols, log_values, log_a, log_b, eps, n_iters, _stop)
         nnzs.append(rows.numel())
         empties += empty
+        if empty == 0:
+            iters_list.append(iters_r)
+            if conv_r is not None:
+                conv_list.append(conv_r)
+            viol_list.append(viol_r)
         if empty == 0:
             # Report the plan's KL-convention entropic value <T,C> + eps*KL(T || a (x) b),
             # matching the shared reference and the other methods. Not the dual of the
@@ -1268,7 +1389,7 @@ def bench_sparsink(
     )
 
     def run():
-        _sparsink_sinkhorn(rows, cols, log_values, log_a, log_b, eps, n_iters)
+        _sparsink_sinkhorn(rows, cols, log_values, log_a, log_b, eps, n_iters, _stop)
 
     try:
         run()
@@ -1283,6 +1404,9 @@ def bench_sparsink(
             n_iters=n_iters, rmae_pct=rmae_pct, rmae_std=rmae_std, dataset=dataset,
             tf32=allow_tf32, sample_size=sample_size,
             nnz=int(sum(nnzs) / len(nnzs)), empty_lines=empties,
+            iters_run=(int(sum(iters_list) / len(iters_list)) if iters_list else None),
+            converged=(all(conv_list) if conv_list else None),
+            final_viol=(sum(viol_list) / len(viol_list) if viol_list else None),
             valid_replicates=len(losses),
             setup_ms=float(sum(build_ms) / len(build_ms)),
         )
@@ -1354,6 +1478,7 @@ def bench_sinkslot(
     dataset: str = "gaussian",
     rmae_check: bool = True,
     slices: int = 50,
+    stop: "StopCfg" = None,
 ) -> TimingResult:
     """Benchmark SinkSLOT v5 (fused-Triton, gamma=0 sparse SROT).
 
@@ -1397,14 +1522,17 @@ def bench_sinkslot(
         return TimingResult("sinkslot", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
                             n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices)
 
-    def run():
-        _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters)
+    _stop = stop or StopCfg.fixed()
 
+    def run():
+        _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop)
+
+    phi, psi, iters_run, converged, final_viol = _run_v5(
+        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop)
     rmae_pct = None
     if rmae_check:
         reference = _cached_sinkslot_reference(n, m, d, eps, slices, rows, cols, log_S,
                                                cost, log_a, log_b, a, b, dataset=dataset)
-        phi, psi = _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters)
         loss_value = eps * float((a * phi).sum() + (b * psi).sum())
         rmae_pct = _rmae_pct(loss_value, reference)
 
@@ -1417,7 +1545,8 @@ def bench_sinkslot(
         return TimingResult("sinkslot", n, m, d, eps, mean, std, min_t, max_t, median,
                             gpu_memory_mb, oom=False, n_iters=n_iters, rmae_pct=rmae_pct,
                             dataset=dataset, tf32=allow_tf32, srot_slices=slices,
-                            nnz=int(rows.numel()), setup_ms=setup_ms)
+                            nnz=int(rows.numel()), setup_ms=setup_ms,
+                            iters_run=iters_run, converged=converged, final_viol=final_viol)
     except torch.cuda.OutOfMemoryError:
         return TimingResult("sinkslot", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
                             n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices)
@@ -1996,6 +2125,7 @@ def run_forward_benchmark(
     include_sparsink: bool = False,
     sparsink_s: Optional[List[int]] = None,
     sparsink_replicates: int = 10,
+    stop: "StopCfg" = None,
 ) -> List[TimingResult]:
     """Run forward pass benchmark.
 
@@ -2034,7 +2164,7 @@ def run_forward_benchmark(
             if include_flash_symmetric:
                 res = bench_flashsinkhorn(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, backend="symmetric",
-                    allow_tf32=allow_tf32, rmae_check=rmae_check, dataset=dataset,
+                    allow_tf32=allow_tf32, rmae_check=rmae_check, dataset=dataset, stop=stop,
                 )
                 res.dataset = dataset
                 res.tf32 = allow_tf32
@@ -2047,7 +2177,7 @@ def run_forward_benchmark(
             if include_flash_alternating:
                 res = bench_flashsinkhorn(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, backend="alternating",
-                    allow_tf32=allow_tf32, rmae_check=rmae_check, dataset=dataset,
+                    allow_tf32=allow_tf32, rmae_check=rmae_check, dataset=dataset, stop=stop,
                 )
                 res.dataset = dataset
                 res.tf32 = allow_tf32
@@ -2089,7 +2219,7 @@ def run_forward_benchmark(
                     res = bench_srot(
                         n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx,
                         allow_tf32=allow_tf32, dataset=dataset, rmae_check=rmae_check,
-                        slices=slices, delta=srot_delta,
+                        slices=slices, delta=srot_delta, stop=stop,
                     )
                     results.append(res)
                     if verbose:
@@ -2106,7 +2236,7 @@ def run_forward_benchmark(
                     res = bench_sinkslot(
                         n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx,
                         allow_tf32=allow_tf32, dataset=dataset, rmae_check=rmae_check,
-                        slices=slices,
+                        slices=slices, stop=stop,
                     )
                     results.append(res)
                     if verbose:
@@ -2123,7 +2253,7 @@ def run_forward_benchmark(
                             n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx,
                             allow_tf32=allow_tf32, dataset=dataset, rmae_check=rmae_check,
                             method=sparsink_method, sample_size=s_size,
-                            replicates=sparsink_replicates,
+                            replicates=sparsink_replicates, stop=stop,
                         )
                         results.append(res)
                         if verbose:
@@ -2169,7 +2299,8 @@ def run_forward_benchmark(
 FORWARD_CSV_COLUMNS = [
     "dataset", "tf32", "method", "n", "m", "d", "eps",
     "mean_ms", "std_ms", "min_ms", "max_ms", "median_ms", "gpu_memory_mb",
-    "oom", "n_iters", "rmae_pct", "rmae_std", "srot_slices", "sample_size",
+    "oom", "n_iters", "iters_run", "converged", "final_viol",
+    "rmae_pct", "rmae_std", "srot_slices", "sample_size",
     "nnz", "empty_lines", "valid_replicates", "setup_ms",
 ]
 
@@ -2193,6 +2324,9 @@ def _forward_row(r: TimingResult) -> dict:
         "dataset": r.dataset, "tf32": r.tf32, "method": r.method,
         "n": r.n, "m": r.m, "d": r.d,
         "eps": r.eps, "n_iters": r.n_iters,
+        "iters_run": r.iters_run if r.iters_run is not None else "N/A",
+        "converged": r.converged if r.converged is not None else "N/A",
+        "final_viol": f"{r.final_viol:.3e}" if r.final_viol is not None else "N/A",
         "srot_slices": r.srot_slices if r.srot_slices is not None else "N/A",
         "sample_size": r.sample_size if r.sample_size is not None else "N/A",
         "nnz": r.nnz if r.nnz is not None else "N/A",
@@ -2701,6 +2835,13 @@ def main() -> None:
     )
     parser.add_argument("--no-srot", action="store_true", help="Skip SROT benchmarks.")
     parser.add_argument("--no-sinkslot", action="store_true", help="Skip SinkSLOT benchmarks.")
+    parser.add_argument("--stop-mode", choices=("fixed", "marginal", "potential"), default="fixed",
+                        help="Early stopping: 'fixed' runs n_iters; 'marginal'/'potential' run to convergence.")
+    parser.add_argument("--max-iter", type=int, default=10000, help="Iteration cap in non-fixed stop modes.")
+    parser.add_argument("--stop-tol", type=float, default=1e-4, help="TV marginal-violation threshold.")
+    parser.add_argument("--potential-tol", type=float, default=1e-6, help="Spar-Sink ||du||+||dv|| threshold.")
+    parser.add_argument("--mass-tol", type=float, default=1e-6, help="|sum(P) - 1| threshold.")
+    parser.add_argument("--check-every", type=int, default=10, help="Iterations between convergence checks.")
     parser.add_argument(
         "--sinkslot-slices", type=str, default="50",
         help="Comma-separated L values (number of 1-D projections) for SinkSLOT.",
@@ -2778,6 +2919,9 @@ def main() -> None:
         help=argparse.SUPPRESS,  # Hidden: used with --single-size
     )
     args = parser.parse_args()
+    _stop_cfg = StopCfg(mode=args.stop_mode, max_iter=args.max_iter, tol=args.stop_tol,
+                        potential_tol=args.potential_tol, mass_tol=args.mass_tol,
+                        check_every=args.check_every)
 
     srot_slices = [int(v) for v in str(args.srot_slices).split(",") if v.strip()]
     sparsink_s = [int(v) for v in str(args.sparsink_s).split(",") if v.strip()]
@@ -2843,6 +2987,7 @@ def main() -> None:
             sparsink_replicates=args.sparsink_replicates,
             include_sinkslot=include_sinkslot,
             sinkslot_slices=sinkslot_slices,
+            stop=_stop_cfg,
         )
 
         # Emit JSON lines to stdout for the orchestrator to parse
@@ -2945,6 +3090,7 @@ def main() -> None:
     print(f"  References: GeomLoss={include_geomloss}, OTT-JAX={include_ott}")
     print(f"  RMAE check (converged entropic OT via POT): {not args.no_rmae_check}")
     print(f"  Dataset: {args.dataset}")
+    print(f"  Stop: {args.stop_mode}" + ("" if args.stop_mode=="fixed" else f" (tol={args.stop_tol:g}, max_iter={args.max_iter}, every={args.check_every})"))
     print(f"  Include tensorized: {args.tensorized} (max size: {args.max_dense_size})")
     if args.only is not None:
         print(f"  Only: {args.only}")
@@ -2986,6 +3132,7 @@ def main() -> None:
             sparsink_replicates=args.sparsink_replicates,
             include_sinkslot=include_sinkslot,
             sinkslot_slices=sinkslot_slices,
+            stop=_stop_cfg,
         )
 
     output_dir = Path(args.output_dir)
