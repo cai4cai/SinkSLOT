@@ -65,6 +65,8 @@ def raw_grid(path: Path) -> Tuple[List[str], List[str], List[List[str]], List[st
     has_n_iters = bool(rows) and "n_iters" in rows[0]
     has_rmae = bool(rows) and "rmae_pct" in rows[0]
     has_srot = bool(rows) and "srot_slices" in rows[0]
+    has_sparsink = bool(rows) and "sample_size" in rows[0]
+    has_setup = bool(rows) and "setup_ms" in rows[0]
 
     columns = ["Method", "n", "m", "d", "eps", "Mean (ms)", "Std (ms)", "Min (ms)", "Max (ms)", "GPU Mem (MB)", "OOM"]
     if has_tf32:
@@ -74,7 +76,11 @@ def raw_grid(path: Path) -> Tuple[List[str], List[str], List[List[str]], List[st
     if has_n_iters:
         columns.append("Iters")
     if has_srot:
-        columns += ["L", "Plan (ms)"]
+        columns.append("L")
+    if has_sparsink:
+        columns += ["s", "nnz"]
+    if has_setup:
+        columns.append("Setup (ms)")
     if has_rmae:
         columns.append("RMAE vs own optimum")
     justify = ["left" if c in ("Dataset", "TF32", "Method", "OOM") else "right" for c in columns]
@@ -116,7 +122,11 @@ def raw_grid(path: Path) -> Tuple[List[str], List[str], List[List[str]], List[st
                 cells.append(row.get("n_iters", ""))
             if has_srot:
                 cells.append(row.get("srot_slices", ""))
-                cells.append(_fmt_ms(row.get("plan_ms", "")))
+            if has_sparsink:
+                cells.append(row.get("sample_size", ""))
+                cells.append(row.get("nnz", ""))
+            if has_setup:
+                cells.append(_fmt_ms(row.get("setup_ms", "")))
             if has_rmae:
                 cells.append(_fmt_rmae(row.get("rmae_pct", "")))
             cells_out.append(cells)
