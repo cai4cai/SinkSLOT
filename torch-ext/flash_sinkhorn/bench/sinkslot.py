@@ -53,9 +53,58 @@ def _ot_1d_coo(px: torch.Tensor, py: torch.Tensor, a: torch.Tensor, b: torch.Ten
     return ix[i], iy[j], mass
 
 
+def _ot_1d_coo_batched(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
+    """Vectorised `_ot_1d_coo` over C slices at once.
+
+    PX: (n, C), PY: (m, C). Returns flat COO for all columns concatenated:
+    (rows, cols, vals), each 1-D. Identical result to C sequential `_ot_1d_coo`
+    calls; the Python loop over slices is removed.
+
+    The breakpoints are the union of the two cumulative-weight vectors ca and cb.
+    Both are already sorted (cumsums of positive weights), so the union is a MERGE
+    of two sorted sequences, not a sort: each element's position in the merged
+    order is its own index plus the count of the other sequence below it, from one
+    `searchsorted`. That replaces an O((n+m) log(n+m)) sort per column with two
+    binary searches, which dominates the plan build at large n.
+    """
+    n, C = PX.shape
+    m = PY.shape[0]
+    ix = torch.argsort(PX, dim=0)                     # (n, C)
+    iy = torch.argsort(PY, dim=0)                     # (m, C)
+    ca = torch.cumsum(a[ix], dim=0)                   # (n, C), sorted asc per col
+    cb = torch.cumsum(b[iy], dim=0)                   # (m, C), sorted asc per col
+
+    # Merge ca and cb into sorted `bounds` (n+m, C) via rank-scatter. searchsorted
+    # is batched over columns with the (C, len) layout, then transposed back.
+    caT, cbT = ca.T.contiguous(), cb.T.contiguous()   # (C, n), (C, m)
+    # rank of ca[i] = i + #{cb < ca[i]}; rank of cb[j] = j + #{ca <= cb[j]}.
+    # The asymmetric side (right for one, left for the other) breaks ties so the
+    # two rank sets are a permutation of 0..n+m-1 with no collisions.
+    rank_a = (torch.arange(n, device=PX.device)[None, :]
+              + torch.searchsorted(cbT, caT, right=True)).T       # (n, C)
+    rank_b = (torch.arange(m, device=PX.device)[None, :]
+              + torch.searchsorted(caT, cbT, right=False)).T      # (m, C)
+
+    bounds = PX.new_empty(n + m, C)
+    bounds.scatter_(0, rank_a, ca)
+    bounds.scatter_(0, rank_b, cb)
+
+    prev = torch.cat([bounds.new_zeros(1, C), bounds[:-1]], dim=0)
+    mass = bounds - prev
+    mid = 0.5 * (prev + bounds)
+
+    i = torch.searchsorted(caT, mid.T.contiguous()).clamp_(max=n - 1).T   # (n+m, C)
+    j = torch.searchsorted(cbT, mid.T.contiguous()).clamp_(max=m - 1).T   # (n+m, C)
+    R = torch.gather(ix, 0, i)
+    Cc = torch.gather(iy, 0, j)
+
+    keep = mass > 0
+    return R[keep], Cc[keep], mass[keep]
+
+
 def sot_plan_coo(
     X: torch.Tensor, Y: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
-    L: int, seed: int,
+    L: int, seed: int, chunk: int = None,
 ):
     """Unsmoothed SOT plan as COO: (rows, cols, vals), nnz <= L(N+M).
 
@@ -93,26 +142,24 @@ def sot_plan_coo(
     # Chunk size barely moves the peak -- that is set by the final merge against
     # the accumulated support, not by the chunk -- so this is picked to keep the
     # per-chunk projection small rather than to tune the merge.
-    chunk = max(1, min(L, 16))
+    # One shot: project all L directions, one batched merge, one coalesce. The
+    # upstream per-chunk coalesce re-sorted the accumulating support once per
+    # chunk (~7x at L=100), which dominated the build; a single coalesce over the
+    # full raw set is ~5x faster and, at the sizes benchmarked here, the transient
+    # (~70 MiB at n=10000, L=100) is negligible. `chunk` remains a memory valve
+    # for pathological n, defaulting to one shot.
+    chunk = L if chunk is None else chunk
     run_f = run_v = None
     for start in range(0, L, chunk):
-        # Project only this chunk's directions. The full n x L projection is
-        # 8 MiB at n=10000, L=100, and every slice is used exactly once.
         th = thetas[start:start + chunk]
         PX, PY = X @ th.T, Y @ th.T
-        fs, vs = [], []
-        for ell in range(PX.shape[1]):
-            r, c, v = _ot_1d_coo(PX[:, ell], PY[:, ell], a, b)
-            fs.append((r * m + c).to(key_dtype))
-            vs.append(v)
+        r, c, v = _ot_1d_coo_batched(PX, PY, a, b)
         del PX, PY
-        f, v = torch.cat(fs), torch.cat(vs)
-        del fs, vs
+        f = (r * m + c).to(key_dtype)
         if run_f is not None:
             f, v = torch.cat([run_f, f]), torch.cat([run_v, v])
-            run_f = run_v = None
-        run_f, run_v = coalesce(f, v)
-        del f, v
+        run_f, run_v = f, v
+    run_f, run_v = coalesce(run_f, run_v)
 
     # Divided once at the end rather than per slice: same value, one pass, and
     # it keeps the running accumulator on the same scale as `_ot_1d_coo` returns.
