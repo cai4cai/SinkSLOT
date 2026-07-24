@@ -99,19 +99,19 @@ class BenchConfig:
 
     which: str = "forward"
 
-    sizes: List[int] = field(default_factory=lambda: [256])
-    dims: List[int] = field(default_factory=lambda: [8])
+    sizes: List[int] = field(default_factory=lambda: [256, 512])
+    dims: List[int] = field(default_factory=lambda: [8, 16])
 
     eps_values: List[float] = field(default_factory=lambda: [0.1, 0.01, 0.001])
-    n_iters: int = 15
-    warmup: int = 3
-    rep: int = 5
+    n_iters: int = 50
+    warmup: int = 5
+    rep: int = 15
     tf32: bool = True
 
     datasets: List[str] = field(default_factory=lambda: ["gaussian", "8gaussians"])
 
     no_srot: bool = False
-    srot_slices: List[int] = field(default_factory=lambda: [5])
+    srot_slices: List[int] = field(default_factory=lambda: [10])
     srot_delta: float = 1e-8
 
     no_sinkslot: bool = False
@@ -119,7 +119,7 @@ class BenchConfig:
 
     no_sparsink: bool = False
     sparsink_s: List[int] = field(default_factory=lambda: [8000])
-    sparsink_replicates: int = 3
+    sparsink_replicates: int = 5
 
     no_ott: bool = True
     no_rmae_check: bool = False
