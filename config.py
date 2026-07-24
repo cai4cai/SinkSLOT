@@ -29,10 +29,17 @@ class BenchConfig:
     eps_values: List[float] = field(default_factory=lambda: [0.1, 0.01, 0.001])
     n_iters: int = 15
     warmup: int = 10
-    rep: int = 30
+    rep: int = 10
     tf32: bool = True
 
     datasets: List[str] = field(default_factory=lambda: ["gaussian", "8gaussians"])
+
+    # SROT (Sliced-Regularized OT) baseline. L is the number of random 1-D projections
+    # averaged into the reference plan; it is swept for SROT rows only, since no other
+    # method has such a parameter. Dense O(n*m), so it also respects max_dense_size.
+    no_srot: bool = False
+    srot_slices: List[int] = field(default_factory=lambda: [5, 10])
+    srot_delta: float = 1e-8
     no_ott: bool = True  # skip OTT-JAX (JAX/OTT often not installed locally)
     # RMAE reference: a converged Sinkhorn solve on GPU, one per (dataset, n, d, eps),
     # disk-cached across runs. Dominates sweep time at large n (~50s at n=4096).

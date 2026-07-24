@@ -28,6 +28,7 @@ from config import CONFIG, BenchConfig
 def build_command(
     cfg: BenchConfig, dataset: str, eps: float, output_dir: str,
     *, method: Optional[str] = None, size: Optional[int] = None, dim: Optional[int] = None,
+    slices: Optional[int] = None,
 ) -> List[str]:
     """Build the benchmark command for a single unit of work.
 
@@ -69,6 +70,13 @@ def build_command(
     only = method or cfg.only
     if only:
         cmd += ["--only", only]
+    # SROT flags only matter to an SROT run; omit them elsewhere to keep commands readable.
+    if cfg.no_srot:
+        cmd.append("--no-srot")
+    elif method in (None, "srot"):
+        srot_values = [slices] if slices is not None else cfg.srot_slices
+        cmd += ["--srot-slices", ",".join(str(v) for v in srot_values),
+                "--srot-delta", str(cfg.srot_delta)]
     if cfg.tensorized:
         cmd.append("--tensorized")
     if cfg.verify:
@@ -111,6 +119,8 @@ def _methods(cfg: BenchConfig) -> List[str]:
         names.append("flash_alternating")
     if not cfg.no_geomloss:
         names.append("geomloss")
+    if not cfg.no_srot:
+        names.append("srot")
     return names
 
 
@@ -124,12 +134,19 @@ def _units(cfg: BenchConfig):
     for dataset in cfg.datasets:
         for eps in cfg.eps_values:
             if not cfg.isolate:
-                yield dataset, eps, None, None, None
+                yield dataset, eps, None, None, None, None
                 continue
             for method in _methods(cfg):
                 for size in cfg.sizes:
                     for dim in cfg.dims:
-                        yield dataset, eps, method, size, dim
+                        if method == "srot":
+                            # L expands SROT rows only -- for every other method it is
+                            # meaningless, and sweeping it at the top level would just
+                            # duplicate identical rows.
+                            for slices in cfg.srot_slices:
+                                yield dataset, eps, method, size, dim, slices
+                        else:
+                            yield dataset, eps, method, size, dim, None
 
 
 def run_sweep(cfg: BenchConfig, base_dir: str, *, dry_run: bool, label: str = "") -> None:
@@ -138,12 +155,16 @@ def run_sweep(cfg: BenchConfig, base_dir: str, *, dry_run: bool, label: str = ""
     if not dry_run:
         _clear_csvs(cfg, base_dir)
     units = list(_units(cfg))
-    for i, (dataset, eps, method, size, dim) in enumerate(units, 1):
-        cmd = build_command(cfg, dataset, eps, base_dir, method=method, size=size, dim=dim)
+    for i, (dataset, eps, method, size, dim, slices) in enumerate(units, 1):
+        cmd = build_command(
+            cfg, dataset, eps, base_dir, method=method, size=size, dim=dim, slices=slices,
+        )
         printable = " ".join(cmd)
         tag = f"dataset={dataset} eps={eps}"
         if method is not None:
             tag += f" {method} n={size} d={dim}"
+        if slices is not None:
+            tag += f" L={slices}"
         if dry_run:
             print(f"[dry-run] {prefix}{tag} would execute:")
             print(f"  {printable}")
