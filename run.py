@@ -77,6 +77,13 @@ def build_command(
         srot_values = [slices] if slices is not None else cfg.srot_slices
         cmd += ["--srot-slices", ",".join(str(v) for v in srot_values),
                 "--srot-delta", str(cfg.srot_delta)]
+
+    if cfg.no_sparsink:
+        cmd.append("--no-sparsink")
+    elif method in (None, "spar_sink", "rand_sink"):
+        s_values = [slices] if slices is not None else cfg.sparsink_s
+        cmd += ["--sparsink-s", ",".join(str(v) for v in s_values),
+                "--sparsink-replicates", str(cfg.sparsink_replicates)]
     if cfg.tensorized:
         cmd.append("--tensorized")
     if cfg.verify:
@@ -121,6 +128,8 @@ def _methods(cfg: BenchConfig) -> List[str]:
         names.append("geomloss")
     if not cfg.no_srot:
         names.append("srot")
+    if not cfg.no_sparsink:
+        names += ["spar_sink", "rand_sink"]
     return names
 
 
@@ -139,7 +148,11 @@ def _units(cfg: BenchConfig):
             for method in _methods(cfg):
                 for size in cfg.sizes:
                     for dim in cfg.dims:
-                        if method == "srot":
+                        if method in ("spar_sink", "rand_sink"):
+                            # s expands these two only, like L for SROT.
+                            for s_size in cfg.sparsink_s:
+                                yield dataset, eps, method, size, dim, s_size
+                        elif method == "srot":
                             # L expands SROT rows only -- for every other method it is
                             # meaningless, and sweeping it at the top level would just
                             # duplicate identical rows.
@@ -165,7 +178,7 @@ def run_sweep(cfg: BenchConfig, base_dir: str, *, dry_run: bool, label: str = ""
         if method is not None:
             tag += f" {method} n={size} d={dim}"
         if slices is not None:
-            tag += f" L={slices}"
+            tag += (f" s={slices}" if method in ("spar_sink", "rand_sink") else f" L={slices}")
         if dry_run:
             print(f"[dry-run] {prefix}{tag} would execute:")
             print(f"  {printable}")

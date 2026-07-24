@@ -23,13 +23,13 @@ from typing import List, Optional
 class BenchConfig:
     which: str = "forward"  # "forward" or "backward"
 
-    sizes: List[int] = field(default_factory=lambda: [256, 512])
-    dims: List[int] = field(default_factory=lambda: [8, 16])
+    sizes: List[int] = field(default_factory=lambda: [256])
+    dims: List[int] = field(default_factory=lambda: [8])
 
     eps_values: List[float] = field(default_factory=lambda: [0.1, 0.01, 0.001])
     n_iters: int = 15
-    warmup: int = 10
-    rep: int = 10
+    warmup: int = 3
+    rep: int = 5
     tf32: bool = True
 
     datasets: List[str] = field(default_factory=lambda: ["gaussian", "8gaussians"])
@@ -38,8 +38,15 @@ class BenchConfig:
     # averaged into the reference plan; it is swept for SROT rows only, since no other
     # method has such a parameter. Dense O(n*m), so it also respects max_dense_size.
     no_srot: bool = False
-    srot_slices: List[int] = field(default_factory=lambda: [5, 10])
+    srot_slices: List[int] = field(default_factory=lambda: [5])
     srot_delta: float = 1e-8
+
+    # Spar-Sink / Rand-Sink baselines. s is the expected kernel subsample size, swept
+    # for these two methods only. Sampling is stochastic, so each row averages
+    # `sparsink_replicates` independent draws.
+    no_sparsink: bool = False
+    sparsink_s: List[int] = field(default_factory=lambda: [8000])
+    sparsink_replicates: int = 3
     no_ott: bool = True  # skip OTT-JAX (JAX/OTT often not installed locally)
     # RMAE reference: a converged Sinkhorn solve on GPU, one per (dataset, n, d, eps),
     # disk-cached across runs. Dominates sweep time at large n (~50s at n=4096).
