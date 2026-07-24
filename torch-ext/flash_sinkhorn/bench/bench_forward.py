@@ -67,6 +67,7 @@ import csv
 import ctypes
 import gc
 import json
+import math
 import subprocess
 import sys
 import time
@@ -74,7 +75,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 
@@ -160,6 +161,10 @@ class TimingResult:
     median_ms: float
     gpu_memory_mb: float  # whole-device GPU memory in use, as nvidia-smi reports it
     oom: bool
+    n_iters: int = 0
+    rmae_pct: Optional[float] = None  # |loss - ref| / ref * 100, vs converged entropic OT at same eps
+    dataset: str = "gaussian"  # point-cloud distribution; see sample_point_cloud()
+    tf32: bool = False  # TF32 matmuls enabled (10-bit mantissa) vs strict FP32
 
 
 @dataclass
@@ -182,6 +187,8 @@ def timing_result_to_json(r: TimingResult) -> str:
         "mean_ms": r.mean_ms, "std_ms": r.std_ms, "min_ms": r.min_ms,
         "max_ms": r.max_ms, "median_ms": r.median_ms,
         "gpu_memory_mb": r.gpu_memory_mb, "oom": r.oom,
+        "n_iters": r.n_iters, "rmae_pct": r.rmae_pct, "dataset": r.dataset,
+        "tf32": r.tf32,
     })
 
 
@@ -189,6 +196,204 @@ def timing_result_from_json(line: str) -> TimingResult:
     """Deserialize TimingResult from a JSON string."""
     d = json.loads(line)
     return TimingResult(**d)
+
+
+def compute_entropic_ot_reference_pot(
+    x: torch.Tensor, y: torch.Tensor, a: torch.Tensor, b: torch.Tensor, eps: float,
+    *, max_iter: int = 20000, tol: float = 1e-12,
+) -> float:
+    """Same reference as compute_entropic_ot_reference(), but via POT on CPU.
+
+    Independent third-party implementation, used only to cross-check the GPU solver
+    (see --check-reference). Far too slow for the benchmark itself: dense single-threaded
+    float64 NumPy costs ~41 ms/iteration at n=1024 and scales as n^2, i.e. hours per
+    solve at n=4096.
+
+    Uses method="sinkhorn_log"; the standard kernel form underflows to zero at eps=0.001.
+    """
+    import numpy as np
+    import ot
+
+    x_np = x.detach().cpu().numpy().astype("float64")
+    y_np = y.detach().cpu().numpy().astype("float64")
+    a_np = a.detach().cpu().numpy().astype("float64")
+    b_np = b.detach().cpu().numpy().astype("float64")
+    cost_matrix = ot.dist(x_np, y_np, metric="sqeuclidean")
+
+    _, log = ot.sinkhorn(
+        a_np, b_np, cost_matrix, eps,
+        method="sinkhorn_log", log=True, numItermax=max_iter, stopThr=tol,
+    )
+    f = eps * np.asarray(log["log_u"], dtype="float64").ravel()
+    g = eps * np.asarray(log["log_v"], dtype="float64").ravel()
+    return float(a_np @ f + b_np @ g)
+
+
+def eps_scaled(
+    eps: float, other: torch.Tensor, cost: torch.Tensor, log_w: torch.Tensor, *, dim: int,
+) -> torch.Tensor:
+    """eps * logsumexp over `dim` of ((other - cost)/eps + log_w), broadcast on `dim`."""
+    if dim == 1:
+        shifted = (other.unsqueeze(0) - cost) / eps + log_w.unsqueeze(0)
+    else:
+        shifted = (other.unsqueeze(1) - cost) / eps + log_w.unsqueeze(1)
+    return eps * torch.logsumexp(shifted, dim=dim)
+
+
+def compute_entropic_ot_reference(
+    x: torch.Tensor, y: torch.Tensor, a: torch.Tensor, b: torch.Tensor, eps: float,
+    *, max_iter: int = 20000, tol: float = 1e-6, check_every: int = 10,
+    verbose: bool = False,
+) -> float:
+    """Converged entropic-OT dual objective at regularization `eps`, on GPU in float64.
+
+    Reference for the RMAE metric used by Spar-Sink ("Importance Sparsification for
+    Sinkhorn Algorithm", Li/Yu/Li/Meng): each method is compared against a *converged*
+    Sinkhorn solve at the SAME eps, which isolates solver/iteration error from the
+    entropic bias inherent to regularizing at all.
+
+    Textbook dense log-domain Sinkhorn -- it materializes the full n x m cost matrix and
+    uses torch.logsumexp, sharing no code with the FlashSinkhorn kernels or GeomLoss's
+    KeOps path, so it remains an independent check on what those streaming kernels
+    should reproduce. Cross-checked against POT at small n via --check-reference.
+
+    Returns the dual objective <a, f> + <b, g>, NOT the primal transport cost <P, C>
+    that POT's `ot.sinkhorn2` reports. The benchmarked methods -- FlashSinkhorn's
+    SamplesLoss and GeomLoss's sinkhorn_cost(debias=False) -- both report the dual, and
+    the two differ by the entropic term: at n=64, eps=0.1 the dual is 0.938 against
+    <P, C> = 1.424. Comparing against sinkhorn2 would report a large "error" that is
+    purely a difference of functional.
+
+    Convergence is on max marginal violation |P.sum(dim=1) - a|, checked every
+    `check_every` iterations. Prints a warning if `max_iter` is hit without reaching
+    `tol`, since an unconverged reference would silently corrupt every rmae_pct.
+
+    Accuracy achieved in practice (n=256, d=8, float64): ~2e-10 marginal error at
+    eps >= 0.01, agreeing with POT to ~2e-8 relative. At eps=1e-3 it reaches ~6e-5,
+    where POT is *less* converged than this solver (our dual is higher, and the dual is
+    maximized), so rmae_pct at eps=1e-3 carries a reference uncertainty around 5e-4
+    relative -- still three orders below the percent-level signal being measured.
+    """
+    xd = x.detach().double()
+    yd = y.detach().double()
+    ad = a.detach().double()
+    bd = b.detach().double()
+
+    cost = torch.cdist(xd, yd, p=2) ** 2  # ||x - y||^2, matching half_cost=False
+    log_a = ad.log()
+    log_b = bd.log()
+
+    f = torch.zeros_like(ad)
+    g = torch.zeros_like(bd)
+
+    def sweep(stage_eps: float, iters: int) -> Tuple[float, int]:
+        """Alternating log-domain updates at `stage_eps`; returns (marginal err, iters used)."""
+        nonlocal f, g
+        stage_err = float("inf")
+        used = 0
+        for used in range(1, iters + 1):
+            f = -eps_scaled(stage_eps, g, cost, log_b, dim=1)
+            g = -eps_scaled(stage_eps, f, cost, log_a, dim=0)
+            if used % check_every == 0 or used == iters:
+                log_plan = (
+                    (f.unsqueeze(1) + g.unsqueeze(0) - cost) / stage_eps
+                    + log_a.unsqueeze(1) + log_b.unsqueeze(0)
+                )
+                row_marginal = torch.logsumexp(log_plan, dim=1).exp()
+                stage_err = (row_marginal - ad).abs().max().item()
+                if stage_err < tol:
+                    break
+        return stage_err, used
+
+    # Epsilon annealing: plain Sinkhorn at small eps converges far too slowly (marginal
+    # error stalls near 2.5e-4 at eps=1e-3 even after 20k iterations). Solving at a large
+    # eps and walking down, warm-starting (f, g) each stage, reaches a much tighter
+    # solution at the target eps in a fraction of the iterations.
+    schedule = []
+    stage_eps = max(eps, 1.0)
+    while stage_eps > eps * 1.001:
+        schedule.append(stage_eps)
+        stage_eps *= 0.5
+    schedule.append(eps)
+
+    it = 0
+    for stage_eps in schedule[:-1]:
+        _, used = sweep(stage_eps, max(check_every, 200))
+        it += used
+    err, used = sweep(eps, max_iter)
+    it += used
+
+    if err >= tol:
+        print(
+            f"  [warn] reference Sinkhorn hit max_iter={max_iter} at eps={eps:g} "
+            f"with marginal error {err:.3e} > tol={tol:g}; rmae_pct will be unreliable"
+        )
+    elif verbose:
+        print(f"  reference converged in {it} iters (marginal err {err:.3e})")
+
+    return float((ad * f).sum() + (bd * g).sum())
+
+
+_ref_cost_cache: Dict[str, float] = {}
+
+_REF_COST_CACHE_PATH = Path.home() / ".cache" / "flash_sinkhorn" / "entropic_ot_reference.json"
+
+# Bump whenever the benchmark's (x, y, a, b) generation changes -- seed, distribution,
+# or draw order -- or when the reference functional itself changes. Cached values from
+# an older scheme would silently produce wrong rmae_pct values, so a mismatch discards
+# the whole file.
+_REF_COST_CACHE_VERSION = 1
+
+
+def _load_ref_cost_cache() -> None:
+    """Populate the in-process cache from disk, ignoring stale or unreadable files."""
+    try:
+        blob = json.loads(_REF_COST_CACHE_PATH.read_text())
+    except (OSError, ValueError):
+        return
+    if blob.get("version") == _REF_COST_CACHE_VERSION:
+        _ref_cost_cache.update(blob.get("costs", {}))
+
+
+def _cached_entropic_ot_reference(
+    n: int, m: int, d: int, eps: float,
+    x: torch.Tensor, y: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
+    *, dataset: str = "gaussian",
+) -> float:
+    """Memoized entropic-OT reference, keyed by (dataset, n, m, d, eps), cached on disk.
+
+    All PyTorch-side benchmark functions seed with torch.manual_seed(0) before drawing
+    (x, y, a, b), so every method at a given (dataset, n, m, d) shares one point cloud
+    and can share one reference solve. Unlike the old exact-OT cost this DOES depend on
+    eps, so the sweep pays one CPU solve per (dataset, n, m, d, eps) rather than one per
+    point cloud. Cached across processes so re-runs and --compare-tf32 are free.
+
+    Keys are strings because JSON cannot key on tuples.
+    """
+    key = f"{dataset},{n},{m},{d},{eps:g}"
+    if key in _ref_cost_cache:
+        return _ref_cost_cache[key]
+
+    if not _ref_cost_cache:
+        _load_ref_cost_cache()
+        if key in _ref_cost_cache:
+            return _ref_cost_cache[key]
+
+    _ref_cost_cache[key] = compute_entropic_ot_reference(x, y, a, b, eps)
+    try:
+        _REF_COST_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _REF_COST_CACHE_PATH.write_text(json.dumps(
+            {"version": _REF_COST_CACHE_VERSION, "costs": _ref_cost_cache}
+        ))
+    except OSError as e:
+        # A read-only or full cache dir shouldn't fail the benchmark -- just recompute.
+        print(f"  [warn] could not write reference cache to {_REF_COST_CACHE_PATH}: {e}")
+    return _ref_cost_cache[key]
+
+
+def _rmae_pct(loss_value: float, reference: float) -> float:
+    """Relative mean absolute error, in percent, against the converged entropic solve."""
+    return abs(loss_value - reference) / max(abs(reference), 1e-12) * 100.0
 
 
 def gpu_memory_used_mb(device: torch.device) -> float:
@@ -298,6 +503,7 @@ def bench_flashsinkhorn(
     nvtx: bool = False,
     backend: str = "symmetric",
     allow_tf32: bool = False,
+    rmae_check: bool = True,
     dataset: str = "gaussian",
 ) -> TimingResult:
     """Benchmark FlashSinkhorn with fixed iterations.
@@ -305,6 +511,7 @@ def bench_flashsinkhorn(
     Args:
         backend: "symmetric" (GeomLoss-style) or "alternating" (OTT-JAX-style)
         allow_tf32: Enable TF32 for ~2x speedup (default: False for strict fp32)
+        dataset: "gaussian" (default) or "8gaussians"; see sample_point_cloud().
 
     Uses full squared Euclidean cost C(x,y) = ||x-y||² (half_cost=False default).
     Autotuning is enabled for best Triton kernel performance (~2-3s first call overhead).
@@ -339,17 +546,24 @@ def bench_flashsinkhorn(
         _ = loss_fn(a, x, b, y)
 
     try:
-        # Trigger Triton JIT compilation + autotuning here, outside the measurement
-        # window, so the one-time compile overhead isn't timed as steady state
-        # (matches the GeomLoss/KeOps benchmark's pre-JIT warmup below).
-        run()
+        # Trigger Triton JIT compilation + autotuning here, outside the peak-memory
+        # window, so the one-time compile overhead doesn't get counted as steady-state
+        # memory (matches the GeomLoss/KeOps benchmark's pre-JIT warmup below). Also
+        # captures the loss value once, for the RMAE check below.
+        loss_value = loss_fn(a, x, b, y).item()
         torch.cuda.synchronize()
     except torch.cuda.OutOfMemoryError:
-        return TimingResult(method_name, n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True)
+        return TimingResult(method_name, n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
+
+    rmae_pct = None
+    if rmae_check:
+        reference = _cached_entropic_ot_reference(n, m, d, eps, x, y, a, b, dataset=dataset)
+        rmae_pct = _rmae_pct(loss_value, reference)
 
     try:
+        # Measure peak memory during benchmark
         # Memory is reported as the whole-device figure nvidia-smi/nvitop would show
-        # (see gpu_memory_used_mb), read after the timed loop.
+        # (see gpu_memory_mb), read after the timed loop. No allocator bookkeeping.
         mean, std, min_t, max_t, median = bench_with_stats(
             run,
             warmup,
@@ -358,9 +572,12 @@ def bench_flashsinkhorn(
             nvtx_label=f"{method_name} n={n} d={d} eps={eps} iters={n_iters}",
         )
         gpu_memory_mb = gpu_memory_used_mb(device)
-        return TimingResult(method_name, n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False)
+        return TimingResult(
+            method_name, n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False,
+            n_iters=n_iters, rmae_pct=rmae_pct,
+        )
     except torch.cuda.OutOfMemoryError:
-        return TimingResult(method_name, n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True)
+        return TimingResult(method_name, n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
 
 
 # =============================================================================
@@ -372,6 +589,7 @@ def bench_geomloss_online(
     device: torch.device, warmup: int, rep: int,
     *,
     nvtx: bool = False,
+    rmae_check: bool = True,
     dataset: str = "gaussian",
 ) -> TimingResult:
     """Benchmark GeomLoss online (KeOps) with fixed iterations.
@@ -380,13 +598,14 @@ def bench_geomloss_online(
     `n_iters` iterations (matching FlashSinkhorn / OTT-JAX settings).
 
     Cost convention: SqDist(X,Y) = ||x-y||² (full squared Euclidean, matches FlashSinkhorn).
+    dataset: "gaussian" (default) or "8gaussians"; see sample_point_cloud().
     """
     try:
         from pykeops.torch import generic_logsumexp  # noqa: F401 - needed by lse_genred
     except ImportError:
-        return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True)
+        return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
 
-    from geomloss.sinkhorn_divergence import log_weights, sinkhorn_loop
+    from geomloss.sinkhorn_divergence import log_weights, sinkhorn_cost, sinkhorn_loop
     from geomloss.sinkhorn_samples import lse_genred, softmin_online
 
     torch.manual_seed(0)
@@ -408,14 +627,23 @@ def bench_geomloss_online(
     C_yx = (y, x.detach())
 
     try:
-        sinkhorn_loop(
+        _, _, g_ab, f_ba = sinkhorn_loop(
             softmin, a_log, b_log, None, None,
             C_xy, C_yx, eps_list,
             rho=None, debias=False, last_extrapolation=False,
         )
+        loss_value = sinkhorn_cost(
+            eps, None, a, b, None, None, g_ab, f_ba,
+            batch=False, debias=False, potentials=False,
+        ).item()
         torch.cuda.synchronize()
     except Exception:
-        return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True)
+        return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
+
+    rmae_pct = None
+    if rmae_check:
+        reference = _cached_entropic_ot_reference(n, m, d, eps, x, y, a, b, dataset=dataset)
+        rmae_pct = _rmae_pct(loss_value, reference)
 
     def run():
         sinkhorn_loop(
@@ -425,8 +653,9 @@ def bench_geomloss_online(
         )
 
     try:
+        # Measure peak memory during benchmark
         # Memory is reported as the whole-device figure nvidia-smi/nvitop would show
-        # (see gpu_memory_used_mb), read after the timed loop.
+        # (see gpu_memory_mb), read after the timed loop. No allocator bookkeeping.
         mean, std, min_t, max_t, median = bench_with_stats(
             run,
             warmup,
@@ -435,9 +664,12 @@ def bench_geomloss_online(
             nvtx_label=f"geomloss_online n={n} d={d} eps={eps} iters={n_iters}",
         )
         gpu_memory_mb = gpu_memory_used_mb(device)
-        return TimingResult("geomloss_online", n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False)
+        return TimingResult(
+            "geomloss_online", n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False,
+            n_iters=n_iters, rmae_pct=rmae_pct,
+        )
     except torch.cuda.OutOfMemoryError:
-        return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True)
+        return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
 
 
 def bench_geomloss_tensorized(
@@ -445,14 +677,16 @@ def bench_geomloss_tensorized(
     device: torch.device, warmup: int, rep: int,
     *,
     nvtx: bool = False,
+    rmae_check: bool = True,
     dataset: str = "gaussian",
 ) -> TimingResult:
     """Benchmark GeomLoss tensorized (dense) with fixed iterations.
 
     Materializes O(n²) cost matrix in GPU memory.
     Cost convention: ||x-y||² (full squared Euclidean, matches FlashSinkhorn).
+    dataset: "gaussian" (default) or "8gaussians"; see sample_point_cloud().
     """
-    from geomloss.sinkhorn_divergence import log_weights, sinkhorn_loop
+    from geomloss.sinkhorn_divergence import log_weights, sinkhorn_cost, sinkhorn_loop
     from geomloss.sinkhorn_samples import softmin_tensorized
 
     torch.manual_seed(0)
@@ -479,6 +713,25 @@ def bench_geomloss_tensorized(
 
     softmin = partial(softmin_tensorized)
 
+    try:
+        _, _, g_ab, f_ba = sinkhorn_loop(
+            softmin, a_log, b_log, None, None,
+            C_xy, C_yx, eps_list,
+            rho=None, debias=False, last_extrapolation=False,
+        )
+        loss_value = sinkhorn_cost(
+            eps, None, a.unsqueeze(0), b.unsqueeze(0), None, None, g_ab, f_ba,
+            batch=True, debias=False, potentials=False,
+        ).item()
+        torch.cuda.synchronize()
+    except torch.cuda.OutOfMemoryError:
+        return TimingResult("geomloss_tensorized", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
+
+    rmae_pct = None
+    if rmae_check:
+        reference = _cached_entropic_ot_reference(n, m, d, eps, x, y, a, b, dataset=dataset)
+        rmae_pct = _rmae_pct(loss_value, reference)
+
     def run():
         sinkhorn_loop(
             softmin, a_log, b_log, None, None,
@@ -487,8 +740,9 @@ def bench_geomloss_tensorized(
         )
 
     try:
+        # Measure peak memory during benchmark
         # Memory is reported as the whole-device figure nvidia-smi/nvitop would show
-        # (see gpu_memory_used_mb), read after the timed loop.
+        # (see gpu_memory_mb), read after the timed loop. No allocator bookkeeping.
         mean, std, min_t, max_t, median = bench_with_stats(
             run,
             warmup,
@@ -497,9 +751,12 @@ def bench_geomloss_tensorized(
             nvtx_label=f"geomloss_tensorized n={n} d={d} eps={eps} iters={n_iters}",
         )
         gpu_memory_mb = gpu_memory_used_mb(device)
-        return TimingResult("geomloss_tensorized", n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False)
+        return TimingResult(
+            "geomloss_tensorized", n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False,
+            n_iters=n_iters, rmae_pct=rmae_pct,
+        )
     except torch.cuda.OutOfMemoryError:
-        return TimingResult("geomloss_tensorized", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True)
+        return TimingResult("geomloss_tensorized", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
 
 
 # =============================================================================
@@ -526,6 +783,11 @@ def bench_ott_jax_online(
     JAX lacks a CUDA event API, so wall-clock includes minor Python/dispatch overhead (~1-5%).
 
     Memory: JAX doesn't expose easy peak memory tracking like PyTorch, so we report 0.
+
+    RMAE: not computed here. This function draws its own point cloud with JAX's
+    RNG (jax.random.PRNGKey), which does not match the PyTorch-seeded (x, y, a, b) used
+    by the flash/GeomLoss benchmarks, so there's no shared exact-OT reference to compare
+    against without duplicating a separate POT solve for this data.
     """
     try:
         import jax
@@ -574,7 +836,7 @@ def bench_ott_jax_online(
         for _ in range(warmup):
             run()
     except Exception:
-        return TimingResult("ott_jax_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True)
+        return TimingResult("ott_jax_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
 
     # Note: Using wall-clock time because JAX lacks CUDA event API.
     # block_until_ready() ensures GPU sync, but includes Python overhead.
@@ -599,6 +861,7 @@ def bench_ott_jax_online(
         times_t.median().item(),
         0,  # gpu_memory_mb not measured for JAX
         oom=False,
+        n_iters=n_iters,
     )
 
 
@@ -618,6 +881,9 @@ def bench_ott_jax_dense(
     Cost convention: PointCloud default = ||x-y||² (matches FlashSinkhorn).
 
     Timing/Memory: Same limitations as online mode (wall-clock, no memory tracking).
+
+    RMAE: not computed here; see bench_ott_jax_online for why (different RNG
+    than the PyTorch-seeded flash/GeomLoss point cloud).
     """
     try:
         import jax
@@ -667,7 +933,7 @@ def bench_ott_jax_dense(
         for _ in range(warmup):
             run()
     except Exception:
-        return TimingResult("ott_jax_dense", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True)
+        return TimingResult("ott_jax_dense", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
 
     # Note: Using wall-clock time because JAX lacks CUDA event API.
     with _nvtx_range(
@@ -691,6 +957,7 @@ def bench_ott_jax_dense(
         times_t.median().item(),
         0,  # gpu_memory_mb not measured for JAX
         oom=False,
+        n_iters=n_iters,
     )
 
 
@@ -1024,6 +1291,7 @@ def run_forward_benchmark(
     verbose: bool = True,
     nvtx: bool = False,
     allow_tf32: bool = False,
+    rmae_check: bool = True,
     dataset: str = "gaussian",
 ) -> List[TimingResult]:
     """Run forward pass benchmark.
@@ -1034,6 +1302,14 @@ def run_forward_benchmark(
     FlashSinkhorn backends:
     - flash_symmetric: GeomLoss-style symmetric updates (compare with GeomLoss)
     - flash_alternating: OTT-JAX-style alternating updates (compare with OTT-JAX)
+
+    rmae_check: if True, also run a converged Sinkhorn solve via POT (CPU, once per
+    (dataset, n, d, eps), cached) and record each PyTorch-side method's relative error
+    against it -- the RMAE metric from the Spar-Sink paper. Not computed for OTT-JAX
+    (different RNG; see bench_ott_jax_online).
+
+    dataset: "gaussian" (default) or "8gaussians"; see sample_point_cloud(). Not
+    applied to OTT-JAX, which draws its own point cloud via JAX's RNG.
     """
     results = []
 
@@ -1055,8 +1331,10 @@ def run_forward_benchmark(
             if include_flash_symmetric:
                 res = bench_flashsinkhorn(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, backend="symmetric",
-                    allow_tf32=allow_tf32, dataset=dataset,
+                    allow_tf32=allow_tf32, rmae_check=rmae_check, dataset=dataset,
                 )
+                res.dataset = dataset
+                res.tf32 = allow_tf32
                 results.append(res)
                 if verbose:
                     status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
@@ -1066,8 +1344,10 @@ def run_forward_benchmark(
             if include_flash_alternating:
                 res = bench_flashsinkhorn(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, backend="alternating",
-                    allow_tf32=allow_tf32, dataset=dataset,
+                    allow_tf32=allow_tf32, rmae_check=rmae_check, dataset=dataset,
                 )
+                res.dataset = dataset
+                res.tf32 = allow_tf32
                 results.append(res)
                 if verbose:
                     status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
@@ -1076,8 +1356,11 @@ def run_forward_benchmark(
             # GeomLoss online (KeOps)
             if include_geomloss:
                 res = bench_geomloss_online(
-                    n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, dataset=dataset,
+                    n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, rmae_check=rmae_check,
+                    dataset=dataset,
                 )
+                res.dataset = dataset
+                res.tf32 = allow_tf32
                 results.append(res)
                 if verbose:
                     status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
@@ -1086,8 +1369,11 @@ def run_forward_benchmark(
             # GeomLoss tensorized (dense, small sizes only)
             if include_geomloss and include_tensorized and n <= max_dense_size:
                 res = bench_geomloss_tensorized(
-                    n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, dataset=dataset,
+                    n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, rmae_check=rmae_check,
+                    dataset=dataset,
                 )
+                res.dataset = dataset
+                res.tf32 = allow_tf32
                 results.append(res)
                 if verbose:
                     status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
@@ -1099,6 +1385,7 @@ def run_forward_benchmark(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, allow_tf32=allow_tf32
                 )
                 if res:
+                    res.tf32 = allow_tf32
                     results.append(res)
                     if verbose:
                         status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
@@ -1112,6 +1399,7 @@ def run_forward_benchmark(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, allow_tf32=allow_tf32
                 )
                 if res:
+                    res.tf32 = allow_tf32
                     results.append(res)
                     if verbose:
                         status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
@@ -1123,87 +1411,160 @@ def run_forward_benchmark(
     return results
 
 
+FORWARD_CSV_COLUMNS = [
+    "dataset", "tf32", "method", "n", "m", "d", "eps",
+    "mean_ms", "std_ms", "min_ms", "max_ms", "median_ms", "gpu_memory_mb",
+    "oom", "n_iters", "rmae_pct",
+]
+
+
+def _forward_row(r: TimingResult) -> dict:
+    """Render one result as a CSV row dict."""
+    if r.oom or r.mean_ms != r.mean_ms:
+        timings = {
+            "mean_ms": "OOM", "std_ms": "", "min_ms": "", "max_ms": "",
+            "median_ms": "", "gpu_memory_mb": "", "oom": True, "rmae_pct": "",
+        }
+    else:
+        timings = {
+            "mean_ms": f"{r.mean_ms:.4f}", "std_ms": f"{r.std_ms:.4f}",
+            "min_ms": f"{r.min_ms:.4f}", "max_ms": f"{r.max_ms:.4f}",
+            "median_ms": f"{r.median_ms:.4f}", "gpu_memory_mb": f"{r.gpu_memory_mb:.1f}",
+            "oom": False,
+            "rmae_pct": f"{r.rmae_pct:.4f}" if r.rmae_pct is not None else "N/A",
+        }
+    return {
+        "dataset": r.dataset, "tf32": r.tf32, "method": r.method,
+        "n": r.n, "m": r.m, "d": r.d,
+        "eps": r.eps, "n_iters": r.n_iters, **timings,
+    }
+
+
+def _forward_key(row: dict) -> tuple:
+    """Unique row identity.
+
+    Includes tf32 so a strict-FP32 run and a TF32 run of the same configuration
+    are distinct rows rather than one silently overwriting the other.
+    """
+    return (
+        row["dataset"], str(row["tf32"]), row["method"], str(row["n"]), str(row["m"]),
+        str(row["d"]), str(row["eps"]), str(row["n_iters"]),
+    )
+
+
 def save_results_csv(results: List[TimingResult], output_path: Path) -> None:
-    """Save all results to CSV."""
+    """Save all results into a single CSV, merging with any existing rows.
+
+    Every run of the benchmark -- across datasets, eps values and dims -- appends
+    into one table, with dataset/eps/d/n as ordinary columns. Rows are keyed by
+    _forward_key(), so re-running a configuration overwrites its own row rather
+    than duplicating it. Delete the file to start clean.
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(output_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "method", "n", "m", "d", "eps",
-            "mean_ms", "std_ms", "min_ms", "max_ms", "median_ms", "gpu_memory_mb", "oom"
-        ])
-        for r in results:
-            if r.oom or r.mean_ms != r.mean_ms:
-                writer.writerow([r.method, r.n, r.m, r.d, r.eps, "OOM", "", "", "", "", "", True])
-            else:
-                writer.writerow([
-                    r.method, r.n, r.m, r.d, r.eps,
-                    f"{r.mean_ms:.4f}", f"{r.std_ms:.4f}",
-                    f"{r.min_ms:.4f}", f"{r.max_ms:.4f}",
-                    f"{r.median_ms:.4f}", f"{r.gpu_memory_mb:.1f}", False
-                ])
+    merged: Dict[tuple, dict] = {}
+    if output_path.exists():
+        with open(output_path, newline="") as f:
+            for row in csv.DictReader(f):
+                if all(col in row for col in FORWARD_CSV_COLUMNS):
+                    merged[_forward_key(row)] = row
+        print(f"  Loaded {len(merged)} existing rows from {output_path}")
 
-    print(f"\nSaved results to {output_path}")
+    for r in results:
+        row = _forward_row(r)
+        merged[_forward_key(row)] = row
+
+    def sort_key(row: dict) -> tuple:
+        return (
+            row["dataset"], str(row["tf32"]), int(row["d"]), float(row["eps"]),
+            int(row["n"]), row["method"],
+        )
+
+    with open(output_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=FORWARD_CSV_COLUMNS)
+        writer.writeheader()
+        for row in sorted(merged.values(), key=sort_key):
+            writer.writerow(row)
+
+    print(f"\nSaved {len(merged)} results to {output_path}")
+
+
+SPEEDUP_CSV_COLUMNS = [
+    "dataset", "tf32", "d", "eps", "n",
+    "flash_symmetric_ms", "flash_alternating_ms", "keops_ms", "ott_jax_ms",
+    "online_vs_keops", "ott_vs_ott_jax",
+]
 
 
 def save_speedup_csv(results: List[TimingResult], output_path: Path) -> None:
-    """Save speedup table per dimension with both backends."""
+    """Save one speedup table covering every dataset/dim/eps/size, merging with existing rows.
+
+    dataset, tf32, d and eps are columns rather than separate files, so the whole
+    sweep lands in a single table. Rows are keyed by (dataset, tf32, d, eps, n).
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    dims = sorted(set(r.d for r in results))
+    merged: Dict[tuple, dict] = {}
+    if output_path.exists():
+        with open(output_path, newline="") as f:
+            for row in csv.DictReader(f):
+                if all(col in row for col in SPEEDUP_CSV_COLUMNS):
+                    merged[(row["dataset"], row["tf32"], row["d"], row["eps"], row["n"])] = row
 
-    for d in dims:
-        subset = [r for r in results if r.d == d]
-        sizes = sorted(set(r.n for r in subset))
+    def pick(subset: List[TimingResult], method: str) -> Optional[TimingResult]:
+        matches = [r for r in subset if r.method == method]
+        return matches[0] if matches else None
 
-        csv_path = output_path.parent / f"forward_d{d}_speedup.csv"
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "n", "flash_symmetric_ms", "flash_alternating_ms", "keops_ms", "ott_jax_ms",
-                "online_vs_keops", "ott_vs_ott_jax"
-            ])
+    def ms_of(res: Optional[TimingResult]) -> Optional[float]:
+        return None if res is None or res.oom else res.mean_ms
 
-            for n in sizes:
-                flash_symmetric = [r for r in subset if r.n == n and r.method == "flash_symmetric"]
-                flash_alternating = [r for r in subset if r.n == n and r.method == "flash_alternating"]
-                gl = [r for r in subset if r.n == n and r.method == "geomloss_online"]
-                ott = [r for r in subset if r.n == n and r.method == "ott_jax_online"]
+    def fmt_ms(res: Optional[TimingResult], ms: Optional[float]) -> str:
+        if res is None:
+            return "N/A"
+        if res.oom:
+            return "OOM"
+        return f"{ms:.3f}" if ms is not None else "OOM"
 
-                flash_symmetric_res = flash_symmetric[0] if flash_symmetric else None
-                flash_alternating_res = flash_alternating[0] if flash_alternating else None
-                gl_res = gl[0] if gl else None
-                ott_res = ott[0] if ott else None
+    def speedup(baseline_ms: Optional[float], our_ms: Optional[float]) -> str:
+        if baseline_ms is None or our_ms is None:
+            return "N/A"
+        return f"{baseline_ms / our_ms:.2f}x"
 
-                flash_symmetric_ms = None if flash_symmetric_res is None or flash_symmetric_res.oom else flash_symmetric_res.mean_ms
-                flash_alternating_ms = None if flash_alternating_res is None or flash_alternating_res.oom else flash_alternating_res.mean_ms
-                gl_ms = None if gl_res is None or gl_res.oom else gl_res.mean_ms
-                ott_ms = None if ott_res is None or ott_res.oom else ott_res.mean_ms
+    groups = sorted({(r.dataset, str(r.tf32), r.d, r.eps, r.n) for r in results})
+    for dataset, tf32, d, eps, n in groups:
+        subset = [
+            r for r in results
+            if r.dataset == dataset and str(r.tf32) == tf32
+            and r.d == d and r.eps == eps and r.n == n
+        ]
 
-                def fmt_ms(res: Optional[TimingResult], ms: Optional[float]) -> str:
-                    if res is None:
-                        return "N/A"
-                    if res.oom:
-                        return "OOM"
-                    return f"{ms:.3f}" if ms is not None else "OOM"
+        flash_symmetric_res = pick(subset, "flash_symmetric")
+        flash_alternating_res = pick(subset, "flash_alternating")
+        gl_res = pick(subset, "geomloss_online")
+        ott_res = pick(subset, "ott_jax_online")
 
-                def speedup(baseline_ms, our_ms):
-                    if baseline_ms is None or our_ms is None:
-                        return "N/A"
-                    return f"{baseline_ms / our_ms:.2f}x"
+        flash_symmetric_ms = ms_of(flash_symmetric_res)
+        flash_alternating_ms = ms_of(flash_alternating_res)
+        gl_ms = ms_of(gl_res)
+        ott_ms = ms_of(ott_res)
 
-                writer.writerow([
-                    n,
-                    fmt_ms(flash_symmetric_res, flash_symmetric_ms),
-                    fmt_ms(flash_alternating_res, flash_alternating_ms),
-                    fmt_ms(gl_res, gl_ms),
-                    fmt_ms(ott_res, ott_ms),
-                    speedup(gl_ms, flash_symmetric_ms),
-                    speedup(ott_ms, flash_alternating_ms),
-                ])
+        merged[(dataset, tf32, str(d), str(eps), str(n))] = {
+            "dataset": dataset, "tf32": tf32, "d": d, "eps": eps, "n": n,
+            "flash_symmetric_ms": fmt_ms(flash_symmetric_res, flash_symmetric_ms),
+            "flash_alternating_ms": fmt_ms(flash_alternating_res, flash_alternating_ms),
+            "keops_ms": fmt_ms(gl_res, gl_ms),
+            "ott_jax_ms": fmt_ms(ott_res, ott_ms),
+            "online_vs_keops": speedup(gl_ms, flash_symmetric_ms),
+            "ott_vs_ott_jax": speedup(ott_ms, flash_alternating_ms),
+        }
 
-        print(f"Saved speedup table to {csv_path}")
+    with open(output_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=SPEEDUP_CSV_COLUMNS)
+        writer.writeheader()
+        for key in sorted(merged, key=lambda k: (k[0], k[1], int(k[2]), float(k[3]), int(k[4]))):
+            writer.writerow(merged[key])
+
+    print(f"Saved speedup table to {output_path}")
 
 
 def print_summary(results: List[TimingResult]) -> None:
@@ -1483,12 +1844,14 @@ def run_forward_benchmark_subprocess(
             cmd.append("--no-flash-symmetric")
         if args.no_flash_alternating:
             cmd.append("--no-flash-alternating")
-        if args.dataset != "gaussian":
-            cmd.extend(["--dataset", args.dataset])
         if args.no_geomloss:
             cmd.append("--no-geomloss")
         if args.no_ott:
             cmd.append("--no-ott")
+        if args.no_rmae_check:
+            cmd.append("--no-rmae-check")
+        if args.dataset != "gaussian":
+            cmd.extend(["--dataset", args.dataset])
         if args.tensorized:
             cmd.extend(["--tensorized", "--max-dense-size", str(args.max_dense_size)])
         if args.only is not None:
@@ -1549,8 +1912,13 @@ def main() -> None:
     parser.add_argument("--rep", type=int, default=50, help="Timed repetitions.")
     parser.add_argument("--no-ott", action="store_true", help="Skip OTT-JAX benchmarks.")
     parser.add_argument(
+        "--no-rmae-check", action="store_true",
+        help="Skip the RMAE reference solve (POT). Saves CPU time; rmae_pct will be N/A in the CSV.",
+    )
+    parser.add_argument(
         "--dataset", choices=DATASET_CHOICES, default="gaussian",
-        help="Synthetic point-cloud distribution to benchmark on.",
+        help="Synthetic point cloud to benchmark against. Not applied to OTT-JAX "
+             "(draws its own point cloud via JAX's RNG). Default: gaussian.",
     )
     parser.add_argument("--no-geomloss", action="store_true", help="Skip GeomLoss benchmarks.")
     parser.add_argument("--no-flash-symmetric", action="store_true", help="Skip FlashSinkhorn symmetric backend.")
@@ -1652,6 +2020,7 @@ def main() -> None:
             verbose=False,
             nvtx=False,
             allow_tf32=args.tf32,
+            rmae_check=not args.no_rmae_check,
             dataset=args.dataset,
         )
 
@@ -1702,7 +2071,6 @@ def main() -> None:
             include_ott=include_ott,
             verbose=not args.quiet,
             allow_tf32=args.tf32,
-            dataset=args.dataset,
         )
 
         # Print and save summary
@@ -1743,12 +2111,13 @@ def main() -> None:
     print(f"  Sizes: {sorted(sizes, reverse=True)} (large->small)")
     print(f"  Dimensions: {dims}")
     print(f"  Epsilon: {args.eps}")
-    print(f"  Dataset: {args.dataset}")
     print(f"  Iterations: {args.n_iters}")
     print(f"  Warmup: {args.warmup}, Reps: {args.rep}")
     print(f"  Precision: {'TF32' if args.tf32 else 'FP32 (strict)'}")
     print(f"  FlashSinkhorn backends: symmetric={include_flash_symmetric}, alternating={include_flash_alternating}")
     print(f"  References: GeomLoss={include_geomloss}, OTT-JAX={include_ott}")
+    print(f"  RMAE check (converged entropic OT via POT): {not args.no_rmae_check}")
+    print(f"  Dataset: {args.dataset}")
     print(f"  Include tensorized: {args.tensorized} (max size: {args.max_dense_size})")
     if args.only is not None:
         print(f"  Only: {args.only}")
@@ -1780,6 +2149,7 @@ def main() -> None:
             verbose=not args.quiet,
             nvtx=nvtx_enabled,
             allow_tf32=args.tf32,
+            rmae_check=not args.no_rmae_check,
             dataset=args.dataset,
         )
 

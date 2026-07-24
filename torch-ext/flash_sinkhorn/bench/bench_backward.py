@@ -175,6 +175,8 @@ class BackwardResult:
     total_ms: float
     gpu_memory_mb: float  # whole-device GPU memory in use, as nvidia-smi reports it
     oom: bool
+    dataset: str = "gaussian"  # point-cloud distribution; see sample_point_cloud()
+    tf32: bool = False  # TF32 matmuls enabled (10-bit mantissa) vs strict FP32
 
 
 @dataclass
@@ -225,6 +227,7 @@ def bench_flashsinkhorn_backward(
 
     Args:
         backend: "symmetric" (GeomLoss-style) or "alternating" (OTT-JAX-style)
+        dataset: "gaussian" (default) or "8gaussians"; see sample_point_cloud().
 
     Uses full squared Euclidean cost C(x,y) = ||x-y||² (half_cost=False).
     Autotuning is enabled for best Triton kernel performance (~2-3s first call overhead).
@@ -276,14 +279,16 @@ def bench_flashsinkhorn_backward(
         torch.autograd.grad(loss, grad_inputs, retain_graph=False, create_graph=False)
 
     try:
-        # Trigger Triton JIT compilation + autotuning here, outside the measurement
-        # window, so the one-time compile overhead isn't timed as steady state.
+        # Trigger Triton JIT compilation + autotuning here, outside the peak-memory
+        # window, so the one-time compile overhead doesn't get counted as steady-state
+        # memory (matches the GeomLoss/KeOps benchmark's pre-JIT warmup below).
         run_grad()
         torch.cuda.synchronize()
     except torch.cuda.OutOfMemoryError:
         return BackwardResult(method_name, n, m, d, eps, 0, 0, 0, 0, oom=True)
 
     try:
+        # Measure peak memory during grad evaluation
         # Memory is the whole-device figure nvidia-smi/nvitop shows; see
         # gpu_memory_used_mb() in bench_forward.py.
         total_ms = bench_with_stats(run_grad, warmup, rep)
@@ -386,6 +391,7 @@ def bench_geomloss_backward(
         run_grad()
         torch.cuda.synchronize()
 
+        # Measure peak memory during grad evaluation
         # Memory is the whole-device figure nvidia-smi/nvitop shows; see
         # gpu_memory_used_mb() in bench_forward.py.
         total_ms = bench_with_stats(run_grad, warmup, rep)
@@ -485,7 +491,8 @@ def bench_geomloss_tensorized_backward(
             torch.autograd.grad(loss, grad_inputs, retain_graph=False, create_graph=False)
 
         # Reset peak memory BEFORE warmup to capture O(n²) cost matrix allocation
-        torch.cuda.reset_peak_memory_stats(device)
+        # Memory is the whole-device figure nvidia-smi/nvitop shows; see
+        # gpu_memory_used_mb() in bench_forward.py.
 
         # Warmup before timed region
         run_grad()
@@ -645,6 +652,8 @@ def run_backward_benchmark(
     Args:
         include_tensorized: If True, include GeomLoss Tensorized (O(n²) memory).
         max_dense_size: Maximum size for tensorized methods (to avoid OOM).
+        dataset: "gaussian" (default) or "8gaussians"; see sample_point_cloud().
+            Not applied to OTT-JAX, which draws its own cloud with JAX's RNG.
     """
     results = []
     sizes_sorted = sorted(sizes, reverse=True)
@@ -658,6 +667,8 @@ def run_backward_benchmark(
         # FlashSinkhorn (symmetric backend - GeomLoss-style Jacobi updates)
         if not skip_flash_symmetric:
             res = bench_flashsinkhorn_backward(n, n, d, eps, n_iters, device, warmup, rep, grad=grad, backend="symmetric", allow_tf32=allow_tf32, dataset=dataset)
+            res.dataset = dataset
+            res.tf32 = allow_tf32
             results.append(res)
             if verbose:
                 if res.oom:
@@ -670,6 +681,8 @@ def run_backward_benchmark(
         # FlashSinkhorn (alternating backend - OTT-JAX-style Gauss-Seidel updates)
         if not skip_flash_alternating:
             res = bench_flashsinkhorn_backward(n, n, d, eps, n_iters, device, warmup, rep, grad=grad, backend="alternating", allow_tf32=allow_tf32, dataset=dataset)
+            res.dataset = dataset
+            res.tf32 = allow_tf32
             results.append(res)
             if verbose:
                 if res.oom:
@@ -682,6 +695,8 @@ def run_backward_benchmark(
         # GeomLoss online (KeOps)
         if not skip_geomloss:
             res = bench_geomloss_backward(n, n, d, eps, n_iters, device, warmup, rep, "online", grad=grad, dataset=dataset)
+            res.dataset = dataset
+            res.tf32 = allow_tf32
             results.append(res)
             if verbose:
                 if res.oom:
@@ -694,6 +709,8 @@ def run_backward_benchmark(
         # GeomLoss tensorized (dense, small sizes only)
         if not skip_geomloss and include_tensorized and n <= max_dense_size:
             res = bench_geomloss_tensorized_backward(n, n, d, eps, n_iters, device, warmup, rep, grad=grad, dataset=dataset)
+            res.dataset = dataset
+            res.tf32 = allow_tf32
             results.append(res)
             if verbose:
                 if res.oom:
@@ -727,8 +744,9 @@ def run_backward_benchmark(
 def save_results_csv(results: List[BackwardResult], output_path: Path) -> None:
     """Save results to CSV, merging with existing data if file exists.
 
-    Uses (method, n, d) as the unique key. New results overwrite existing ones
-    with the same key, allowing incremental benchmark runs.
+    Uses (dataset, tf32, method, n, m, d, eps) as the unique key, so a sweep over
+    datasets/eps/dims/precision accumulates into one table instead of overwriting
+    itself. New results overwrite existing ones with the same key.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -738,15 +756,17 @@ def save_results_csv(results: List[BackwardResult], output_path: Path) -> None:
         with open(output_path, "r", newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                key = (row["method"], int(row["n"]), int(row["d"]))
+                key = (row.get("dataset", "gaussian"), str(row.get("tf32", False)),
+                       row["method"], row["n"], row["m"], row["d"], row["eps"])
                 existing_results[key] = row
         print(f"  Loaded {len(existing_results)} existing results from {output_path}")
 
     # Convert new results to dict format and merge
     for r in results:
-        key = (r.method, r.n, r.d)
+        key = (r.dataset, str(r.tf32), r.method, str(r.n), str(r.m), str(r.d), str(r.eps))
         if r.oom:
             existing_results[key] = {
+                "dataset": r.dataset, "tf32": r.tf32,
                 "method": r.method, "n": r.n, "m": r.m, "d": r.d, "eps": r.eps,
                 "forward_ms": "OOM", "backward_ms": "OOM", "total_ms": "OOM",
                 "gpu_memory_mb": "OOM", "oom": True
@@ -755,20 +775,25 @@ def save_results_csv(results: List[BackwardResult], output_path: Path) -> None:
             fwd_str = "N/A" if r.forward_ms < 0 else f"{r.forward_ms:.3f}"
             bwd_str = "N/A" if r.backward_ms < 0 else f"{r.backward_ms:.3f}"
             existing_results[key] = {
+                "dataset": r.dataset, "tf32": r.tf32,
                 "method": r.method, "n": r.n, "m": r.m, "d": r.d, "eps": r.eps,
                 "forward_ms": fwd_str, "backward_ms": bwd_str,
-                "total_ms": f"{r.total_ms:.3f}", "gpu_memory_mb": f"{r.gpu_memory_mb:.1f}",
-                "oom": False
+                "total_ms": f"{r.total_ms:.3f}", "gpu_memory_mb": f"{r.gpu_memory_mb:.1f}", "oom": False
             }
 
     # Write merged results
     with open(output_path, "w", newline="") as f:
-        fieldnames = ["method", "n", "m", "d", "eps", "forward_ms", "backward_ms",
+        fieldnames = ["dataset", "tf32", "method", "n", "m", "d", "eps", "forward_ms", "backward_ms",
                       "total_ms", "gpu_memory_mb", "oom"]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         # Sort by (d, n, method) for consistent output
-        for key in sorted(existing_results.keys(), key=lambda k: (int(existing_results[k]["d"]), int(existing_results[k]["n"]), k[0])):
+        def _sort_key(k):
+            row = existing_results[k]
+            return (row.get("dataset", "gaussian"), str(row.get("tf32", False)),
+                    int(row["d"]), float(row["eps"]), int(row["n"]), row["method"])
+
+        for key in sorted(existing_results.keys(), key=_sort_key):
             writer.writerow(existing_results[key])
 
     print(f"\nSaved {len(existing_results)} total results to {output_path}")

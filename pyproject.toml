@@ -41,6 +41,7 @@ dev = [
   "jax",
   "ott-jax",
   "matplotlib",
+  "pot",
 ]
 
 [tool.setuptools]
