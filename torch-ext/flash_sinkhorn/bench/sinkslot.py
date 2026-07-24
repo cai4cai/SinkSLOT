@@ -112,12 +112,12 @@ def sot_plan_coo(
     blend is deliberately absent -- gamma * (a (x) b) is rank-one and separable,
     so the caller folds it into the potentials rather than materialising it.
 
-    Coalescing is done in CHUNKS rather than over all L slices at once. Building
-    the whole L(N+M) list first is what sets the peak of the entire solve: at
-    n=m=10000, L=100 it is ~2M entries against a coalesced support of 989k, and
-    measured end to end the construction peaked at 82.3 MiB while the Sinkhorn
-    loop that follows adds 1.7 MiB. Folding each chunk into the running support
-    keeps the transient proportional to the chunk, not to L.
+    Built in one shot by default (chunk = L): all L directions are projected, one
+    batched merge produces the raw entries, and a single coalesce sums them. The
+    per-chunk coalesce of the original design re-sorted the accumulating support
+    once per chunk, which dominated the build; a single coalesce over the full raw
+    set is far cheaper, and the transient (~70 MiB at n=10000, L=100) is negligible
+    at the sizes benchmarked here. `chunk` stays a memory valve for pathological n.
 
     The flat key `row * m + col` is int32 whenever n*m fits, which halves both
     the key array and the sort workspace inside `unique`.

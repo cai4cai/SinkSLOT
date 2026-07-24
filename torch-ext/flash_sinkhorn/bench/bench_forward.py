@@ -215,7 +215,7 @@ def compute_entropic_ot_reference_pot(
     """Same reference as compute_entropic_ot_reference(), but via POT on CPU.
 
     Independent third-party implementation, used only to cross-check the GPU solver
-    (see --check-reference). Far too slow for the benchmark itself: dense single-threaded
+    (see compute_entropic_ot_reference). Far too slow for the benchmark itself: dense single-threaded
     float64 NumPy costs ~41 ms/iteration at n=1024 and scales as n^2, i.e. hours per
     solve at n=4096.
 
@@ -265,7 +265,7 @@ def compute_entropic_ot_reference(
     Textbook dense log-domain Sinkhorn -- it materializes the full n x m cost matrix and
     uses torch.logsumexp, sharing no code with the FlashSinkhorn kernels or GeomLoss's
     KeOps path, so it remains an independent check on what those streaming kernels
-    should reproduce. Cross-checked against POT at small n via --check-reference.
+    should reproduce. Cross-checked against POT at small n (compute_entropic_ot_reference_pot).
 
     Returns the dual objective <a, f> + <b, g>, NOT the primal transport cost <P, C>
     that POT's `ot.sinkhorn2` reports. The benchmarked methods -- FlashSinkhorn's
@@ -1116,8 +1116,9 @@ def build_sparse_kernel(
     Note their kernel is K = exp(-C/eps) with no a (x) b factor -- the "entropy"
     convention of their eq. (6), OT_eps = <T,C> - eps*H(T). Ours (FlashSinkhorn,
     GeomLoss, and our reference solver) regularizes by KL(T || a (x) b). The two duals
-    differ by exactly eps*(H(a) + H(b)); bench_sparsink() applies that correction so
-    these rows are comparable with the rest of the table.
+    differ by exactly eps*(H(a) + H(b)). bench_sparsink() sidesteps this by reporting the
+    plan's KL-convention entropic value <T, C> + eps*KL(T || a (x) b) rather than the
+    sparsified problem's dual, so these rows are comparable with the rest of the table.
     """
     if method not in SPARSINK_METHODS:
         raise ValueError(f"Unknown method: {method!r}. Choices: {SPARSINK_METHODS}")
