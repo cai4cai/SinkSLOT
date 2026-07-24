@@ -410,10 +410,18 @@ def gpu_memory_used_mb(device: torch.device) -> float:
     Device-level, not per-process: it includes any other process on the same GPU. Runs
     are pinned to a dedicated device (CUDA_VISIBLE_DEVICES), so in practice this is our
     process.
-    It is also cumulative within a process -- PyTorch never returns pooled memory to the
-    driver -- so each measurement must run in its own process to be attributable to one
-    method. run.py does that by default (BenchConfig.isolate).
+
+    Calls empty_cache() first. PyTorch's caching allocator keeps freed blocks rather than
+    returning them to the driver, so without this the figure is dominated by allocator
+    hysteresis -- Triton autotune alone leaves ~270MB pooled-but-unused, which swamps the
+    actual data at any size this benchmark runs. Releasing the unused portion leaves CUDA
+    context + live tensors + compiled kernels: the footprint a method actually needs.
+    This reports memory still held at the end of the run, not the peak reached.
+
+    Still run each measurement in its own process (BenchConfig.isolate): compiled kernels
+    and context are not freed by empty_cache(), so they accumulate across methods.
     """
+    torch.cuda.empty_cache()
     free, total = torch.cuda.mem_get_info(device)
     return (total - free) / 1e6
 
