@@ -22,7 +22,9 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from config import CONFIG, BenchConfig
+import importlib
+
+from config import BenchConfig
 
 
 def build_command(
@@ -274,6 +276,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run a flash_sinkhorn benchmark using settings from config.py"
     )
+    parser.add_argument("--config", default="config",
+                        help="Config module to load CONFIG from (default: config; e.g. config_paper).")
     parser.add_argument("--dry-run", action="store_true", help="Print the command without running it.")
     parser.add_argument("--execute", action="store_true", help="Force execution even if CONFIG.dry_run is True.")
     parser.add_argument(
@@ -281,6 +285,7 @@ def main() -> None:
         help="Run the benchmark once with TF32 on and once off, then print a timing diff.",
     )
     args = parser.parse_args()
+    CONFIG = importlib.import_module(args.config).CONFIG
 
     dry_run = CONFIG.dry_run
     if args.dry_run:
