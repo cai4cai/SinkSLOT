@@ -155,6 +155,7 @@ def run_sweep(cfg: BenchConfig, base_dir: str, *, dry_run: bool, label: str = ""
     if not dry_run:
         _clear_csvs(cfg, base_dir)
     units = list(_units(cfg))
+    failures: List[Tuple[str, int]] = []
     for i, (dataset, eps, method, size, dim, slices) in enumerate(units, 1):
         cmd = build_command(
             cfg, dataset, eps, base_dir, method=method, size=size, dim=dim, slices=slices,
@@ -170,7 +171,21 @@ def run_sweep(cfg: BenchConfig, base_dir: str, *, dry_run: bool, label: str = ""
             print(f"  {printable}")
             continue
         print(f"\n[{i}/{len(units)}] {prefix}{tag}: {printable}", flush=True)
-        subprocess.run(cmd, check=True)
+        # Don't abort the sweep on one bad unit. A single subprocess can die for reasons
+        # unrelated to the rest of the grid (a transient CUDA/driver fault, an OOM at one
+        # size), and check=True would then throw away every remaining unit. Record it and
+        # carry on; the run ends with a summary of what failed.
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            failures.append((tag, result.returncode))
+            print(f"  [FAILED rc={result.returncode}] {tag}", flush=True)
+
+    if failures:
+        print(f"\n{len(failures)}/{len(units)} units failed:")
+        for tag, rc in failures:
+            print(f"  rc={rc}  {tag}")
+    elif not dry_run:
+        print(f"\nAll {len(units)} units completed.")
 
 
 def _timing_column(cfg: BenchConfig) -> str:
