@@ -1404,9 +1404,9 @@ def bench_sparsink(
             n_iters=n_iters, rmae_pct=rmae_pct, rmae_std=rmae_std, dataset=dataset,
             tf32=allow_tf32, sample_size=sample_size,
             nnz=int(sum(nnzs) / len(nnzs)), empty_lines=empties,
-            iters_run=(int(sum(iters_list) / len(iters_list)) if iters_list else None),
-            converged=(all(conv_list) if conv_list else None),
-            final_viol=(sum(viol_list) / len(viol_list) if viol_list else None),
+            iters_run=(int(sum(_it) / len(_it)) if (_it := [v for v in iters_list if v is not None]) else None),
+            converged=(all(_cv) if (_cv := [v for v in conv_list if v is not None]) else None),
+            final_viol=(sum(_vl) / len(_vl) if (_vl := [v for v in viol_list if v is not None]) else None),
             valid_replicates=len(losses),
             setup_ms=float(sum(build_ms) / len(build_ms)),
         )
