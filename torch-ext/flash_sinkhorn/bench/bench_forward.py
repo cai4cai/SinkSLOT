@@ -165,6 +165,8 @@ class TimingResult:
     rmae_pct: Optional[float] = None  # |loss - ref| / ref * 100, vs converged entropic OT at same eps
     dataset: str = "gaussian"  # point-cloud distribution; see sample_point_cloud()
     tf32: bool = False  # TF32 matmuls enabled (10-bit mantissa) vs strict FP32
+    srot_slices: Optional[int] = None  # SROT only: number of random 1-D projections (L)
+    plan_ms: Optional[float] = None  # SROT only: pi_SOT construction time, excluded from mean_ms
 
 
 @dataclass
@@ -188,7 +190,7 @@ def timing_result_to_json(r: TimingResult) -> str:
         "max_ms": r.max_ms, "median_ms": r.median_ms,
         "gpu_memory_mb": r.gpu_memory_mb, "oom": r.oom,
         "n_iters": r.n_iters, "rmae_pct": r.rmae_pct, "dataset": r.dataset,
-        "tf32": r.tf32,
+        "tf32": r.tf32, "srot_slices": r.srot_slices, "plan_ms": r.plan_ms,
     })
 
 
@@ -407,9 +409,10 @@ def gpu_memory_used_mb(device: torch.device) -> float:
 
     Device-level, not per-process: it includes any other process on the same GPU. Runs
     are pinned to a dedicated device (CUDA_VISIBLE_DEVICES), so in practice this is our
-    process. It is also cumulative within a process -- PyTorch never returns pooled
-    memory to the driver -- so each measurement must run in its own process to be
-    attributable to one method. run.py does that by default (BenchConfig.isolate).
+    process.
+    It is also cumulative within a process -- PyTorch never returns pooled memory to the
+    driver -- so each measurement must run in its own process to be attributable to one
+    method. run.py does that by default (BenchConfig.isolate).
     """
     free, total = torch.cuda.mem_get_info(device)
     return (total - free) / 1e6
@@ -450,6 +453,193 @@ def sample_point_cloud(
     points = torch.randn(n, d, device=device, dtype=torch.float32) * _EIGHT_GAUSSIANS_STD
     points[:, :2] = points[:, :2] + centers[cluster_idx]
     return points
+
+
+# =============================================================================
+# SROT: Sliced-Regularized Optimal Transport (baseline)
+# =============================================================================
+# Nguyen, "Sliced-Regularized Optimal Transport", arXiv:2604.23944
+# Reference implementation: https://github.com/khainb/SROT
+#
+# Written here from the algorithm as described rather than vendored. SROT replaces
+# the entropic regularizer's reference measure: standard Sinkhorn penalizes
+# KL(pi || a (x) b) and so uses the kernel a (x) b * exp(-C/eps), whereas SROT
+# penalizes KL(pi || pi_SOT) with pi_SOT the uniform average of L one-dimensional
+# OT plans taken on random projections. It is therefore a different optimum, not a
+# faster route to the same one -- see compute_srot_reference().
+
+
+def build_sot_plan(
+    x: torch.Tensor, y: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
+    *, slices: int, delta: float = 1e-8, seed: int = 0,
+) -> torch.Tensor:
+    """Uniform-average sliced-OT reference plan from `slices` random 1-D projections.
+
+    Returns (1 - delta) * pi_SOT + delta * (a (x) b). The delta mix keeps every entry
+    strictly positive when a, b > 0, so the Sinkhorn kernel has full support.
+
+    Each slice projects both clouds onto a random unit direction and solves the 1-D OT
+    problem, which for a convex ground cost is exactly the north-west corner rule on the
+    sorted marginals: with cumulative masses ca and cb, the plan entry is the overlap
+    max(0, min(ca_i, cb_j) - max(ca_{i-1}, cb_{j-1})). That is computed densely here --
+    the plan is O(n*m) by construction, which is why this baseline is gated behind
+    --max-dense-size.
+
+    The projection RNG is seeded explicitly so that a benchmarked run and its converged
+    reference share the same pi_SOT; otherwise rmae_pct would be measuring a difference
+    of random directions rather than iteration error.
+
+    Computed in float64 -- cumulative marginals are exactly where float32 accumulates
+    error over n terms -- then returned in `x`'s dtype. This is one-off setup, not the
+    timed solve loop, so the precision costs nothing in the comparison.
+    """
+    n, d = x.shape
+    m = y.shape[0]
+    device = x.device
+    xd, yd = x.double(), y.double()
+    ad, bd = a.double(), b.double()
+
+    generator = torch.Generator(device=device).manual_seed(seed)
+    thetas = torch.randn(slices, d, generator=generator, device=device, dtype=torch.float64)
+    thetas = thetas / thetas.norm(dim=1, keepdim=True).clamp_min(1e-300)
+
+    px_all = xd @ thetas.T  # (n, L)
+    py_all = yd @ thetas.T  # (m, L)
+
+    pi_sot = torch.zeros(n, m, device=device, dtype=torch.float64)
+    for ell in range(slices):
+        order_x = torch.argsort(px_all[:, ell])
+        order_y = torch.argsort(py_all[:, ell])
+
+        ca = torch.cumsum(ad[order_x], dim=0)
+        cb = torch.cumsum(bd[order_y], dim=0)
+        ca_prev = torch.cat([ca.new_zeros(1), ca[:-1]])
+        cb_prev = torch.cat([cb.new_zeros(1), cb[:-1]])
+
+        upper = torch.minimum(ca.unsqueeze(1), cb.unsqueeze(0))
+        lower = torch.maximum(ca_prev.unsqueeze(1), cb_prev.unsqueeze(0))
+        overlap = (upper - lower).clamp_min(0.0)
+
+        pi_sot[order_x.unsqueeze(1), order_y.unsqueeze(0)] += overlap
+
+    pi_sot /= slices
+    if delta > 0.0:
+        pi_sot = (1.0 - delta) * pi_sot + delta * torch.outer(ad, bd)
+    return pi_sot.to(x.dtype)
+
+
+def _srot_sinkhorn(
+    cost: torch.Tensor, log_pi: torch.Tensor, log_a: torch.Tensor, log_b: torch.Tensor,
+    eps: float, n_iters: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """`n_iters` log-domain Sinkhorn sweeps against the pi_SOT reference plan.
+
+    Fixed point is pi = pi_SOT * exp((f (+) g - C)/eps) with marginals a, b, giving
+
+        f_i = eps * [log a_i - logsumexp_j(log pi_ij + (g_j - C_ij)/eps)]
+        g_j = eps * [log b_j - logsumexp_i(log pi_ij + (f_i - C_ij)/eps)]
+
+    which reduces to the standard updates when pi_SOT = a (x) b. No early stopping: the
+    benchmark compares equal work across methods.
+    """
+    f = torch.zeros_like(log_a)
+    g = torch.zeros_like(log_b)
+    for _ in range(n_iters):
+        f = eps * (log_a - torch.logsumexp(log_pi + (g.unsqueeze(0) - cost) / eps, dim=1))
+        g = eps * (log_b - torch.logsumexp(log_pi + (f.unsqueeze(1) - cost) / eps, dim=0))
+    return f, g
+
+
+_srot_ref_cache: Dict[str, float] = {}
+
+_SROT_REF_CACHE_PATH = Path.home() / ".cache" / "flash_sinkhorn" / "srot_reference.json"
+_SROT_REF_CACHE_VERSION = 1
+
+
+def compute_srot_reference(
+    cost: torch.Tensor, log_pi: torch.Tensor, log_a: torch.Tensor, log_b: torch.Tensor,
+    a: torch.Tensor, b: torch.Tensor, eps: float,
+    *, max_iter: int = 20000, tol: float = 1e-6, check_every: int = 10,
+) -> float:
+    """Converged SROT dual objective -- the RMAE reference for SROT rows.
+
+    SROT cannot share the entropic reference used by the flash/GeomLoss rows: it
+    minimizes <pi, C> + eps*KL(pi || pi_SOT) rather than <pi, C> + eps*KL(pi || a (x) b),
+    so it converges somewhere else by design. Measuring it against the entropic optimum
+    would report that design difference as if it were solver error, and it would be
+    nonzero even for a perfectly converged run. Giving SROT its own converged reference
+    keeps rmae_pct meaning the same thing in every row: distance from the optimum of the
+    problem this method actually solves.
+
+    Also keyed by L, since pi_SOT -- and therefore the optimum -- changes with it.
+
+    Same eps annealing and marginal-violation stopping rule as
+    compute_entropic_ot_reference(); see that docstring for why annealing is needed.
+    """
+    f = torch.zeros_like(log_a)
+    g = torch.zeros_like(log_b)
+
+    def sweep(stage_eps: float, iters: int) -> Tuple[float, int]:
+        nonlocal f, g
+        stage_err = float("inf")
+        used = 0
+        for used in range(1, iters + 1):
+            f = stage_eps * (log_a - torch.logsumexp(log_pi + (g.unsqueeze(0) - cost) / stage_eps, dim=1))
+            g = stage_eps * (log_b - torch.logsumexp(log_pi + (f.unsqueeze(1) - cost) / stage_eps, dim=0))
+            if used % check_every == 0 or used == iters:
+                log_plan = log_pi + (f.unsqueeze(1) + g.unsqueeze(0) - cost) / stage_eps
+                row = torch.logsumexp(log_plan, dim=1).exp()
+                stage_err = (row - a).abs().max().item()
+                if stage_err < tol:
+                    break
+        return stage_err, used
+
+    schedule = []
+    stage_eps = max(eps, 1.0)
+    while stage_eps > eps * 1.001:
+        schedule.append(stage_eps)
+        stage_eps *= 0.5
+    for stage_eps in schedule:
+        sweep(stage_eps, max(check_every, 200))
+    err, _ = sweep(eps, max_iter)
+
+    if err >= tol:
+        print(
+            f"  [warn] SROT reference hit max_iter={max_iter} at eps={eps:g} with marginal "
+            f"error {err:.3e} > tol={tol:g}; rmae_pct will be unreliable"
+        )
+    return float((a * f).sum() + (b * g).sum())
+
+
+def _cached_srot_reference(
+    n: int, m: int, d: int, eps: float, slices: int,
+    cost: torch.Tensor, log_pi: torch.Tensor, log_a: torch.Tensor, log_b: torch.Tensor,
+    a: torch.Tensor, b: torch.Tensor, *, dataset: str = "gaussian",
+) -> float:
+    """Memoized SROT reference, keyed by (dataset, n, m, d, eps, slices), cached on disk."""
+    key = f"{dataset},{n},{m},{d},{eps:g},{slices}"
+    if key in _srot_ref_cache:
+        return _srot_ref_cache[key]
+
+    if not _srot_ref_cache:
+        try:
+            blob = json.loads(_SROT_REF_CACHE_PATH.read_text())
+            if blob.get("version") == _SROT_REF_CACHE_VERSION:
+                _srot_ref_cache.update(blob.get("costs", {}))
+        except (OSError, ValueError):
+            pass
+        if key in _srot_ref_cache:
+            return _srot_ref_cache[key]
+
+    _srot_ref_cache[key] = compute_srot_reference(cost, log_pi, log_a, log_b, a, b, eps)
+    try:
+        _SROT_REF_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _SROT_REF_CACHE_PATH.write_text(json.dumps(
+            {"version": _SROT_REF_CACHE_VERSION, "costs": _srot_ref_cache}
+        ))
+    except OSError as e:
+        print(f"  [warn] could not write SROT reference cache to {_SROT_REF_CACHE_PATH}: {e}")
+    return _srot_ref_cache[key]
 
 
 def bench_with_stats(
@@ -757,6 +947,114 @@ def bench_geomloss_tensorized(
         )
     except torch.cuda.OutOfMemoryError:
         return TimingResult("geomloss_tensorized", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
+
+
+def bench_srot(
+    n: int, m: int, d: int, eps: float, n_iters: int,
+    device: torch.device, warmup: int, rep: int,
+    *,
+    nvtx: bool = False,
+    allow_tf32: bool = False,
+    dataset: str = "gaussian",
+    rmae_check: bool = True,
+    slices: int = 50,
+    delta: float = 1e-8,
+) -> TimingResult:
+    """Benchmark SROT with fixed iterations.
+
+    Dense O(n*m): materializes both the cost matrix and pi_SOT, so this is gated behind
+    --max-dense-size like the GeomLoss tensorized baseline.
+
+    Timing is split. `plan_ms` covers building pi_SOT (L projections, sorts and 1-D OT
+    solves), which no other method has -- flash and GeomLoss derive their kernel
+    implicitly from a, b and the streamed coordinates, with no setup at all. `mean_ms`
+    then covers the solve loop alone, so it stays directly comparable to the other rows.
+    Total cost of the method is plan_ms + mean_ms. Keeping them apart matters because
+    plan_ms is the term that scales with L, which is the point of sweeping it.
+
+    Cost convention: ||x-y||^2 (full squared Euclidean, matches FlashSinkhorn).
+    """
+    _set_tf32(allow_tf32)
+
+    torch.manual_seed(0)
+    x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
+    y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
+    a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
+    b = torch.rand(m, device=device, dtype=torch.float32) + 0.1
+    a = a / a.sum()
+    b = b / b.sum()
+
+    try:
+        # pi_SOT depends only on (x, y, a, b, L, delta), so it is built once and reused
+        # across the timed repetitions -- it is setup, not per-iteration work.
+        #
+        # Build it twice and time the second. The first call absorbs one-time CUDA/kernel
+        # initialisation, which otherwise lands entirely in plan_ms for whichever L runs
+        # first in a process -- making plan_ms decrease with L instead of increasing with
+        # it. bench_with_stats already warms up the solve loop for the same reason.
+        build_sot_plan(x, y, a, b, slices=slices, delta=delta)
+        torch.cuda.synchronize()
+        plan_start = time.perf_counter()
+        pi_sot = build_sot_plan(x, y, a, b, slices=slices, delta=delta)
+        torch.cuda.synchronize()
+        plan_ms = (time.perf_counter() - plan_start) * 1e3
+
+        # float32 to match the other benchmarked methods: flash and GeomLoss both run
+        # fp32 with TF32 matmuls, and fp64 on a consumer GPU is 1/64 rate, so timing an
+        # fp64 SROT against them would compare different arithmetic. It would also give
+        # SROT ~16 digits against their ~3 in rmae_pct, and make the tf32 column
+        # meaningless for these rows (TF32 only affects fp32 matmuls).
+        # The converged reference below stays fp64 -- references should be exact.
+        cost = torch.cdist(x, y, p=2) ** 2
+        log_pi = pi_sot.clamp_min(torch.finfo(pi_sot.dtype).tiny).log()
+        log_a = a.log()
+        log_b = b.log()
+    except torch.cuda.OutOfMemoryError:
+        return TimingResult(
+            "srot", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
+            n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices,
+        )
+
+    def run():
+        _srot_sinkhorn(cost, log_pi, log_a, log_b, eps, n_iters)
+
+    try:
+        f, g = _srot_sinkhorn(cost, log_pi, log_a, log_b, eps, n_iters)
+        loss_value = float((a * f).sum() + (b * g).sum())
+        torch.cuda.synchronize()
+    except torch.cuda.OutOfMemoryError:
+        return TimingResult(
+            "srot", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
+            n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices,
+        )
+
+    rmae_pct = None
+    if rmae_check:
+        # The reference solves in float64 against the same pi_SOT, so it needs its own
+        # fp64 copies of the cost matrix and log-plan.
+        ad, bd = a.double(), b.double()
+        reference = _cached_srot_reference(
+            n, m, d, eps, slices,
+            cost.double(), log_pi.double(), ad.log(), bd.log(), ad, bd, dataset=dataset,
+        )
+        rmae_pct = _rmae_pct(loss_value, reference)
+
+    try:
+        mean, std, min_t, max_t, median = bench_with_stats(
+            run, warmup, rep, nvtx=nvtx,
+            nvtx_label=f"srot n={n} d={d} eps={eps} iters={n_iters} L={slices}",
+        )
+        gpu_memory_mb = gpu_memory_used_mb(device)
+        return TimingResult(
+            "srot", n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False,
+            n_iters=n_iters, rmae_pct=rmae_pct, dataset=dataset, tf32=allow_tf32,
+            srot_slices=slices, plan_ms=plan_ms,
+        )
+    except torch.cuda.OutOfMemoryError:
+        return TimingResult(
+            "srot", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
+            n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices,
+        )
 
 
 # =============================================================================
@@ -1293,6 +1591,9 @@ def run_forward_benchmark(
     allow_tf32: bool = False,
     rmae_check: bool = True,
     dataset: str = "gaussian",
+    include_srot: bool = False,
+    srot_slices: Optional[List[int]] = None,
+    srot_delta: float = 1e-8,
 ) -> List[TimingResult]:
     """Run forward pass benchmark.
 
@@ -1379,6 +1680,23 @@ def run_forward_benchmark(
                     status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
                     print(f"  GeomLoss Tensorized:   {status}")
 
+            # SROT (dense, small sizes only). One row per L: pi_SOT and therefore the
+            # optimum both change with it, so the rows are not interchangeable.
+            if include_srot and n <= max_dense_size:
+                for slices in (srot_slices or [50]):
+                    res = bench_srot(
+                        n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx,
+                        allow_tf32=allow_tf32, dataset=dataset, rmae_check=rmae_check,
+                        slices=slices, delta=srot_delta,
+                    )
+                    results.append(res)
+                    if verbose:
+                        status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
+                        plan = "" if res.plan_ms is None else f" (plan {res.plan_ms:.1f} ms)"
+                        print(f"  SROT L={slices}: {status}{plan}")
+            elif verbose and include_srot and n > max_dense_size:
+                print(f"  SROT:                  SKIPPED (n > max_dense_size={max_dense_size})")
+
             # OTT-JAX online
             if include_ott:
                 res = bench_ott_jax_online(
@@ -1414,7 +1732,7 @@ def run_forward_benchmark(
 FORWARD_CSV_COLUMNS = [
     "dataset", "tf32", "method", "n", "m", "d", "eps",
     "mean_ms", "std_ms", "min_ms", "max_ms", "median_ms", "gpu_memory_mb",
-    "oom", "n_iters", "rmae_pct",
+    "oom", "n_iters", "rmae_pct", "srot_slices", "plan_ms",
 ]
 
 
@@ -1436,19 +1754,23 @@ def _forward_row(r: TimingResult) -> dict:
     return {
         "dataset": r.dataset, "tf32": r.tf32, "method": r.method,
         "n": r.n, "m": r.m, "d": r.d,
-        "eps": r.eps, "n_iters": r.n_iters, **timings,
+        "eps": r.eps, "n_iters": r.n_iters,
+        "srot_slices": r.srot_slices if r.srot_slices is not None else "N/A",
+        "plan_ms": f"{r.plan_ms:.4f}" if r.plan_ms is not None else "N/A",
+        **timings,
     }
 
 
 def _forward_key(row: dict) -> tuple:
     """Unique row identity.
 
-    Includes tf32 so a strict-FP32 run and a TF32 run of the same configuration
-    are distinct rows rather than one silently overwriting the other.
+    Includes tf32 so a strict-FP32 run and a TF32 run of the same configuration are
+    distinct rows rather than one silently overwriting the other, and srot_slices so
+    SROT rows at different L do not collide (it is "N/A" for every other method).
     """
     return (
         row["dataset"], str(row["tf32"]), row["method"], str(row["n"]), str(row["m"]),
-        str(row["d"]), str(row["eps"]), str(row["n_iters"]),
+        str(row["d"]), str(row["eps"]), str(row["n_iters"]), str(row["srot_slices"]),
     )
 
 
@@ -1844,6 +2166,10 @@ def run_forward_benchmark_subprocess(
             cmd.append("--no-flash-symmetric")
         if args.no_flash_alternating:
             cmd.append("--no-flash-alternating")
+        if args.no_srot:
+            cmd.append("--no-srot")
+        else:
+            cmd.extend(["--srot-slices", args.srot_slices, "--srot-delta", str(args.srot_delta)])
         if args.no_geomloss:
             cmd.append("--no-geomloss")
         if args.no_ott:
@@ -1920,12 +2246,21 @@ def main() -> None:
         help="Synthetic point cloud to benchmark against. Not applied to OTT-JAX "
              "(draws its own point cloud via JAX's RNG). Default: gaussian.",
     )
+    parser.add_argument("--no-srot", action="store_true", help="Skip SROT benchmarks.")
+    parser.add_argument(
+        "--srot-slices", type=str, default="50",
+        help="Comma-separated L values (number of random 1-D projections) for SROT.",
+    )
+    parser.add_argument(
+        "--srot-delta", type=float, default=1e-8,
+        help="SROT: weight of the independent coupling mixed into pi_SOT.",
+    )
     parser.add_argument("--no-geomloss", action="store_true", help="Skip GeomLoss benchmarks.")
     parser.add_argument("--no-flash-symmetric", action="store_true", help="Skip FlashSinkhorn symmetric backend.")
     parser.add_argument("--no-flash-alternating", action="store_true", help="Skip FlashSinkhorn alternating backend.")
     parser.add_argument(
         "--only",
-        choices=("flash_symmetric", "flash_alternating", "flash", "geomloss", "ott"),
+        choices=("flash_symmetric", "flash_alternating", "flash", "geomloss", "ott", "srot"),
         default=None,
         help="Run only one method (useful for Nsight Systems profiling). 'flash' runs both FlashSinkhorn backends.",
     )
@@ -1976,6 +2311,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    srot_slices = [int(v) for v in str(args.srot_slices).split(",") if v.strip()]
+
     # =====================================================================
     # Worker mode: benchmark a single (n, d) and emit JSON to stdout
     # =====================================================================
@@ -1994,6 +2331,7 @@ def main() -> None:
         include_flash_alternating = not args.no_flash_alternating
         include_geomloss = not args.no_geomloss
         include_ott = not args.no_ott
+        include_srot = not args.no_srot
         include_tensorized = bool(args.tensorized)
 
         if args.only is not None:
@@ -2001,6 +2339,7 @@ def main() -> None:
             include_flash_alternating = args.only in ("flash_alternating", "flash")
             include_geomloss = args.only == "geomloss"
             include_ott = args.only == "ott"
+            include_srot = args.only == "srot"
             include_tensorized = False
 
         results = run_forward_benchmark(
@@ -2022,6 +2361,9 @@ def main() -> None:
             allow_tf32=args.tf32,
             rmae_check=not args.no_rmae_check,
             dataset=args.dataset,
+            include_srot=include_srot,
+            srot_slices=srot_slices,
+            srot_delta=args.srot_delta,
         )
 
         # Emit JSON lines to stdout for the orchestrator to parse
@@ -2093,6 +2435,7 @@ def main() -> None:
     include_flash_alternating = not args.no_flash_alternating
     include_geomloss = not args.no_geomloss
     include_ott = not args.no_ott
+    include_srot = not args.no_srot
     include_tensorized = bool(args.tensorized)
 
     if args.only is not None:
@@ -2100,6 +2443,7 @@ def main() -> None:
         include_flash_alternating = args.only in ("flash_alternating", "flash")
         include_geomloss = args.only == "geomloss"
         include_ott = args.only == "ott"
+        include_srot = args.only == "srot"
         if include_tensorized:
             print("Warning: Ignoring --tensorized because --only is set.")
             include_tensorized = False
@@ -2151,6 +2495,9 @@ def main() -> None:
             allow_tf32=args.tf32,
             rmae_check=not args.no_rmae_check,
             dataset=args.dataset,
+            include_srot=include_srot,
+            srot_slices=srot_slices,
+            srot_delta=args.srot_delta,
         )
 
     output_dir = Path(args.output_dir)
