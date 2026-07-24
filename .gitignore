@@ -23,4 +23,9 @@ docs/
 # Local agent notes
 AGENTS.md
 CLAUDE.md
+analysis.md
+
+# Local reference material / lockfile (not vendored)
+papers/
+uv.lock
 dist/
