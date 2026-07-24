@@ -78,6 +78,12 @@ def build_command(
         cmd += ["--srot-slices", ",".join(str(v) for v in srot_values),
                 "--srot-delta", str(cfg.srot_delta)]
 
+    if cfg.no_sinkslot:
+        cmd.append("--no-sinkslot")
+    elif method in (None, "sinkslot"):
+        ss_values = [slices] if slices is not None and method == "sinkslot" else cfg.sinkslot_slices
+        cmd += ["--sinkslot-slices", ",".join(str(v) for v in ss_values)]
+
     if cfg.no_sparsink:
         cmd.append("--no-sparsink")
     elif method in (None, "spar_sink", "rand_sink"):
@@ -128,6 +134,8 @@ def _methods(cfg: BenchConfig) -> List[str]:
         names.append("geomloss")
     if not cfg.no_srot:
         names.append("srot")
+    if not cfg.no_sinkslot:
+        names.append("sinkslot")
     if not cfg.no_sparsink:
         names += ["spar_sink", "rand_sink"]
     return names
@@ -152,7 +160,7 @@ def _units(cfg: BenchConfig):
                             # s expands these two only, like L for SROT.
                             for s_size in cfg.sparsink_s:
                                 yield dataset, eps, method, size, dim, s_size
-                        elif method == "srot":
+                        elif method in ("srot", "sinkslot"):
                             # L expands SROT rows only -- for every other method it is
                             # meaningless, and sweeping it at the top level would just
                             # duplicate identical rows.

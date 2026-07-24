@@ -1286,6 +1286,167 @@ def bench_sparsink(
         )
 
 
+def compute_sinkslot_reference(
+    rows: torch.Tensor, cols: torch.Tensor, log_S: torch.Tensor, cost: torch.Tensor,
+    log_a: torch.Tensor, log_b: torch.Tensor, a: torch.Tensor, b: torch.Tensor, eps: float,
+    *, max_iter: int = 20000, tol: float = 1e-6, check_every: int = 10,
+) -> float:
+    """Converged gamma=0 SROT dual on the sparse support -- the RMAE reference.
+
+    SinkSLOT converges to its own optimum (the gamma=0 SROT plan), distinct from
+    both entropic OT and gamma>0 SROT, so it needs its own reference. KL forces
+    supp(P) subset of supp(P^SOT), so that optimum lives on the same sparse support
+    the measured run uses -- the reference stays O(nnz). Warm-started eps annealing,
+    same schedule as compute_entropic_ot_reference(); the potentials (f, g) persist
+    across sweeps and stages, and lam is rebuilt from (log_S, cost) at each stage.
+    """
+    n, m = a.numel(), b.numel()
+    tiny = torch.finfo(log_S.dtype).tiny
+    f = torch.zeros_like(log_a)
+    g = torch.zeros_like(log_b)
+
+    def seg_lse(vals, idx, size):
+        mx = vals.new_full((size,), -1e30).scatter_reduce(0, idx, vals, reduce="amax", include_self=True)
+        acc = vals.new_zeros(size).index_add_(0, idx, (vals - mx[idx]).exp())
+        return mx + acc.clamp_min(tiny).log()
+
+    def sweep(stage_eps, iters):
+        nonlocal f, g
+        lam = log_S - cost / stage_eps
+        err = float("inf")
+        for used in range(1, iters + 1):
+            f = stage_eps * (log_a - seg_lse(lam + g[cols] / stage_eps, rows, n))
+            g = stage_eps * (log_b - seg_lse(lam + f[rows] / stage_eps, cols, m))
+            if used % check_every == 0 or used == iters:
+                z = lam + (f[rows] + g[cols]) / stage_eps
+                r = f.new_zeros(n).index_add_(0, rows, z.exp())
+                err = float((r - a).abs().max())
+                if err < tol:
+                    break
+        return err
+
+    schedule = []
+    se = max(eps, 1.0)
+    while se > eps * 1.001:
+        schedule.append(se); se *= 0.5
+    for se in schedule:
+        sweep(se, max(check_every, 200))
+    err = sweep(eps, max_iter)
+    if err >= tol:
+        print(f"  [warn] SinkSLOT reference hit max_iter={max_iter} at eps={eps:g} "
+              f"with marginal error {err:.3e} > tol={tol:g}; rmae_pct unreliable")
+    return float((a * f).sum() + (b * g).sum())
+
+
+def bench_sinkslot(
+    n: int, m: int, d: int, eps: float, n_iters: int,
+    device: torch.device, warmup: int, rep: int,
+    *,
+    nvtx: bool = False,
+    allow_tf32: bool = False,
+    dataset: str = "gaussian",
+    rmae_check: bool = True,
+    slices: int = 50,
+) -> TimingResult:
+    """Benchmark SinkSLOT v5 (fused-Triton, gamma=0 sparse SROT).
+
+    Sparse O(L(N+M)): the sliced support and its CSR/CSC layouts are built once in
+    setup_ms; the timed loop is the fused-Triton alternating half-steps. fp32 (no
+    matmul, so TF32 does not apply). Reference is the converged gamma=0 optimum on
+    the same support. See torch-ext/flash_sinkhorn/bench/sinkslot.py.
+    """
+    from flash_sinkhorn.bench.sinkslot import (
+        sot_plan_coo, to_csr, launch_cfg, seg_lse_online, _run_v5,
+    )
+    _set_tf32(allow_tf32)
+
+    torch.manual_seed(0)
+    x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
+    y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
+    a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
+    b = torch.rand(m, device=device, dtype=torch.float32) + 0.1
+    a = a / a.sum(); b = b / b.sum()
+    log_a, log_b = a.log(), b.log()
+
+    try:
+        # Setup: sliced support + CSR/CSC layouts, timed once (warmed).
+        rows, cols, S = sot_plan_coo(x, y, a, b, L=slices, seed=0)
+        cost = (x[rows] - y[cols]).square().sum(1)
+        log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
+        lam = log_S - cost / eps
+        r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n)
+        c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m)
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        rows, cols, S = sot_plan_coo(x, y, a, b, L=slices, seed=0)
+        cost = (x[rows] - y[cols]).square().sum(1)
+        log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
+        lam = log_S - cost / eps
+        r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n)
+        c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m)
+        torch.cuda.synchronize()
+        setup_ms = (time.perf_counter() - t0) * 1e3
+    except torch.cuda.OutOfMemoryError:
+        return TimingResult("sinkslot", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
+                            n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices)
+
+    def run():
+        _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters)
+
+    rmae_pct = None
+    if rmae_check:
+        reference = _cached_sinkslot_reference(n, m, d, eps, slices, rows, cols, log_S,
+                                               cost, log_a, log_b, a, b, dataset=dataset)
+        phi, psi = _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters)
+        loss_value = eps * float((a * phi).sum() + (b * psi).sum())
+        rmae_pct = _rmae_pct(loss_value, reference)
+
+    try:
+        run(); torch.cuda.synchronize()
+        mean, std, min_t, max_t, median = bench_with_stats(
+            run, warmup, rep, nvtx=nvtx,
+            nvtx_label=f"sinkslot n={n} d={d} eps={eps} iters={n_iters} L={slices}")
+        gpu_memory_mb = gpu_memory_used_mb(device)
+        return TimingResult("sinkslot", n, m, d, eps, mean, std, min_t, max_t, median,
+                            gpu_memory_mb, oom=False, n_iters=n_iters, rmae_pct=rmae_pct,
+                            dataset=dataset, tf32=allow_tf32, srot_slices=slices,
+                            nnz=int(rows.numel()), setup_ms=setup_ms)
+    except torch.cuda.OutOfMemoryError:
+        return TimingResult("sinkslot", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
+                            n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices)
+
+
+_sinkslot_ref_cache: Dict[str, float] = {}
+_SINKSLOT_REF_CACHE_PATH = Path.home() / ".cache" / "flash_sinkhorn" / "sinkslot_reference.json"
+_SINKSLOT_REF_CACHE_VERSION = 1
+
+
+def _cached_sinkslot_reference(n, m, d, eps, slices, rows, cols, log_S, cost,
+                               log_a, log_b, a, b, *, dataset="gaussian"):
+    """Memoized converged SinkSLOT reference, keyed by (dataset, n, m, d, eps, L)."""
+    key = f"{dataset},{n},{m},{d},{eps:g},{slices}"
+    if key in _sinkslot_ref_cache:
+        return _sinkslot_ref_cache[key]
+    if not _sinkslot_ref_cache:
+        try:
+            blob = json.loads(_SINKSLOT_REF_CACHE_PATH.read_text())
+            if blob.get("version") == _SINKSLOT_REF_CACHE_VERSION:
+                _sinkslot_ref_cache.update(blob.get("costs", {}))
+        except (OSError, ValueError):
+            pass
+        if key in _sinkslot_ref_cache:
+            return _sinkslot_ref_cache[key]
+    _sinkslot_ref_cache[key] = compute_sinkslot_reference(
+        rows, cols, log_S, cost, log_a, log_b, a, b, eps)
+    try:
+        _SINKSLOT_REF_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _SINKSLOT_REF_CACHE_PATH.write_text(json.dumps(
+            {"version": _SINKSLOT_REF_CACHE_VERSION, "costs": _sinkslot_ref_cache}))
+    except OSError as e:
+        print(f"  [warn] could not write SinkSLOT reference cache: {e}")
+    return _sinkslot_ref_cache[key]
+
+
 # =============================================================================
 # OTT-JAX Benchmarks
 # =============================================================================
@@ -1823,6 +1984,8 @@ def run_forward_benchmark(
     include_srot: bool = False,
     srot_slices: Optional[List[int]] = None,
     srot_delta: float = 1e-8,
+    include_sinkslot: bool = False,
+    sinkslot_slices: Optional[List[int]] = None,
     include_sparsink: bool = False,
     sparsink_s: Optional[List[int]] = None,
     sparsink_replicates: int = 10,
@@ -1928,6 +2091,21 @@ def run_forward_benchmark(
                         print(f"  SROT L={slices}: {status}{plan}")
             elif verbose and include_srot and n > max_dense_size:
                 print(f"  SROT:                  SKIPPED (n > max_dense_size={max_dense_size})")
+
+            # SinkSLOT v5 (fused-Triton, sparse O(L(N+M)) -- not gated on max_dense_size,
+            # since the support is never densified). One row per L.
+            if include_sinkslot:
+                for slices in (sinkslot_slices or [50]):
+                    res = bench_sinkslot(
+                        n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx,
+                        allow_tf32=allow_tf32, dataset=dataset, rmae_check=rmae_check,
+                        slices=slices,
+                    )
+                    results.append(res)
+                    if verbose:
+                        status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
+                        extra = "" if res.nnz is None else f" (nnz {res.nnz}, setup {res.setup_ms:.1f} ms)"
+                        print(f"  SinkSLOT L={slices}: {status}{extra}")
 
             # Spar-Sink / Rand-Sink (dense probability build, so gated like the other
             # O(n*m)-setup baselines). One row per (method, s).
@@ -2425,6 +2603,10 @@ def run_forward_benchmark_subprocess(
             cmd.append("--no-flash-symmetric")
         if args.no_flash_alternating:
             cmd.append("--no-flash-alternating")
+        if args.no_sinkslot:
+            cmd.append("--no-sinkslot")
+        else:
+            cmd.extend(["--sinkslot-slices", args.sinkslot_slices])
         if args.no_sparsink:
             cmd.append("--no-sparsink")
         else:
@@ -2511,6 +2693,11 @@ def main() -> None:
              "(draws its own point cloud via JAX's RNG). Default: gaussian.",
     )
     parser.add_argument("--no-srot", action="store_true", help="Skip SROT benchmarks.")
+    parser.add_argument("--no-sinkslot", action="store_true", help="Skip SinkSLOT benchmarks.")
+    parser.add_argument(
+        "--sinkslot-slices", type=str, default="50",
+        help="Comma-separated L values (number of 1-D projections) for SinkSLOT.",
+    )
     parser.add_argument("--no-sparsink", action="store_true", help="Skip Spar-Sink/Rand-Sink benchmarks.")
     parser.add_argument(
         "--sparsink-s", type=str, default="2000",
@@ -2534,7 +2721,7 @@ def main() -> None:
     parser.add_argument(
         "--only",
         choices=("flash_symmetric", "flash_alternating", "flash", "geomloss", "ott", "srot",
-                 "spar_sink", "rand_sink"),
+                 "spar_sink", "rand_sink", "sinkslot"),
         default=None,
         help="Run only one method (useful for Nsight Systems profiling). 'flash' runs both FlashSinkhorn backends.",
     )
@@ -2587,6 +2774,7 @@ def main() -> None:
 
     srot_slices = [int(v) for v in str(args.srot_slices).split(",") if v.strip()]
     sparsink_s = [int(v) for v in str(args.sparsink_s).split(",") if v.strip()]
+    sinkslot_slices = [int(v) for v in str(args.sinkslot_slices).split(",") if v.strip()]
 
     # =====================================================================
     # Worker mode: benchmark a single (n, d) and emit JSON to stdout
@@ -2608,6 +2796,7 @@ def main() -> None:
         include_ott = not args.no_ott
         include_srot = not args.no_srot
         include_sparsink = not args.no_sparsink
+        include_sinkslot = not args.no_sinkslot
         include_tensorized = bool(args.tensorized)
 
         if args.only is not None:
@@ -2617,6 +2806,7 @@ def main() -> None:
             include_ott = args.only == "ott"
             include_srot = args.only == "srot"
             include_sparsink = args.only in SPARSINK_METHODS
+            include_sinkslot = args.only == "sinkslot"
             include_tensorized = False
 
         results = run_forward_benchmark(
@@ -2644,6 +2834,8 @@ def main() -> None:
             include_sparsink=include_sparsink,
             sparsink_s=sparsink_s,
             sparsink_replicates=args.sparsink_replicates,
+            include_sinkslot=include_sinkslot,
+            sinkslot_slices=sinkslot_slices,
         )
 
         # Emit JSON lines to stdout for the orchestrator to parse
@@ -2717,6 +2909,7 @@ def main() -> None:
     include_ott = not args.no_ott
     include_srot = not args.no_srot
     include_sparsink = not args.no_sparsink
+    include_sinkslot = not args.no_sinkslot
     include_tensorized = bool(args.tensorized)
 
     if args.only is not None:
@@ -2726,6 +2919,7 @@ def main() -> None:
         include_ott = args.only == "ott"
         include_srot = args.only == "srot"
         include_sparsink = args.only in SPARSINK_METHODS
+        include_sinkslot = args.only == "sinkslot"
         if include_tensorized:
             print("Warning: Ignoring --tensorized because --only is set.")
             include_tensorized = False
@@ -2783,6 +2977,8 @@ def main() -> None:
             include_sparsink=include_sparsink,
             sparsink_s=sparsink_s,
             sparsink_replicates=args.sparsink_replicates,
+            include_sinkslot=include_sinkslot,
+            sinkslot_slices=sinkslot_slices,
         )
 
     output_dir = Path(args.output_dir)

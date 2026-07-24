@@ -55,6 +55,10 @@ class BenchConfig:
             every entry strictly positive so the kernel has full support; delta=1
             recovers standard entropic Sinkhorn.
 
+        no_sinkslot: Skip the SinkSLOT (fused-Triton gamma=0 sparse SROT) baseline.
+        sinkslot_slices: L values to sweep for SinkSLOT -- number of 1-D projections.
+            Sparse O(L(N+M)), so unlike SROT it is not gated by max_dense_size.
+
         no_sparsink: Skip the Spar-Sink and Rand-Sink baselines.
         sparsink_s: Expected kernel subsample sizes s to sweep. Their paper uses
             s = {2,4,8,16} * s0(n) with s0(n) = 1e-3 * n * log^4(n), i.e. s0(256) ~ 242
@@ -109,6 +113,9 @@ class BenchConfig:
     no_srot: bool = False
     srot_slices: List[int] = field(default_factory=lambda: [5])
     srot_delta: float = 1e-8
+
+    no_sinkslot: bool = False
+    sinkslot_slices: List[int] = field(default_factory=lambda: [10])
 
     no_sparsink: bool = False
     sparsink_s: List[int] = field(default_factory=lambda: [8000])
