@@ -51,6 +51,7 @@ def render_forward_all(path: Path, root: Path) -> Table:
     has_tf32 = bool(rows) and "tf32" in rows[0]
     has_n_iters = bool(rows) and "n_iters" in rows[0]
     has_rmae = bool(rows) and "rmae_pct" in rows[0]
+    has_srot = bool(rows) and "srot_slices" in rows[0]
 
     table = Table(
         title=path.relative_to(root).as_posix(),
@@ -65,8 +66,10 @@ def render_forward_all(path: Path, root: Path) -> Table:
         columns.insert(0, "Dataset")
     if has_n_iters:
         columns.append("Iters")
+    if has_srot:
+        columns += ["L", "Plan (ms)"]
     if has_rmae:
-        columns.append("RMAE vs entropic OT")
+        columns.append("RMAE vs own optimum")
     for col in columns:
         justify = "left" if col in ("Dataset", "TF32", "Method", "OOM") else "right"
         table.add_column(col, justify=justify)
@@ -104,6 +107,9 @@ def render_forward_all(path: Path, root: Path) -> Table:
             ]
             if has_n_iters:
                 cells.append(row.get("n_iters", ""))
+            if has_srot:
+                cells.append(row.get("srot_slices", ""))
+                cells.append(_fmt_ms(row.get("plan_ms", "")))
             if has_rmae:
                 cells.append(_fmt_rmae(row.get("rmae_pct", "")))
             table.add_row(*cells, style=style)
