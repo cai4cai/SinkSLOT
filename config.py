@@ -3,8 +3,10 @@
 Edit CONFIG below to change what run.py executes.
 
 The sweep is the full cross product of datasets x eps_values x methods x sizes x dims.
-Each (dataset, eps) pair is one subprocess. Every run appends into one
-forward_all.csv / backward_all.csv, with dataset, tf32, eps, d and n as ordinary columns.
+With `isolate` on (the default) each of those is a separate subprocess, so the run count
+is len(datasets) * len(eps_values) * n_methods * len(sizes) * len(dims) -- currently
+2 * 3 * 3 * 2 * 2 = 72. Every run appends into one forward_all.csv / backward_all.csv,
+with dataset, tf32, eps, d and n as ordinary columns.
 
 Sizes here are deliberately small (a quick-turnaround grid). Note that the memory column
 cannot show anything at this scale: gpu_memory_mb is whole-device usage, ~640MB of which
@@ -39,6 +41,12 @@ class BenchConfig:
     no_flash_symmetric: bool = False
     no_flash_alternating: bool = False
     only: Optional[str] = None  # "flash_symmetric" | "flash_alternating" | "flash" | "geomloss" | "ott"
+
+    # One subprocess per (dataset, eps, method, n, d). Required for gpu_memory_mb to be
+    # attributable: the reported figure is whole-device usage, and PyTorch never returns
+    # pooled memory to the driver, so measurements sharing a process inherit each other's
+    # footprint. Costs ~5s of CUDA/JIT startup per row.
+    isolate: bool = True
 
     tensorized: bool = False
     max_dense_size: int = 512

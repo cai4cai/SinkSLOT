@@ -20,16 +20,21 @@ import dataclasses
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from config import CONFIG, BenchConfig
 
 
-def build_command(cfg: BenchConfig, dataset: str, eps: float, output_dir: str) -> List[str]:
-    """Build the benchmark command for a single (dataset, eps) point.
+def build_command(
+    cfg: BenchConfig, dataset: str, eps: float, output_dir: str,
+    *, method: Optional[str] = None, size: Optional[int] = None, dim: Optional[int] = None,
+) -> List[str]:
+    """Build the benchmark command for a single unit of work.
 
-    The underlying bench module takes one --dataset/--eps per invocation, so both
-    are passed explicitly rather than read off cfg.
+    The underlying bench module takes one --dataset/--eps per invocation, so both are
+    passed explicitly rather than read off cfg. When method/size/dim are given the run is
+    narrowed to that single measurement (isolation mode); otherwise the full grid runs in
+    one process.
     """
     if cfg.which not in ("forward", "backward"):
         raise ValueError(f"Unknown benchmark kind: {cfg.which!r}")
@@ -37,8 +42,8 @@ def build_command(cfg: BenchConfig, dataset: str, eps: float, output_dir: str) -
     module = f"flash_sinkhorn.bench.bench_{cfg.which}"
     cmd = [
         sys.executable, "-m", module,
-        "--sizes", ",".join(str(s) for s in cfg.sizes),
-        "--dims", ",".join(str(d) for d in cfg.dims),
+        "--sizes", str(size) if size is not None else ",".join(str(s) for s in cfg.sizes),
+        "--dims", str(dim) if dim is not None else ",".join(str(d) for d in cfg.dims),
         "--eps", str(eps),
         "--n-iters", str(cfg.n_iters),
         "--warmup", str(cfg.warmup),
@@ -61,8 +66,9 @@ def build_command(cfg: BenchConfig, dataset: str, eps: float, output_dir: str) -
         cmd.append("--no-flash-symmetric")
     if cfg.no_flash_alternating:
         cmd.append("--no-flash-alternating")
-    if cfg.only:
-        cmd += ["--only", cfg.only]
+    only = method or cfg.only
+    if only:
+        cmd += ["--only", only]
     if cfg.tensorized:
         cmd.append("--tensorized")
     if cfg.verify:
@@ -96,21 +102,54 @@ def _clear_csvs(cfg: BenchConfig, output_dir: str) -> None:
             print(f"Removed stale {path}")
 
 
+def _methods(cfg: BenchConfig) -> List[str]:
+    """Method names to isolate into separate processes, matching the bench --only values."""
+    names = []
+    if not cfg.no_flash_symmetric:
+        names.append("flash_symmetric")
+    if not cfg.no_flash_alternating:
+        names.append("flash_alternating")
+    if not cfg.no_geomloss:
+        names.append("geomloss")
+    return names
+
+
+def _units(cfg: BenchConfig):
+    """Yield one (dataset, eps, method, size, dim) unit of work per subprocess.
+
+    With cfg.isolate the sweep is fully unrolled so every measured row gets a fresh
+    process -- necessary because gpu_memory_mb reports whole-device usage, which is
+    cumulative within a process. Without it, one process per (dataset, eps).
+    """
+    for dataset in cfg.datasets:
+        for eps in cfg.eps_values:
+            if not cfg.isolate:
+                yield dataset, eps, None, None, None
+                continue
+            for method in _methods(cfg):
+                for size in cfg.sizes:
+                    for dim in cfg.dims:
+                        yield dataset, eps, method, size, dim
+
+
 def run_sweep(cfg: BenchConfig, base_dir: str, *, dry_run: bool, label: str = "") -> None:
-    """Run the benchmark for every (dataset, eps) pair, all into one output directory."""
+    """Run the benchmark for every unit of work, all into one output directory."""
     prefix = f"{label} " if label else ""
     if not dry_run:
         _clear_csvs(cfg, base_dir)
-    for dataset in cfg.datasets:
-        for eps in cfg.eps_values:
-            cmd = build_command(cfg, dataset, eps, base_dir)
-            printable = " ".join(cmd)
-            if dry_run:
-                print(f"[dry-run] {prefix}dataset={dataset} eps={eps} would execute:")
-                print(f"  {printable}")
-                continue
-            print(f"\nRunning {prefix}dataset={dataset} eps={eps}: {printable}", flush=True)
-            subprocess.run(cmd, check=True)
+    units = list(_units(cfg))
+    for i, (dataset, eps, method, size, dim) in enumerate(units, 1):
+        cmd = build_command(cfg, dataset, eps, base_dir, method=method, size=size, dim=dim)
+        printable = " ".join(cmd)
+        tag = f"dataset={dataset} eps={eps}"
+        if method is not None:
+            tag += f" {method} n={size} d={dim}"
+        if dry_run:
+            print(f"[dry-run] {prefix}{tag} would execute:")
+            print(f"  {printable}")
+            continue
+        print(f"\n[{i}/{len(units)}] {prefix}{tag}: {printable}", flush=True)
+        subprocess.run(cmd, check=True)
 
 
 def _timing_column(cfg: BenchConfig) -> str:
