@@ -79,6 +79,8 @@ from typing import Callable, Dict, List, Optional
 
 import torch
 
+from flash_sinkhorn.bench.bench_forward import gpu_memory_used_mb
+
 
 def _preload_cuda_libs() -> None:
     """Preload CUDA libraries for KeOps.
@@ -171,7 +173,7 @@ class BackwardResult:
     forward_ms: float
     backward_ms: float
     total_ms: float
-    peak_memory_mb: float  # Peak GPU memory during grad evaluation
+    gpu_memory_mb: float  # whole-device GPU memory in use, as nvidia-smi reports it
     oom: bool
 
 
@@ -268,20 +270,28 @@ def bench_flashsinkhorn_backward(
     method_name = f"flash_{backend}"
     grad_inputs = (x,) if grad == "x" else (x, y)
 
-    try:
-        def run_grad() -> None:
-            """Run forward + backward (end-to-end gradient evaluation)."""
-            loss = loss_fn(a, x, b, y)
-            torch.autograd.grad(loss, grad_inputs, retain_graph=False, create_graph=False)
+    def run_grad() -> None:
+        """Run forward + backward (end-to-end gradient evaluation)."""
+        loss = loss_fn(a, x, b, y)
+        torch.autograd.grad(loss, grad_inputs, retain_graph=False, create_graph=False)
 
-        # Measure peak memory during grad evaluation
-        torch.cuda.reset_peak_memory_stats(device)
+    try:
+        # Trigger Triton JIT compilation + autotuning here, outside the measurement
+        # window, so the one-time compile overhead isn't timed as steady state.
+        run_grad()
+        torch.cuda.synchronize()
+    except torch.cuda.OutOfMemoryError:
+        return BackwardResult(method_name, n, m, d, eps, 0, 0, 0, 0, oom=True)
+
+    try:
+        # Memory is the whole-device figure nvidia-smi/nvitop shows; see
+        # gpu_memory_used_mb() in bench_forward.py.
         total_ms = bench_with_stats(run_grad, warmup, rep)
-        peak_memory_mb = torch.cuda.max_memory_allocated(device) / 1e6
+        gpu_memory_mb = gpu_memory_used_mb(device)
 
         # Report forward_ms=-1, backward_ms=-1 (N/A) since we only measure total
         # Forward-only timing is available in bench_forward.py
-        return BackwardResult(method_name, n, m, d, eps, -1.0, -1.0, total_ms, peak_memory_mb, oom=False)
+        return BackwardResult(method_name, n, m, d, eps, -1.0, -1.0, total_ms, gpu_memory_mb, oom=False)
 
     except torch.cuda.OutOfMemoryError:
         return BackwardResult(method_name, n, m, d, eps, 0, 0, 0, 0, oom=True)
@@ -376,14 +386,14 @@ def bench_geomloss_backward(
         run_grad()
         torch.cuda.synchronize()
 
-        # Measure peak memory during grad evaluation
-        torch.cuda.reset_peak_memory_stats(device)
+        # Memory is the whole-device figure nvidia-smi/nvitop shows; see
+        # gpu_memory_used_mb() in bench_forward.py.
         total_ms = bench_with_stats(run_grad, warmup, rep)
-        peak_memory_mb = torch.cuda.max_memory_allocated(device) / 1e6
+        gpu_memory_mb = gpu_memory_used_mb(device)
 
         # Report forward_ms=-1, backward_ms=-1 (N/A) since we only measure total
         # Forward-only timing is available in bench_forward.py
-        return BackwardResult(method_name, n, m, d, eps, -1.0, -1.0, total_ms, peak_memory_mb, oom=False)
+        return BackwardResult(method_name, n, m, d, eps, -1.0, -1.0, total_ms, gpu_memory_mb, oom=False)
 
     except torch.cuda.OutOfMemoryError:
         return BackwardResult(method_name, n, m, d, eps, 0, 0, 0, 0, oom=True)
@@ -482,12 +492,12 @@ def bench_geomloss_tensorized_backward(
         torch.cuda.synchronize()
 
         # Capture peak memory after warmup (includes cost matrix allocation)
-        peak_memory_mb = torch.cuda.max_memory_allocated(device) / 1e6
+        gpu_memory_mb = gpu_memory_used_mb(device)
 
         # Time the steady-state execution
         total_ms = bench_with_stats(run_grad, warmup, rep)
 
-        return BackwardResult("geomloss_tensorized", n, m, d, eps, -1.0, -1.0, total_ms, peak_memory_mb, oom=False)
+        return BackwardResult("geomloss_tensorized", n, m, d, eps, -1.0, -1.0, total_ms, gpu_memory_mb, oom=False)
 
     except torch.cuda.OutOfMemoryError:
         return BackwardResult("geomloss_tensorized", n, m, d, eps, 0, 0, 0, 0, oom=True)
@@ -739,7 +749,7 @@ def save_results_csv(results: List[BackwardResult], output_path: Path) -> None:
             existing_results[key] = {
                 "method": r.method, "n": r.n, "m": r.m, "d": r.d, "eps": r.eps,
                 "forward_ms": "OOM", "backward_ms": "OOM", "total_ms": "OOM",
-                "peak_memory_mb": "OOM", "oom": True
+                "gpu_memory_mb": "OOM", "oom": True
             }
         else:
             fwd_str = "N/A" if r.forward_ms < 0 else f"{r.forward_ms:.3f}"
@@ -747,14 +757,14 @@ def save_results_csv(results: List[BackwardResult], output_path: Path) -> None:
             existing_results[key] = {
                 "method": r.method, "n": r.n, "m": r.m, "d": r.d, "eps": r.eps,
                 "forward_ms": fwd_str, "backward_ms": bwd_str,
-                "total_ms": f"{r.total_ms:.3f}", "peak_memory_mb": f"{r.peak_memory_mb:.1f}",
+                "total_ms": f"{r.total_ms:.3f}", "gpu_memory_mb": f"{r.gpu_memory_mb:.1f}",
                 "oom": False
             }
 
     # Write merged results
     with open(output_path, "w", newline="") as f:
         fieldnames = ["method", "n", "m", "d", "eps", "forward_ms", "backward_ms",
-                      "total_ms", "peak_memory_mb", "oom"]
+                      "total_ms", "gpu_memory_mb", "oom"]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         # Sort by (d, n, method) for consistent output

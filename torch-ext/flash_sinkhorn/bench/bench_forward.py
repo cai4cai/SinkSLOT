@@ -158,7 +158,7 @@ class TimingResult:
     min_ms: float
     max_ms: float
     median_ms: float
-    peak_memory_mb: float  # Peak GPU memory during benchmark
+    gpu_memory_mb: float  # whole-device GPU memory in use, as nvidia-smi reports it
     oom: bool
 
 
@@ -181,7 +181,7 @@ def timing_result_to_json(r: TimingResult) -> str:
         "method": r.method, "n": r.n, "m": r.m, "d": r.d, "eps": r.eps,
         "mean_ms": r.mean_ms, "std_ms": r.std_ms, "min_ms": r.min_ms,
         "max_ms": r.max_ms, "median_ms": r.median_ms,
-        "peak_memory_mb": r.peak_memory_mb, "oom": r.oom,
+        "gpu_memory_mb": r.gpu_memory_mb, "oom": r.oom,
     })
 
 
@@ -189,6 +189,25 @@ def timing_result_from_json(line: str) -> TimingResult:
     """Deserialize TimingResult from a JSON string."""
     d = json.loads(line)
     return TimingResult(**d)
+
+
+def gpu_memory_used_mb(device: torch.device) -> float:
+    """GPU memory in use on the device, in MB -- the number nvidia-smi / nvitop shows.
+
+    `torch.cuda.mem_get_info()` returns (free, total) straight from the CUDA driver, so
+    total - free is the whole-device figure: CUDA context, the caching allocator's
+    reserved pool, compiled Triton/KeOps kernels, cuBLAS workspaces -- everything, not
+    just live PyTorch tensors. It therefore also captures KeOps, which allocates outside
+    PyTorch's allocator and is invisible to torch.cuda.max_memory_allocated().
+
+    Device-level, not per-process: it includes any other process on the same GPU. Runs
+    are pinned to a dedicated device (CUDA_VISIBLE_DEVICES), so in practice this is our
+    process. It is also cumulative within a process -- PyTorch never returns pooled
+    memory to the driver -- so each measurement must run in its own process to be
+    attributable to one method. run.py does that by default (BenchConfig.isolate).
+    """
+    free, total = torch.cuda.mem_get_info(device)
+    return (total - free) / 1e6
 
 
 DATASET_CHOICES = ("gaussian", "8gaussians")
@@ -320,8 +339,17 @@ def bench_flashsinkhorn(
         _ = loss_fn(a, x, b, y)
 
     try:
-        # Measure peak memory during benchmark
-        torch.cuda.reset_peak_memory_stats(device)
+        # Trigger Triton JIT compilation + autotuning here, outside the measurement
+        # window, so the one-time compile overhead isn't timed as steady state
+        # (matches the GeomLoss/KeOps benchmark's pre-JIT warmup below).
+        run()
+        torch.cuda.synchronize()
+    except torch.cuda.OutOfMemoryError:
+        return TimingResult(method_name, n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True)
+
+    try:
+        # Memory is reported as the whole-device figure nvidia-smi/nvitop would show
+        # (see gpu_memory_used_mb), read after the timed loop.
         mean, std, min_t, max_t, median = bench_with_stats(
             run,
             warmup,
@@ -329,8 +357,8 @@ def bench_flashsinkhorn(
             nvtx=nvtx,
             nvtx_label=f"{method_name} n={n} d={d} eps={eps} iters={n_iters}",
         )
-        peak_memory_mb = torch.cuda.max_memory_allocated(device) / 1e6
-        return TimingResult(method_name, n, m, d, eps, mean, std, min_t, max_t, median, peak_memory_mb, oom=False)
+        gpu_memory_mb = gpu_memory_used_mb(device)
+        return TimingResult(method_name, n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False)
     except torch.cuda.OutOfMemoryError:
         return TimingResult(method_name, n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True)
 
@@ -397,8 +425,8 @@ def bench_geomloss_online(
         )
 
     try:
-        # Measure peak memory during benchmark
-        torch.cuda.reset_peak_memory_stats(device)
+        # Memory is reported as the whole-device figure nvidia-smi/nvitop would show
+        # (see gpu_memory_used_mb), read after the timed loop.
         mean, std, min_t, max_t, median = bench_with_stats(
             run,
             warmup,
@@ -406,8 +434,8 @@ def bench_geomloss_online(
             nvtx=nvtx,
             nvtx_label=f"geomloss_online n={n} d={d} eps={eps} iters={n_iters}",
         )
-        peak_memory_mb = torch.cuda.max_memory_allocated(device) / 1e6
-        return TimingResult("geomloss_online", n, m, d, eps, mean, std, min_t, max_t, median, peak_memory_mb, oom=False)
+        gpu_memory_mb = gpu_memory_used_mb(device)
+        return TimingResult("geomloss_online", n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False)
     except torch.cuda.OutOfMemoryError:
         return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True)
 
@@ -459,8 +487,8 @@ def bench_geomloss_tensorized(
         )
 
     try:
-        # Measure peak memory during benchmark
-        torch.cuda.reset_peak_memory_stats(device)
+        # Memory is reported as the whole-device figure nvidia-smi/nvitop would show
+        # (see gpu_memory_used_mb), read after the timed loop.
         mean, std, min_t, max_t, median = bench_with_stats(
             run,
             warmup,
@@ -468,8 +496,8 @@ def bench_geomloss_tensorized(
             nvtx=nvtx,
             nvtx_label=f"geomloss_tensorized n={n} d={d} eps={eps} iters={n_iters}",
         )
-        peak_memory_mb = torch.cuda.max_memory_allocated(device) / 1e6
-        return TimingResult("geomloss_tensorized", n, m, d, eps, mean, std, min_t, max_t, median, peak_memory_mb, oom=False)
+        gpu_memory_mb = gpu_memory_used_mb(device)
+        return TimingResult("geomloss_tensorized", n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False)
     except torch.cuda.OutOfMemoryError:
         return TimingResult("geomloss_tensorized", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True)
 
@@ -569,7 +597,7 @@ def bench_ott_jax_online(
         times_t.min().item(),
         times_t.max().item(),
         times_t.median().item(),
-        0,  # peak_memory_mb not available for JAX
+        0,  # gpu_memory_mb not measured for JAX
         oom=False,
     )
 
@@ -661,7 +689,7 @@ def bench_ott_jax_dense(
         times_t.min().item(),
         times_t.max().item(),
         times_t.median().item(),
-        0,  # peak_memory_mb not available for JAX
+        0,  # gpu_memory_mb not measured for JAX
         oom=False,
     )
 
@@ -1103,7 +1131,7 @@ def save_results_csv(results: List[TimingResult], output_path: Path) -> None:
         writer = csv.writer(f)
         writer.writerow([
             "method", "n", "m", "d", "eps",
-            "mean_ms", "std_ms", "min_ms", "max_ms", "median_ms", "peak_memory_mb", "oom"
+            "mean_ms", "std_ms", "min_ms", "max_ms", "median_ms", "gpu_memory_mb", "oom"
         ])
         for r in results:
             if r.oom or r.mean_ms != r.mean_ms:
@@ -1113,7 +1141,7 @@ def save_results_csv(results: List[TimingResult], output_path: Path) -> None:
                     r.method, r.n, r.m, r.d, r.eps,
                     f"{r.mean_ms:.4f}", f"{r.std_ms:.4f}",
                     f"{r.min_ms:.4f}", f"{r.max_ms:.4f}",
-                    f"{r.median_ms:.4f}", f"{r.peak_memory_mb:.1f}", False
+                    f"{r.median_ms:.4f}", f"{r.gpu_memory_mb:.1f}", False
                 ])
 
     print(f"\nSaved results to {output_path}")
