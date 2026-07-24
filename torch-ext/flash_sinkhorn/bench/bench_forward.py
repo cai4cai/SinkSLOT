@@ -191,6 +191,43 @@ def timing_result_from_json(line: str) -> TimingResult:
     return TimingResult(**d)
 
 
+DATASET_CHOICES = ("gaussian", "8gaussians")
+
+_EIGHT_GAUSSIANS_RADIUS = 2.0
+_EIGHT_GAUSSIANS_STD = 0.18
+
+
+def sample_point_cloud(
+    n: int, d: int, device: torch.device, *, dataset: str = "gaussian", target: bool = False,
+) -> torch.Tensor:
+    """Draw an (n, d) synthetic point cloud for benchmarking.
+
+    dataset="gaussian" (default): isotropic standard normal, N(0, I_d).
+
+    dataset="8gaussians": 8 clusters on a radius-2 ring, 45 degrees apart, with
+    std=0.18 isotropic noise per cluster (matches khainb/SROT's setup). The
+    source ring (target=False) starts at angle 0; the target ring (target=True)
+    is offset by 22.5 degrees so the two rings don't trivially line up. Only
+    the first 2 dims carry ring structure; any remaining dims are i.i.d. noise.
+    """
+    if dataset == "gaussian":
+        return torch.randn(n, d, device=device, dtype=torch.float32)
+
+    if dataset != "8gaussians":
+        raise ValueError(f"Unknown dataset: {dataset!r}. Choices: {DATASET_CHOICES}")
+    if d < 2:
+        raise ValueError("dataset='8gaussians' requires d >= 2")
+
+    offset = math.pi / 8 if target else 0.0
+    angles = offset + torch.arange(8, device=device, dtype=torch.float32) * (math.pi / 4)
+    centers = _EIGHT_GAUSSIANS_RADIUS * torch.stack([angles.cos(), angles.sin()], dim=1)  # (8, 2)
+
+    cluster_idx = torch.randint(0, 8, (n,), device=device)
+    points = torch.randn(n, d, device=device, dtype=torch.float32) * _EIGHT_GAUSSIANS_STD
+    points[:, :2] = points[:, :2] + centers[cluster_idx]
+    return points
+
+
 def bench_with_stats(
     fn: Callable[[], None],
     warmup: int = 10,
@@ -242,6 +279,7 @@ def bench_flashsinkhorn(
     nvtx: bool = False,
     backend: str = "symmetric",
     allow_tf32: bool = False,
+    dataset: str = "gaussian",
 ) -> TimingResult:
     """Benchmark FlashSinkhorn with fixed iterations.
 
@@ -255,8 +293,8 @@ def bench_flashsinkhorn(
     from flash_sinkhorn import SamplesLoss
 
     torch.manual_seed(0)
-    x = torch.randn(n, d, device=device, dtype=torch.float32)
-    y = torch.randn(m, d, device=device, dtype=torch.float32)
+    x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
+    y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
     a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
     b = torch.rand(m, device=device, dtype=torch.float32) + 0.1
     a = a / a.sum()
@@ -306,6 +344,7 @@ def bench_geomloss_online(
     device: torch.device, warmup: int, rep: int,
     *,
     nvtx: bool = False,
+    dataset: str = "gaussian",
 ) -> TimingResult:
     """Benchmark GeomLoss online (KeOps) with fixed iterations.
 
@@ -323,8 +362,8 @@ def bench_geomloss_online(
     from geomloss.sinkhorn_samples import lse_genred, softmin_online
 
     torch.manual_seed(0)
-    x = torch.randn(n, d, device=device, dtype=torch.float32)
-    y = torch.randn(m, d, device=device, dtype=torch.float32)
+    x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
+    y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
     a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
     b = torch.rand(m, device=device, dtype=torch.float32) + 0.1
     a = a / a.sum()
@@ -378,6 +417,7 @@ def bench_geomloss_tensorized(
     device: torch.device, warmup: int, rep: int,
     *,
     nvtx: bool = False,
+    dataset: str = "gaussian",
 ) -> TimingResult:
     """Benchmark GeomLoss tensorized (dense) with fixed iterations.
 
@@ -388,8 +428,8 @@ def bench_geomloss_tensorized(
     from geomloss.sinkhorn_samples import softmin_tensorized
 
     torch.manual_seed(0)
-    x = torch.randn(n, d, device=device, dtype=torch.float32)
-    y = torch.randn(m, d, device=device, dtype=torch.float32)
+    x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
+    y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
     a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
     b = torch.rand(m, device=device, dtype=torch.float32) + 0.1
     a = a / a.sum()
@@ -956,6 +996,7 @@ def run_forward_benchmark(
     verbose: bool = True,
     nvtx: bool = False,
     allow_tf32: bool = False,
+    dataset: str = "gaussian",
 ) -> List[TimingResult]:
     """Run forward pass benchmark.
 
@@ -986,7 +1027,7 @@ def run_forward_benchmark(
             if include_flash_symmetric:
                 res = bench_flashsinkhorn(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, backend="symmetric",
-                    allow_tf32=allow_tf32,
+                    allow_tf32=allow_tf32, dataset=dataset,
                 )
                 results.append(res)
                 if verbose:
@@ -997,7 +1038,7 @@ def run_forward_benchmark(
             if include_flash_alternating:
                 res = bench_flashsinkhorn(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, backend="alternating",
-                    allow_tf32=allow_tf32,
+                    allow_tf32=allow_tf32, dataset=dataset,
                 )
                 results.append(res)
                 if verbose:
@@ -1007,7 +1048,7 @@ def run_forward_benchmark(
             # GeomLoss online (KeOps)
             if include_geomloss:
                 res = bench_geomloss_online(
-                    n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx
+                    n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, dataset=dataset,
                 )
                 results.append(res)
                 if verbose:
@@ -1017,7 +1058,7 @@ def run_forward_benchmark(
             # GeomLoss tensorized (dense, small sizes only)
             if include_geomloss and include_tensorized and n <= max_dense_size:
                 res = bench_geomloss_tensorized(
-                    n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx
+                    n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, dataset=dataset,
                 )
                 results.append(res)
                 if verbose:
@@ -1414,6 +1455,8 @@ def run_forward_benchmark_subprocess(
             cmd.append("--no-flash-symmetric")
         if args.no_flash_alternating:
             cmd.append("--no-flash-alternating")
+        if args.dataset != "gaussian":
+            cmd.extend(["--dataset", args.dataset])
         if args.no_geomloss:
             cmd.append("--no-geomloss")
         if args.no_ott:
@@ -1477,6 +1520,10 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=10, help="Warmup iterations.")
     parser.add_argument("--rep", type=int, default=50, help="Timed repetitions.")
     parser.add_argument("--no-ott", action="store_true", help="Skip OTT-JAX benchmarks.")
+    parser.add_argument(
+        "--dataset", choices=DATASET_CHOICES, default="gaussian",
+        help="Synthetic point-cloud distribution to benchmark on.",
+    )
     parser.add_argument("--no-geomloss", action="store_true", help="Skip GeomLoss benchmarks.")
     parser.add_argument("--no-flash-symmetric", action="store_true", help="Skip FlashSinkhorn symmetric backend.")
     parser.add_argument("--no-flash-alternating", action="store_true", help="Skip FlashSinkhorn alternating backend.")
@@ -1577,6 +1624,7 @@ def main() -> None:
             verbose=False,
             nvtx=False,
             allow_tf32=args.tf32,
+            dataset=args.dataset,
         )
 
         # Emit JSON lines to stdout for the orchestrator to parse
@@ -1626,6 +1674,7 @@ def main() -> None:
             include_ott=include_ott,
             verbose=not args.quiet,
             allow_tf32=args.tf32,
+            dataset=args.dataset,
         )
 
         # Print and save summary
@@ -1666,6 +1715,7 @@ def main() -> None:
     print(f"  Sizes: {sorted(sizes, reverse=True)} (large->small)")
     print(f"  Dimensions: {dims}")
     print(f"  Epsilon: {args.eps}")
+    print(f"  Dataset: {args.dataset}")
     print(f"  Iterations: {args.n_iters}")
     print(f"  Warmup: {args.warmup}, Reps: {args.rep}")
     print(f"  Precision: {'TF32' if args.tf32 else 'FP32 (strict)'}")
@@ -1702,6 +1752,7 @@ def main() -> None:
             verbose=not args.quiet,
             nvtx=nvtx_enabled,
             allow_tf32=args.tf32,
+            dataset=args.dataset,
         )
 
     output_dir = Path(args.output_dir)

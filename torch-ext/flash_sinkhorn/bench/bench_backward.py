@@ -70,6 +70,7 @@ import argparse
 import csv
 import ctypes
 import gc
+import math
 import time
 from dataclasses import dataclass
 from functools import partial
@@ -116,6 +117,47 @@ def _set_tf32(enabled: bool) -> None:
             torch.set_float32_matmul_precision("highest")
         except Exception:
             pass
+
+
+DATASET_CHOICES = ("gaussian", "8gaussians")
+
+_EIGHT_GAUSSIANS_RADIUS = 2.0
+_EIGHT_GAUSSIANS_STD = 0.18
+
+
+def sample_point_cloud(
+    n: int, d: int, device: torch.device, *, dataset: str = "gaussian", target: bool = False,
+) -> torch.Tensor:
+    """Draw an (n, d) synthetic point cloud for benchmarking.
+
+    Mirrors sample_point_cloud() in bench_forward.py -- kept in sync by duplication,
+    matching how this module already duplicates _preload_cuda_libs/bench_with_stats,
+    so each benchmark stays runnable as a standalone script.
+
+    dataset="gaussian" (default): isotropic standard normal, N(0, I_d).
+
+    dataset="8gaussians": 8 clusters on a radius-2 ring, 45 degrees apart, with
+    std=0.18 isotropic noise per cluster (matches khainb/SROT's setup). The
+    source ring (target=False) starts at angle 0; the target ring (target=True)
+    is offset by 22.5 degrees so the two rings don't trivially line up. Only
+    the first 2 dims carry ring structure; any remaining dims are i.i.d. noise.
+    """
+    if dataset == "gaussian":
+        return torch.randn(n, d, device=device, dtype=torch.float32)
+
+    if dataset != "8gaussians":
+        raise ValueError(f"Unknown dataset: {dataset!r}. Choices: {DATASET_CHOICES}")
+    if d < 2:
+        raise ValueError("dataset='8gaussians' requires d >= 2")
+
+    offset = math.pi / 8 if target else 0.0
+    angles = offset + torch.arange(8, device=device, dtype=torch.float32) * (math.pi / 4)
+    centers = _EIGHT_GAUSSIANS_RADIUS * torch.stack([angles.cos(), angles.sin()], dim=1)  # (8, 2)
+
+    cluster_idx = torch.randint(0, 8, (n,), device=device)
+    points = torch.randn(n, d, device=device, dtype=torch.float32) * _EIGHT_GAUSSIANS_STD
+    points[:, :2] = points[:, :2] + centers[cluster_idx]
+    return points
 
 
 @dataclass
@@ -175,6 +217,7 @@ def bench_flashsinkhorn_backward(
     grad: str = "x",
     backend: str = "symmetric",
     allow_tf32: bool = False,
+    dataset: str = "gaussian",
 ) -> BackwardResult:
     """Benchmark FlashSinkhorn forward and end-to-end grad evaluation.
 
@@ -190,8 +233,8 @@ def bench_flashsinkhorn_backward(
     from flash_sinkhorn import SamplesLoss
 
     torch.manual_seed(0)
-    x = torch.randn(n, d, device=device, dtype=torch.float32).requires_grad_(True)
-    y = torch.randn(m, d, device=device, dtype=torch.float32)
+    x = sample_point_cloud(n, d, device, dataset=dataset, target=False).requires_grad_(True)
+    y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
     if grad == "xy":
         y.requires_grad_(True)
     a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
@@ -249,6 +292,7 @@ def bench_geomloss_backward(
     device: torch.device, warmup: int, rep: int,
     backend: str = "symmetric",
     grad: str = "x",
+    dataset: str = "gaussian",
 ) -> BackwardResult:
     """Benchmark GeomLoss (KeOps) forward and end-to-end grad evaluation.
 
@@ -270,8 +314,8 @@ def bench_geomloss_backward(
     from geomloss.sinkhorn_samples import lse_genred, softmin_online
 
     torch.manual_seed(0)
-    x = torch.randn(n, d, device=device, dtype=torch.float32).requires_grad_(True)
-    y = torch.randn(m, d, device=device, dtype=torch.float32)
+    x = sample_point_cloud(n, d, device, dataset=dataset, target=False).requires_grad_(True)
+    y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
     if grad == "xy":
         y.requires_grad_(True)
     a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
@@ -353,6 +397,7 @@ def bench_geomloss_tensorized_backward(
     n: int, m: int, d: int, eps: float, n_iters: int,
     device: torch.device, warmup: int, rep: int,
     grad: str = "x",
+    dataset: str = "gaussian",
 ) -> BackwardResult:
     """Benchmark GeomLoss Tensorized (dense) forward and end-to-end grad evaluation.
 
@@ -368,8 +413,8 @@ def bench_geomloss_tensorized_backward(
     from geomloss.sinkhorn_samples import softmin_tensorized
 
     torch.manual_seed(0)
-    x = torch.randn(n, d, device=device, dtype=torch.float32).requires_grad_(True)
-    y = torch.randn(m, d, device=device, dtype=torch.float32)
+    x = sample_point_cloud(n, d, device, dataset=dataset, target=False).requires_grad_(True)
+    y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
     if grad == "xy":
         y.requires_grad_(True)
     a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
@@ -579,6 +624,7 @@ def run_backward_benchmark(
     include_tensorized: bool = False,
     max_dense_size: int = 8192,
     allow_tf32: bool = False,
+    dataset: str = "gaussian",
 ) -> List[BackwardResult]:
     """Run backward pass benchmark (sizes large->small).
 
@@ -601,7 +647,7 @@ def run_backward_benchmark(
 
         # FlashSinkhorn (symmetric backend - GeomLoss-style Jacobi updates)
         if not skip_flash_symmetric:
-            res = bench_flashsinkhorn_backward(n, n, d, eps, n_iters, device, warmup, rep, grad=grad, backend="symmetric", allow_tf32=allow_tf32)
+            res = bench_flashsinkhorn_backward(n, n, d, eps, n_iters, device, warmup, rep, grad=grad, backend="symmetric", allow_tf32=allow_tf32, dataset=dataset)
             results.append(res)
             if verbose:
                 if res.oom:
@@ -613,7 +659,7 @@ def run_backward_benchmark(
 
         # FlashSinkhorn (alternating backend - OTT-JAX-style Gauss-Seidel updates)
         if not skip_flash_alternating:
-            res = bench_flashsinkhorn_backward(n, n, d, eps, n_iters, device, warmup, rep, grad=grad, backend="alternating", allow_tf32=allow_tf32)
+            res = bench_flashsinkhorn_backward(n, n, d, eps, n_iters, device, warmup, rep, grad=grad, backend="alternating", allow_tf32=allow_tf32, dataset=dataset)
             results.append(res)
             if verbose:
                 if res.oom:
@@ -625,7 +671,7 @@ def run_backward_benchmark(
 
         # GeomLoss online (KeOps)
         if not skip_geomloss:
-            res = bench_geomloss_backward(n, n, d, eps, n_iters, device, warmup, rep, "online", grad=grad)
+            res = bench_geomloss_backward(n, n, d, eps, n_iters, device, warmup, rep, "online", grad=grad, dataset=dataset)
             results.append(res)
             if verbose:
                 if res.oom:
@@ -637,7 +683,7 @@ def run_backward_benchmark(
 
         # GeomLoss tensorized (dense, small sizes only)
         if not skip_geomloss and include_tensorized and n <= max_dense_size:
-            res = bench_geomloss_tensorized_backward(n, n, d, eps, n_iters, device, warmup, rep, grad=grad)
+            res = bench_geomloss_tensorized_backward(n, n, d, eps, n_iters, device, warmup, rep, grad=grad, dataset=dataset)
             results.append(res)
             if verbose:
                 if res.oom:
@@ -1006,6 +1052,10 @@ def main() -> None:
     parser.add_argument("--no-tf32", dest="tf32", action="store_false",
                         help="Disable TF32 for strict FP32 (slower but higher precision).")
     parser.add_argument(
+        "--dataset", choices=DATASET_CHOICES, default="gaussian",
+        help="Synthetic point-cloud distribution to benchmark on.",
+    )
+    parser.add_argument(
         "--output-dir", type=str, default="output/paper_benchmarks/backward",
         help="Output directory."
     )
@@ -1048,6 +1098,7 @@ def main() -> None:
     print(f"  Sizes: {sorted(sizes, reverse=True)}")
     print(f"  Dimensions: {dims}")
     print(f"  Epsilon: {args.eps}")
+    print(f"  Dataset: {args.dataset}")
     print(f"  Precision: {'TF32' if args.tf32 else 'FP32 (strict)'}")
     print(f"  Grad: {args.grad}")
     print(f"  FlashSinkhorn backends: symmetric={not args.no_flash_symmetric}, alternating={not args.no_flash_alternating}")
@@ -1078,6 +1129,7 @@ def main() -> None:
             include_tensorized=args.tensorized,
             max_dense_size=args.max_dense_size,
             allow_tf32=args.tf32,
+            dataset=args.dataset,
         )
         all_results.extend(results)
 
