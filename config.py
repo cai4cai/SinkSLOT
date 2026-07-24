@@ -59,6 +59,13 @@ class BenchConfig:
         sinkslot_slices: L values to sweep for SinkSLOT -- number of 1-D projections.
             Sparse O(L(N+M)), so unlike SROT it is not gated by max_dense_size.
 
+        no_sinkslotcuda: Skip SinkSLOT-CUDA -- the same method and solve kernels as
+            SinkSLOT with a CUDA-optimised setup path (fused Triton cost, fp64 (C,n)
+            cumsum, int32 CSC key), 2.1-3.1x faster end to end. The fp64 scan yields a
+            strictly more accurate sliced support, so it keeps its own RMAE reference.
+        sinkslotcuda_slices: L values to sweep for SinkSLOT-CUDA. Kept separate from
+            sinkslot_slices so the two can be compared at matched L or swept apart.
+
         no_sparsink: Skip the Spar-Sink and Rand-Sink baselines.
         sparsink_s: Expected kernel subsample sizes s to sweep. Their paper uses
             s = {2,4,8,16} * s0(n) with s0(n) = 1e-3 * n * log^4(n), i.e. s0(256) ~ 242
@@ -132,6 +139,9 @@ class BenchConfig:
     no_sinkslot: bool = False
     sinkslot_slices: List[int] = field(default_factory=lambda: [10])
 
+    no_sinkslotcuda: bool = False
+    sinkslotcuda_slices: List[int] = field(default_factory=lambda: [10])
+
     no_sparsink: bool = False
     sparsink_s: List[int] = field(default_factory=lambda: [8000])
     sparsink_replicates: int = 5
@@ -155,4 +165,62 @@ class BenchConfig:
     dry_run: bool = True
 
 
-CONFIG = BenchConfig()
+# Quick-iteration sweep. Structurally identical ("ditto") to config_paper.py --
+# same fields, same methods (including both SinkSLOT and SinkSLOT-CUDA), same
+# early-stopping/convergence block -- but a deliberately tiny grid so the whole
+# thing runs in minutes while wiring is being changed. config_paper.py is the same
+# shape with the full publication values. Flip stop_mode here and in config_paper
+# together to keep the two protocols matched.
+CONFIG = BenchConfig(
+    which="forward",
+
+    sizes=[512, 2048],
+    dims=[8],
+
+    eps_values=[0.1, 0.01],
+    n_iters=50,
+
+    # Convergence / early stopping (see the class docstring). "fixed" is the
+    # published protocol -- exactly n_iters for every method, for a fair
+    # per-iteration throughput comparison. Set stop_mode="marginal" here AND in
+    # config_paper.py to switch both to time-to-accuracy.
+    stop_mode="fixed",
+    max_iter=10000,
+    stop_tol=1e-4,
+    potential_tol=1e-6,
+    mass_tol=1e-6,
+    check_every=10,
+
+    warmup=5,
+    rep=10,
+    tf32=True,
+
+    datasets=["gaussian"],
+
+    no_srot=False,
+    srot_slices=[10],
+    srot_delta=1e-8,
+
+    no_sinkslot=False,
+    sinkslot_slices=[64],
+
+    no_sinkslotcuda=False,
+    sinkslotcuda_slices=[64],   # matched to sinkslot_slices for a head-to-head
+
+    no_sparsink=False,
+    sparsink_s=[8000],
+    sparsink_replicates=5,
+
+    no_ott=True,
+    no_rmae_check=False,
+    no_geomloss=False,
+    no_flash_symmetric=False,
+    no_flash_alternating=False,
+
+    isolate=True,
+    tensorized=False,
+    max_dense_size=2048,
+
+    output_dir="output/quick",
+    dry_run=True,
+)

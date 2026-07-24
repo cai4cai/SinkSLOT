@@ -6,19 +6,28 @@ pins the values. Run with:
 
     python run.py --config config_paper --execute
 
-This is a large, cluster-scale sweep (thousands of units, hours on one GPU), not
-a smoke test. Every run is a separate subprocess and results append to one CSV,
-so it is resumable-friendly and survives individual failures.
+This is structurally identical ("ditto") to ``config.py``: the same fields, the
+same methods (both SinkSLOT and SinkSLOT-CUDA), and the same early-stopping /
+convergence block. The only difference is scale -- ``config.py`` is a tiny
+quick-iteration grid, this one carries the full publication values (hours on one
+GPU). Keep the two in lockstep: if you flip ``stop_mode`` to ``"marginal"`` for a
+time-to-accuracy table, flip it in both.
+
+This is a large, cluster-scale sweep (thousands of units), not a smoke test.
+Every run is a separate subprocess and results append to one CSV, so it is
+resumable-friendly and survives individual failures.
 
 Design of the grid:
 
 - ``sizes`` span two regimes. Up to ``max_dense_size`` (4096) every method runs,
   for the accuracy comparison. Above it the dense baselines (SROT, Spar-Sink,
   Rand-Sink, tensorized GeomLoss) drop out and only the streaming/sparse methods
-  (FlashSinkhorn, GeomLoss online, SinkSLOT) remain, for the scaling and memory
-  story where the O(N^2) baselines OOM.
-- ``sinkslot_slices`` follow the SLOT paper's memory sweep (L = 32/100/256/512),
-  so the O(L(N+M)) growth is visible.
+  (FlashSinkhorn, GeomLoss online, SinkSLOT, SinkSLOT-CUDA) remain, for the
+  scaling and memory story where the O(N^2) baselines OOM.
+- ``sinkslot_slices`` and ``sinkslotcuda_slices`` follow the SLOT paper's memory
+  sweep (L = 32/100/256/512) and are held equal, so SinkSLOT vs SinkSLOT-CUDA is
+  a matched-L head-to-head (same plan size, only the setup path differs) and the
+  O(L(N+M)) growth is visible.
 - ``tensorized`` is on so the dense O(N^2) GeomLoss baseline is present as the
   memory contrast (it OOMs beyond max_dense_size, which is the point).
 - ``n_iters`` is high enough that the dense methods are near-converged, so RMAE
@@ -41,6 +50,17 @@ CONFIG = BenchConfig(
 
     eps_values=[0.1, 0.01, 0.001],
     n_iters=100,
+
+    # Convergence / early stopping -- identical block to config.py. "fixed" is the
+    # published protocol (exactly n_iters per method, fair per-iteration
+    # throughput). Switch to "marginal" here AND in config.py for time-to-accuracy.
+    stop_mode="fixed",
+    max_iter=10000,
+    stop_tol=1e-4,
+    potential_tol=1e-6,
+    mass_tol=1e-6,
+    check_every=10,
+
     warmup=10,
     rep=50,
     tf32=True,
@@ -51,6 +71,12 @@ CONFIG = BenchConfig(
     srot_slices=[10, 50, 100],
     srot_delta=1e-8,
 
+    no_sinkslot=False,
+    sinkslot_slices=[32, 100, 256, 512],
+
+    no_sinkslotcuda=False,
+    sinkslotcuda_slices=[32, 100, 256, 512],   # matched to sinkslot_slices
+
     no_sparsink=False,
     sparsink_s=[2000, 8000, 32000],
     sparsink_replicates=50,
@@ -60,9 +86,6 @@ CONFIG = BenchConfig(
     no_geomloss=False,
     no_flash_symmetric=False,
     no_flash_alternating=False,
-
-    no_sinkslot=False,
-    sinkslot_slices=[32, 100, 256, 512],
 
     isolate=True,
     tensorized=True,

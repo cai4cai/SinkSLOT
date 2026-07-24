@@ -102,9 +102,72 @@ def _ot_1d_coo_batched(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: t
     return R[keep], Cc[keep], mass[keep]
 
 
+def _ot_1d_coo_batched_cuda(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
+    """CUDA-optimised `_ot_1d_coo_batched`: same plan, transposed layout, fp64 scan.
+
+    This is the SinkSLOT-CUDA setup path. Identical construction to the naive
+    version above, restructured for the GPU on two measured axes:
+
+    * Layout. Everything runs in the TRANSPOSED (C, len) layout. Profiled at
+      n=65536, L=200, the two cumsums were 42.4 ms of the naive function's
+      55.8 ms -- ~5 GB/s, because `dim=0` on an (n, C) tensor is the strided scan
+      path. The same scan along the contiguous last dim of (C, n) is 110x faster,
+      and working in (C, ...) throughout removes the `mid.T` copies (105 MB each,
+      twice) and leaves the gather indices contiguous.
+
+    * Precision. With normalised weights ca runs 0->1, so an fp32 scan over n
+      terms carries ~sqrt(n)*eps ~ 3e-5 of accumulated error while a typical
+      segment mass is ~1/(n+m) ~ 7.6e-6. The rounding exceeds the masses it
+      defines, so `mass > 0` -- the support -- depends on the scan's blocking.
+      Against an fp64 reference plan the naive fp32 dim=0 scan disagreed on 1.27%
+      of the support at n=16384 and 3.81% at n=32768; fp64 accumulation is exact
+      to ~1e-16 relative, so the plan becomes layout- and blocking-independent.
+
+    Net: 49.5x on the dominant stage AND a strictly more accurate plan. Because
+    the support differs from the naive fp32 scan, SinkSLOT-CUDA keeps its own
+    reference-cache namespace (see bench_forward.py).
+    """
+    n, C = PX.shape
+    m = PY.shape[0]
+    PXt, PYt = PX.T.contiguous(), PY.T.contiguous()    # (C, n), (C, m)
+    ix = torch.argsort(PXt, dim=-1)                    # (C, n)
+    iy = torch.argsort(PYt, dim=-1)                    # (C, m)
+    ca = torch.cumsum(a[ix].double(), dim=-1).float()  # (C, n), sorted asc per row
+    cb = torch.cumsum(b[iy].double(), dim=-1).float()  # (C, m), sorted asc per row
+
+    # Merge ca and cb into sorted `bounds` (C, n+m) via rank-scatter.
+    # rank of ca[i] = i + #{cb < ca[i]}; rank of cb[j] = j + #{ca <= cb[j]}.
+    # The asymmetric side (right for one, left for the other) breaks ties so the
+    # two rank sets are a permutation of 0..n+m-1 with no collisions.
+    rank_a = (torch.arange(n, device=PX.device)[None, :]
+              + torch.searchsorted(cb, ca, right=True))            # (C, n)
+    rank_b = (torch.arange(m, device=PX.device)[None, :]
+              + torch.searchsorted(ca, cb, right=False))           # (C, m)
+
+    bounds = ca.new_empty(C, n + m)
+    bounds.scatter_(1, rank_a, ca)
+    bounds.scatter_(1, rank_b, cb)
+
+    prev = torch.cat([bounds.new_zeros(C, 1), bounds[:, :-1]], dim=1)
+    mass = bounds - prev
+    mid = 0.5 * (prev + bounds)
+
+    i = torch.searchsorted(ca, mid).clamp_(max=n - 1)   # (C, n+m), contiguous
+    j = torch.searchsorted(cb, mid).clamp_(max=m - 1)   # (C, n+m), contiguous
+    R = torch.gather(ix, 1, i)
+    Cc = torch.gather(iy, 1, j)
+
+    # Take the mask's compaction index once and gather with it rather than masking
+    # R/Cc/mass separately (which runs the compaction scan three times): 3.27 ->
+    # 1.24 ms at n=65536, L=200, bit-identical output. Flattens slice-major, but
+    # the caller coalesces by key immediately so emission order is immaterial.
+    sel = (mass > 0).reshape(-1).nonzero(as_tuple=False).squeeze(1)
+    return R.reshape(-1)[sel], Cc.reshape(-1)[sel], mass.reshape(-1)[sel]
+
+
 def sot_plan_coo(
     X: torch.Tensor, Y: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
-    L: int, seed: int, chunk: int = None,
+    L: int, seed: int, chunk: int = None, ot1d=_ot_1d_coo_batched,
 ):
     """Unsmoothed SOT plan as COO: (rows, cols, vals), nnz <= L(N+M).
 
@@ -121,6 +184,10 @@ def sot_plan_coo(
 
     The flat key `row * m + col` is int32 whenever n*m fits, which halves both
     the key array and the sort workspace inside `unique`.
+
+    `ot1d` selects the per-slice 1-D OT builder: the naive `_ot_1d_coo_batched`
+    (the SinkSLOT baseline) or `_ot_1d_coo_batched_cuda` (the SinkSLOT-CUDA fp64
+    path). Only the plan differs; the coalesce is identical.
     """
     n, d = X.shape
     m = Y.shape[0]
@@ -153,7 +220,7 @@ def sot_plan_coo(
     for start in range(0, L, chunk):
         th = thetas[start:start + chunk]
         PX, PY = X @ th.T, Y @ th.T
-        r, c, v = _ot_1d_coo_batched(PX, PY, a, b)
+        r, c, v = ot1d(PX, PY, a, b)
         del PX, PY
         f = (r * m + c).to(key_dtype)
         if run_f is not None:
@@ -166,7 +233,8 @@ def sot_plan_coo(
     return (run_f // m).long(), (run_f % m).long(), run_v / L
 
 
-def to_csr(rows: torch.Tensor, cols: torch.Tensor, vals: torch.Tensor, n: int):
+def to_csr(rows: torch.Tensor, cols: torch.Tensor, vals: torch.Tensor, n: int,
+           narrow_key: bool = False):
     """COO -> CSR. Returns (indptr, colidx, vals_permuted, perm).
 
     `perm` is kept so caller-side per-entry arrays (cost, plan values) can be
@@ -178,6 +246,11 @@ def to_csr(rows: torch.Tensor, cols: torch.Tensor, vals: torch.Tensor, n: int):
     loop's cost is the gather `psi[colidx[k]]`, whose locality is exactly that
     ordering. For the CSC build (axes swapped) the same argument makes rows
     ascending within each column.
+
+    `narrow_key` (SinkSLOT-CUDA path) casts the CSC sort key to int32 when `n`
+    fits: the key is a row index bounded by `n`, so a 32-bit radix pass suffices
+    and the int64 sort was scanning 64 bits for nothing -- 4.96 -> 2.24 ms at
+    nnz=26M, same permutation (stability makes it exact, not merely equivalent).
     """
     # `sot_plan_coo` coalesces on the flat key `row * m + col` and returns it
     # sorted, so for the CSR build `rows` is already non-decreasing and the
@@ -187,7 +260,8 @@ def to_csr(rows: torch.Tensor, cols: torch.Tensor, vals: torch.Tensor, n: int):
     if bool(torch.all(rows[1:] >= rows[:-1])):
         perm, r = None, rows
     else:
-        perm = torch.argsort(rows, stable=True)
+        key = rows.to(torch.int32) if (narrow_key and n < 2 ** 31) else rows
+        perm = torch.argsort(key, stable=True)
         r = rows[perm]
     counts = torch.bincount(r, minlength=n)
     indptr = torch.zeros(n + 1, dtype=torch.int32, device=rows.device)
@@ -201,6 +275,43 @@ def to_csr(rows: torch.Tensor, cols: torch.Tensor, vals: torch.Tensor, n: int):
     idx = cols if perm is None else cols[perm]
     return indptr, idx.to(torch.int16 if int(idx.max()) < 2**15 else torch.int32), \
         (vals if perm is None else vals[perm]), perm
+
+
+@triton.jit
+def _cost_kernel(X, Y, ROWS, COLS, OUT, NNZ, D: tl.constexpr, BLOCK: tl.constexpr):
+    """out[k] = ||x[rows[k]] - y[cols[k]]||^2, one pass, no (nnz, d) temporaries."""
+    k = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = k < NNZ
+    r = tl.load(ROWS + k, mask=mask, other=0).to(tl.int64)
+    c = tl.load(COLS + k, mask=mask, other=0).to(tl.int64)
+    acc = tl.zeros([BLOCK], dtype=tl.float32)
+    for j in tl.static_range(D):
+        xv = tl.load(X + r * D + j, mask=mask, other=0.0)
+        yv = tl.load(Y + c * D + j, mask=mask, other=0.0)
+        dv = xv - yv
+        acc += dv * dv
+    tl.store(OUT + k, acc, mask=mask)
+
+
+def sparse_sqeuclidean_cost(x, y, rows, cols, block: int = 1024):
+    """Squared-euclidean cost on the sparse support, fused (SinkSLOT-CUDA path).
+
+    The obvious `(x[rows] - y[cols]).square().sum(1)` materialises three (nnz, d)
+    intermediates to produce one float per entry -- 832 MB each at nnz=26M, d=8,
+    against 104 MB of output. Measured 9-10x faster fused across n=16k..65k, and
+    it is the difference between the cost stage being 27.8 ms and 3.1 ms at
+    n=65536, L=200.
+
+    Agrees with the torch expression to ~3e-7 relative (fp32 reassociation of the
+    d-term sum); the resulting shift in the dual objective is below 2e-7.
+    """
+    nnz, d = rows.numel(), x.shape[1]
+    out = torch.empty(nnz, device=x.device, dtype=torch.float32)
+    _cost_kernel[(triton.cdiv(nnz, block),)](
+        x.contiguous(), y.contiguous(), rows, cols, out, nnz,
+        D=d, BLOCK=block, num_warps=4,
+    )
+    return out
 
 
 @triton.jit

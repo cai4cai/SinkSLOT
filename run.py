@@ -86,6 +86,12 @@ def build_command(
         ss_values = [slices] if slices is not None and method == "sinkslot" else cfg.sinkslot_slices
         cmd += ["--sinkslot-slices", ",".join(str(v) for v in ss_values)]
 
+    if cfg.no_sinkslotcuda:
+        cmd.append("--no-sinkslotcuda")
+    elif method in (None, "sinkslotcuda"):
+        sc_values = [slices] if slices is not None and method == "sinkslotcuda" else cfg.sinkslotcuda_slices
+        cmd += ["--sinkslotcuda-slices", ",".join(str(v) for v in sc_values)]
+
     if cfg.stop_mode != "fixed":
         cmd += ["--stop-mode", cfg.stop_mode,
                 "--max-iter", str(cfg.max_iter),
@@ -146,6 +152,8 @@ def _methods(cfg: BenchConfig) -> List[str]:
         names.append("srot")
     if not cfg.no_sinkslot:
         names.append("sinkslot")
+    if not cfg.no_sinkslotcuda:
+        names.append("sinkslotcuda")
     if not cfg.no_sparsink:
         names += ["spar_sink", "rand_sink"]
     return names
@@ -170,11 +178,17 @@ def _units(cfg: BenchConfig):
                             # s expands these two only, like L for SROT.
                             for s_size in cfg.sparsink_s:
                                 yield dataset, eps, method, size, dim, s_size
-                        elif method in ("srot", "sinkslot"):
-                            # L expands SROT rows only -- for every other method it is
-                            # meaningless, and sweeping it at the top level would just
-                            # duplicate identical rows.
-                            for slices in cfg.srot_slices:
+                        elif method in ("srot", "sinkslot", "sinkslotcuda"):
+                            # L expands the sliced methods only -- for every other method
+                            # it is meaningless, and sweeping it at the top level would
+                            # just duplicate identical rows. Each method carries its own
+                            # L list (srot_slices / sinkslot_slices / sinkslotcuda_slices).
+                            l_values = {
+                                "srot": cfg.srot_slices,
+                                "sinkslot": cfg.sinkslot_slices,
+                                "sinkslotcuda": cfg.sinkslotcuda_slices,
+                            }[method]
+                            for slices in l_values:
                                 yield dataset, eps, method, size, dim, slices
                         else:
                             yield dataset, eps, method, size, dim, None

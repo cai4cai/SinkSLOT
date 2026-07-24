@@ -1552,6 +1552,98 @@ def bench_sinkslot(
                             n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices)
 
 
+def bench_sinkslotcuda(
+    n: int, m: int, d: int, eps: float, n_iters: int,
+    device: torch.device, warmup: int, rep: int,
+    *,
+    nvtx: bool = False,
+    allow_tf32: bool = False,
+    dataset: str = "gaussian",
+    rmae_check: bool = True,
+    slices: int = 50,
+    stop: "StopCfg" = None,
+) -> TimingResult:
+    """Benchmark SinkSLOT-CUDA: SinkSLOT v5 with the CUDA-optimised setup path.
+
+    Same method and same solve kernels as ``bench_sinkslot`` -- the only difference
+    is the plan-build/setup, which is 2.1-3.1x faster end to end:
+
+    * ``sparse_sqeuclidean_cost`` -- fused Triton cost kernel (9-10x on the cost
+      stage; no (nnz, d) temporaries).
+    * ``_ot_1d_coo_batched_cuda`` -- transposed (C, n) layout with fp64 cumsum
+      accumulation (49.5x on the dominant stage AND a strictly more accurate plan).
+    * ``to_csr(..., narrow_key=True)`` -- int32 CSC sort key (4.96 -> 2.24 ms).
+
+    Because the fp64 scan yields a *different* (more accurate) sliced support than
+    the baseline's fp32 scan, SinkSLOT-CUDA carries its own converged-reference
+    cache. Its RMAE is therefore measured against its own plan's optimum, exactly
+    as SinkSLOT is against the baseline plan. See sinkslot.py.
+    """
+    from flash_sinkhorn.bench.sinkslot import (
+        sot_plan_coo, to_csr, sparse_sqeuclidean_cost, _ot_1d_coo_batched_cuda, _run_v5,
+    )
+    _set_tf32(allow_tf32)
+
+    torch.manual_seed(0)
+    x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
+    y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
+    a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
+    b = torch.rand(m, device=device, dtype=torch.float32) + 0.1
+    a = a / a.sum(); b = b / b.sum()
+    log_a, log_b = a.log(), b.log()
+
+    def _setup():
+        rows, cols, S = sot_plan_coo(x, y, a, b, L=slices, seed=0, ot1d=_ot_1d_coo_batched_cuda)
+        cost = sparse_sqeuclidean_cost(x, y, rows, cols)
+        log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
+        lam = log_S - cost / eps
+        r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n, narrow_key=True)
+        c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m, narrow_key=True)
+        return rows, cols, S, cost, log_S, r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam
+
+    try:
+        # Setup: sliced support + CSR/CSC layouts, timed once (warmed).
+        _setup()
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        (rows, cols, S, cost, log_S,
+         r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam) = _setup()
+        torch.cuda.synchronize()
+        setup_ms = (time.perf_counter() - t0) * 1e3
+    except torch.cuda.OutOfMemoryError:
+        return TimingResult("sinkslotcuda", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
+                            n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices)
+
+    _stop = stop or StopCfg.fixed()
+
+    def run():
+        _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop)
+
+    phi, psi, iters_run, converged, final_viol = _run_v5(
+        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop)
+    rmae_pct = None
+    if rmae_check:
+        reference = _cached_sinkslotcuda_reference(n, m, d, eps, slices, rows, cols, log_S,
+                                                   cost, log_a, log_b, a, b, dataset=dataset)
+        loss_value = eps * float((a * phi).sum() + (b * psi).sum())
+        rmae_pct = _rmae_pct(loss_value, reference)
+
+    try:
+        run(); torch.cuda.synchronize()
+        mean, std, min_t, max_t, median = bench_with_stats(
+            run, warmup, rep, nvtx=nvtx,
+            nvtx_label=f"sinkslotcuda n={n} d={d} eps={eps} iters={n_iters} L={slices}")
+        gpu_memory_mb = gpu_memory_used_mb(device)
+        return TimingResult("sinkslotcuda", n, m, d, eps, mean, std, min_t, max_t, median,
+                            gpu_memory_mb, oom=False, n_iters=n_iters, rmae_pct=rmae_pct,
+                            dataset=dataset, tf32=allow_tf32, srot_slices=slices,
+                            nnz=int(rows.numel()), setup_ms=setup_ms,
+                            iters_run=iters_run, converged=converged, final_viol=final_viol)
+    except torch.cuda.OutOfMemoryError:
+        return TimingResult("sinkslotcuda", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
+                            n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices)
+
+
 _sinkslot_ref_cache: Dict[str, float] = {}
 _SINKSLOT_REF_CACHE_PATH = Path.home() / ".cache" / "flash_sinkhorn" / "sinkslot_reference.json"
 _SINKSLOT_REF_CACHE_VERSION = 1
@@ -1581,6 +1673,40 @@ def _cached_sinkslot_reference(n, m, d, eps, slices, rows, cols, log_S, cost,
     except OSError as e:
         print(f"  [warn] could not write SinkSLOT reference cache: {e}")
     return _sinkslot_ref_cache[key]
+
+
+_sinkslot_cuda_ref_cache: Dict[str, float] = {}
+_SINKSLOT_CUDA_REF_CACHE_PATH = Path.home() / ".cache" / "flash_sinkhorn" / "sinkslotcuda_reference.json"
+# Separate namespace from the SinkSLOT cache: the CUDA path's fp64 cumsum yields a
+# different (more accurate) sliced support than the baseline's fp32 scan -- the two
+# disagreed on up to 3.8% of the support -- so each converges to its own optimum.
+_SINKSLOT_CUDA_REF_CACHE_VERSION = 1
+
+
+def _cached_sinkslotcuda_reference(n, m, d, eps, slices, rows, cols, log_S, cost,
+                                   log_a, log_b, a, b, *, dataset="gaussian"):
+    """Memoized converged SinkSLOT-CUDA reference, keyed by (dataset, n, m, d, eps, L)."""
+    key = f"{dataset},{n},{m},{d},{eps:g},{slices}"
+    if key in _sinkslot_cuda_ref_cache:
+        return _sinkslot_cuda_ref_cache[key]
+    if not _sinkslot_cuda_ref_cache:
+        try:
+            blob = json.loads(_SINKSLOT_CUDA_REF_CACHE_PATH.read_text())
+            if blob.get("version") == _SINKSLOT_CUDA_REF_CACHE_VERSION:
+                _sinkslot_cuda_ref_cache.update(blob.get("costs", {}))
+        except (OSError, ValueError):
+            pass
+        if key in _sinkslot_cuda_ref_cache:
+            return _sinkslot_cuda_ref_cache[key]
+    _sinkslot_cuda_ref_cache[key] = compute_sinkslot_reference(
+        rows, cols, log_S, cost, log_a, log_b, a, b, eps)
+    try:
+        _SINKSLOT_CUDA_REF_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _SINKSLOT_CUDA_REF_CACHE_PATH.write_text(json.dumps(
+            {"version": _SINKSLOT_CUDA_REF_CACHE_VERSION, "costs": _sinkslot_cuda_ref_cache}))
+    except OSError as e:
+        print(f"  [warn] could not write SinkSLOT-CUDA reference cache: {e}")
+    return _sinkslot_cuda_ref_cache[key]
 
 
 # =============================================================================
@@ -2122,6 +2248,8 @@ def run_forward_benchmark(
     srot_delta: float = 1e-8,
     include_sinkslot: bool = False,
     sinkslot_slices: Optional[List[int]] = None,
+    include_sinkslotcuda: bool = False,
+    sinkslotcuda_slices: Optional[List[int]] = None,
     include_sparsink: bool = False,
     sparsink_s: Optional[List[int]] = None,
     sparsink_replicates: int = 10,
@@ -2243,6 +2371,19 @@ def run_forward_benchmark(
                         status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
                         extra = "" if res.nnz is None else f" (nnz {res.nnz}, setup {res.setup_ms:.1f} ms)"
                         print(f"  SinkSLOT L={slices}: {status}{extra}")
+
+            if include_sinkslotcuda:
+                for slices in (sinkslotcuda_slices or [50]):
+                    res = bench_sinkslotcuda(
+                        n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx,
+                        allow_tf32=allow_tf32, dataset=dataset, rmae_check=rmae_check,
+                        slices=slices, stop=stop,
+                    )
+                    results.append(res)
+                    if verbose:
+                        status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
+                        extra = "" if res.nnz is None else f" (nnz {res.nnz}, setup {res.setup_ms:.1f} ms)"
+                        print(f"  SinkSLOT-CUDA L={slices}: {status}{extra}")
 
             # Spar-Sink / Rand-Sink (dense probability build, so gated like the other
             # O(n*m)-setup baselines). One row per (method, s).
@@ -2748,6 +2889,10 @@ def run_forward_benchmark_subprocess(
             cmd.append("--no-sinkslot")
         else:
             cmd.extend(["--sinkslot-slices", args.sinkslot_slices])
+        if args.no_sinkslotcuda:
+            cmd.append("--no-sinkslotcuda")
+        else:
+            cmd.extend(["--sinkslotcuda-slices", args.sinkslotcuda_slices])
         if args.no_sparsink:
             cmd.append("--no-sparsink")
         else:
@@ -2846,6 +2991,11 @@ def main() -> None:
         "--sinkslot-slices", type=str, default="50",
         help="Comma-separated L values (number of 1-D projections) for SinkSLOT.",
     )
+    parser.add_argument("--no-sinkslotcuda", action="store_true", help="Skip SinkSLOT-CUDA benchmarks.")
+    parser.add_argument(
+        "--sinkslotcuda-slices", type=str, default="50",
+        help="Comma-separated L values (number of 1-D projections) for SinkSLOT-CUDA.",
+    )
     parser.add_argument("--no-sparsink", action="store_true", help="Skip Spar-Sink/Rand-Sink benchmarks.")
     parser.add_argument(
         "--sparsink-s", type=str, default="2000",
@@ -2869,7 +3019,7 @@ def main() -> None:
     parser.add_argument(
         "--only",
         choices=("flash_symmetric", "flash_alternating", "flash", "geomloss", "ott", "srot",
-                 "spar_sink", "rand_sink", "sinkslot"),
+                 "spar_sink", "rand_sink", "sinkslot", "sinkslotcuda"),
         default=None,
         help="Run only one method (useful for Nsight Systems profiling). 'flash' runs both FlashSinkhorn backends.",
     )
@@ -2926,6 +3076,7 @@ def main() -> None:
     srot_slices = [int(v) for v in str(args.srot_slices).split(",") if v.strip()]
     sparsink_s = [int(v) for v in str(args.sparsink_s).split(",") if v.strip()]
     sinkslot_slices = [int(v) for v in str(args.sinkslot_slices).split(",") if v.strip()]
+    sinkslotcuda_slices = [int(v) for v in str(args.sinkslotcuda_slices).split(",") if v.strip()]
 
     # =====================================================================
     # Worker mode: benchmark a single (n, d) and emit JSON to stdout
@@ -2948,6 +3099,7 @@ def main() -> None:
         include_srot = not args.no_srot
         include_sparsink = not args.no_sparsink
         include_sinkslot = not args.no_sinkslot
+        include_sinkslotcuda = not args.no_sinkslotcuda
         include_tensorized = bool(args.tensorized)
 
         if args.only is not None:
@@ -2958,6 +3110,7 @@ def main() -> None:
             include_srot = args.only == "srot"
             include_sparsink = args.only in SPARSINK_METHODS
             include_sinkslot = args.only == "sinkslot"
+            include_sinkslotcuda = args.only == "sinkslotcuda"
             include_tensorized = False
 
         results = run_forward_benchmark(
@@ -2987,6 +3140,8 @@ def main() -> None:
             sparsink_replicates=args.sparsink_replicates,
             include_sinkslot=include_sinkslot,
             sinkslot_slices=sinkslot_slices,
+            include_sinkslotcuda=include_sinkslotcuda,
+            sinkslotcuda_slices=sinkslotcuda_slices,
             stop=_stop_cfg,
         )
 
@@ -3062,6 +3217,7 @@ def main() -> None:
     include_srot = not args.no_srot
     include_sparsink = not args.no_sparsink
     include_sinkslot = not args.no_sinkslot
+    include_sinkslotcuda = not args.no_sinkslotcuda
     include_tensorized = bool(args.tensorized)
 
     if args.only is not None:
@@ -3072,6 +3228,7 @@ def main() -> None:
         include_srot = args.only == "srot"
         include_sparsink = args.only in SPARSINK_METHODS
         include_sinkslot = args.only == "sinkslot"
+        include_sinkslotcuda = args.only == "sinkslotcuda"
         if include_tensorized:
             print("Warning: Ignoring --tensorized because --only is set.")
             include_tensorized = False
@@ -3132,6 +3289,8 @@ def main() -> None:
             sparsink_replicates=args.sparsink_replicates,
             include_sinkslot=include_sinkslot,
             sinkslot_slices=sinkslot_slices,
+            include_sinkslotcuda=include_sinkslotcuda,
+            sinkslotcuda_slices=sinkslotcuda_slices,
             stop=_stop_cfg,
         )
 
