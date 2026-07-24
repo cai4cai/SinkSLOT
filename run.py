@@ -86,6 +86,14 @@ def build_command(
         ss_values = [slices] if slices is not None and method == "sinkslot" else cfg.sinkslot_slices
         cmd += ["--sinkslot-slices", ",".join(str(v) for v in ss_values)]
 
+    if cfg.stop_mode != "fixed":
+        cmd += ["--stop-mode", cfg.stop_mode,
+                "--max-iter", str(cfg.max_iter),
+                "--stop-tol", str(cfg.stop_tol),
+                "--potential-tol", str(cfg.potential_tol),
+                "--mass-tol", str(cfg.mass_tol),
+                "--check-every", str(cfg.check_every)]
+
     if cfg.no_sparsink:
         cmd.append("--no-sparsink")
     elif method in (None, "spar_sink", "rand_sink"):

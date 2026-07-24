@@ -64,6 +64,7 @@ def raw_grid(path: Path) -> Tuple[List[str], List[str], List[List[str]], List[st
     has_tf32 = bool(rows) and "tf32" in rows[0]
     has_n_iters = bool(rows) and "n_iters" in rows[0]
     has_rmae = bool(rows) and "rmae_pct" in rows[0]
+    has_iters = bool(rows) and "iters_run" in rows[0]
     has_srot = bool(rows) and "srot_slices" in rows[0]
     has_sparsink = bool(rows) and "sample_size" in rows[0]
     has_setup = bool(rows) and "setup_ms" in rows[0]
@@ -81,6 +82,8 @@ def raw_grid(path: Path) -> Tuple[List[str], List[str], List[List[str]], List[st
         columns += ["s", "nnz"]
     if has_setup:
         columns.append("Setup (ms)")
+    if has_iters:
+        columns += ["Iters run", "Conv"]
     if has_rmae:
         columns.append("RMAE vs own optimum")
     justify = ["left" if c in ("Dataset", "TF32", "Method", "OOM") else "right" for c in columns]
@@ -127,6 +130,10 @@ def raw_grid(path: Path) -> Tuple[List[str], List[str], List[List[str]], List[st
                 cells.append(row.get("nnz", ""))
             if has_setup:
                 cells.append(_fmt_ms(row.get("setup_ms", "")))
+            if has_iters:
+                cells.append(row.get("iters_run", ""))
+                cv = row.get("converged", "")
+                cells.append("[green]y[/green]" if cv in ("True","true") else ("[red]n[/red]" if cv in ("False","false") else cv))
             if has_rmae:
                 cells.append(_fmt_rmae(row.get("rmae_pct", "")))
             cells_out.append(cells)

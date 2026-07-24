@@ -104,6 +104,21 @@ class BenchConfig:
 
     eps_values: List[float] = field(default_factory=lambda: [0.1, 0.01, 0.001])
     n_iters: int = 50
+
+    # Early stopping. stop_mode "fixed" (default) runs exactly n_iters -- the
+    # FlashSinkhorn protocol, which isolates per-iteration cost for a fair throughput
+    # comparison. "marginal" runs up to max_iter, stopping when the total-variation
+    # marginal violation sum|P1-a|+|P^T1-b| <= stop_tol and |mass-1| <= mass_tol; the
+    # TV (L1) norm is n-independent, unlike an absolute max threshold. "potential"
+    # reproduces Spar-Sink's rule, ||du||_1+||dv||_1 <= potential_tol. Matched stopping
+    # is implemented for srot/sinkslot/spar_sink/rand_sink; flash uses its native
+    # threshold; geomloss stays fixed.
+    stop_mode: str = "fixed"     # "fixed" | "marginal" | "potential"
+    max_iter: int = 10000        # cap in non-fixed modes (n_iters is the count in "fixed")
+    stop_tol: float = 1e-4       # marginal (TV) threshold, n-independent
+    potential_tol: float = 1e-6  # Spar-Sink's ||du||+||dv|| threshold ("potential" mode)
+    mass_tol: float = 1e-6       # |sum(P) - 1| threshold
+    check_every: int = 10        # iterations between convergence checks
     warmup: int = 5
     rep: int = 15
     tf32: bool = True
