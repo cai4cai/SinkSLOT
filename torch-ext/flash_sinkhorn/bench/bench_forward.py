@@ -166,7 +166,12 @@ class TimingResult:
     dataset: str = "gaussian"  # point-cloud distribution; see sample_point_cloud()
     tf32: bool = False  # TF32 matmuls enabled (10-bit mantissa) vs strict FP32
     srot_slices: Optional[int] = None  # SROT only: number of random 1-D projections (L)
-    plan_ms: Optional[float] = None  # SROT only: pi_SOT construction time, excluded from mean_ms
+    setup_ms: Optional[float] = None  # per-method setup excluded from mean_ms (SROT plan, sparsink sampling)
+    sample_size: Optional[int] = None  # Spar-Sink/Rand-Sink only: requested subsample size s
+    nnz: Optional[int] = None  # Spar-Sink/Rand-Sink only: mean entries actually drawn
+    empty_lines: Optional[int] = None  # Spar-Sink/Rand-Sink only: rows+cols with no sampled entry
+    rmae_std: Optional[float] = None  # std of rmae_pct across replicates (sampling methods)
+    valid_replicates: Optional[int] = None  # draws that produced a finite loss (no empty rows/cols)
 
 
 @dataclass
@@ -190,7 +195,10 @@ def timing_result_to_json(r: TimingResult) -> str:
         "max_ms": r.max_ms, "median_ms": r.median_ms,
         "gpu_memory_mb": r.gpu_memory_mb, "oom": r.oom,
         "n_iters": r.n_iters, "rmae_pct": r.rmae_pct, "dataset": r.dataset,
-        "tf32": r.tf32, "srot_slices": r.srot_slices, "plan_ms": r.plan_ms,
+        "tf32": r.tf32, "srot_slices": r.srot_slices, "setup_ms": r.setup_ms,
+        "sample_size": r.sample_size, "nnz": r.nnz,
+        "empty_lines": r.empty_lines, "rmae_std": r.rmae_std,
+        "valid_replicates": r.valid_replicates,
     })
 
 
@@ -973,12 +981,12 @@ def bench_srot(
     Dense O(n*m): materializes both the cost matrix and pi_SOT, so this is gated behind
     --max-dense-size like the GeomLoss tensorized baseline.
 
-    Timing is split. `plan_ms` covers building pi_SOT (L projections, sorts and 1-D OT
+    Timing is split. `setup_ms` covers building pi_SOT (L projections, sorts and 1-D OT
     solves), which no other method has -- flash and GeomLoss derive their kernel
     implicitly from a, b and the streamed coordinates, with no setup at all. `mean_ms`
     then covers the solve loop alone, so it stays directly comparable to the other rows.
-    Total cost of the method is plan_ms + mean_ms. Keeping them apart matters because
-    plan_ms is the term that scales with L, which is the point of sweeping it.
+    Total cost of the method is setup_ms + mean_ms. Keeping them apart matters because
+    setup_ms is the term that scales with L, which is the point of sweeping it.
 
     Cost convention: ||x-y||^2 (full squared Euclidean, matches FlashSinkhorn).
     """
@@ -997,15 +1005,15 @@ def bench_srot(
         # across the timed repetitions -- it is setup, not per-iteration work.
         #
         # Build it twice and time the second. The first call absorbs one-time CUDA/kernel
-        # initialisation, which otherwise lands entirely in plan_ms for whichever L runs
-        # first in a process -- making plan_ms decrease with L instead of increasing with
+        # initialisation, which otherwise lands entirely in setup_ms for whichever L runs
+        # first in a process -- making setup_ms decrease with L instead of increasing with
         # it. bench_with_stats already warms up the solve loop for the same reason.
         build_sot_plan(x, y, a, b, slices=slices, delta=delta)
         torch.cuda.synchronize()
-        plan_start = time.perf_counter()
+        setup_start = time.perf_counter()
         pi_sot = build_sot_plan(x, y, a, b, slices=slices, delta=delta)
         torch.cuda.synchronize()
-        plan_ms = (time.perf_counter() - plan_start) * 1e3
+        setup_ms = (time.perf_counter() - setup_start) * 1e3
 
         # float32 to match the other benchmarked methods: flash and GeomLoss both run
         # fp32 with TF32 matmuls, and fp64 on a consumer GPU is 1/64 rate, so timing an
@@ -1056,12 +1064,225 @@ def bench_srot(
         return TimingResult(
             "srot", n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False,
             n_iters=n_iters, rmae_pct=rmae_pct, dataset=dataset, tf32=allow_tf32,
-            srot_slices=slices, plan_ms=plan_ms,
+            srot_slices=slices, setup_ms=setup_ms,
         )
     except torch.cuda.OutOfMemoryError:
         return TimingResult(
             "srot", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
             n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices,
+        )
+
+
+# =============================================================================
+# Spar-Sink / Rand-Sink: importance-sparsified Sinkhorn (baselines)
+# =============================================================================
+# Li, Yu, Li, Meng, "Importance Sparsification for Sinkhorn Algorithm", JMLR
+# (arXiv:2306.06581). Reference implementation:
+# https://github.com/Mengyu8042/Spar-Sink
+#
+# Both methods sparsify the Sinkhorn kernel and iterate on the survivors; they
+# differ only in the sampling distribution. Unlike SROT they approximate the SAME
+# entropic problem, so they share the standard entropic reference for rmae_pct --
+# which makes rmae_pct exactly the RMAE their paper reports.
+#
+# Deviation from their code: we iterate in the log domain. Theirs is linear
+# (u = a / (K v)), which underflows to exactly zero for eps <= 0.01 at our costs
+# (exp(-16/0.01) = 0), so two of our three eps values would be unrunnable. The
+# sampling scheme, the K/q rescaling and the sparse iteration structure are theirs
+# -- their code also switches to sparse CSR above 200 columns.
+
+SPARSINK_METHODS = ("spar_sink", "rand_sink")
+
+
+def build_sparse_kernel(
+    cost: torch.Tensor, a: torch.Tensor, b: torch.Tensor, eps: float,
+    *, method: str, sample_size: int, seed: int = 0,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Poisson-sample the Sinkhorn kernel; return (rows, cols, log_values).
+
+    Following their eq. (7) and (9): with inclusion probability q_ij = min(1, s*p_ij),
+    keep entry (i, j) with probability q_ij and rescale it to K_ij / q_ij, which is
+    unbiased for K. s bounds the *expected* nnz, so the realised count varies.
+
+        spar_sink: p_ij ∝ sqrt(a_i b_j)   -- their importance probability
+        rand_sink: p_ij ∝ 1               -- uniform over all entries
+
+    Note p_ij carries no dependence on K, so under uniform marginals sqrt(a_i b_j) is
+    constant and the two methods coincide exactly. They differ only to the extent the
+    marginals are non-uniform.
+
+    Values are returned in log space: log(K_ij / q_ij) = -C_ij/eps - log q_ij.
+
+    Note their kernel is K = exp(-C/eps) with no a (x) b factor -- the "entropy"
+    convention of their eq. (6), OT_eps = <T,C> - eps*H(T). Ours (FlashSinkhorn,
+    GeomLoss, and our reference solver) regularizes by KL(T || a (x) b). The two duals
+    differ by exactly eps*(H(a) + H(b)); bench_sparsink() applies that correction so
+    these rows are comparable with the rest of the table.
+    """
+    if method not in SPARSINK_METHODS:
+        raise ValueError(f"Unknown method: {method!r}. Choices: {SPARSINK_METHODS}")
+
+    n, m = cost.shape
+    if method == "spar_sink":
+        weights = torch.outer(a.sqrt(), b.sqrt())
+    else:
+        weights = torch.ones(n, m, device=cost.device, dtype=cost.dtype)
+    probs = weights / weights.sum()
+    q = (sample_size * probs).clamp_max(1.0)
+
+    generator = torch.Generator(device=cost.device).manual_seed(seed)
+    keep = torch.rand(n, m, generator=generator, device=cost.device, dtype=cost.dtype) < q
+    rows, cols = keep.nonzero(as_tuple=True)
+    log_values = -cost[rows, cols] / eps - q[rows, cols].log()
+    return rows, cols, log_values
+
+
+def _sparsink_sinkhorn(
+    rows: torch.Tensor, cols: torch.Tensor, log_values: torch.Tensor,
+    log_a: torch.Tensor, log_b: torch.Tensor, eps: float, n_iters: int,
+) -> Tuple[torch.Tensor, torch.Tensor, int]:
+    """`n_iters` log-domain sweeps over the sampled support only -- O(nnz) per sweep.
+
+    Each half-update is a segmented logsumexp over the kept entries, grouped by row
+    (then by column), computed in two passes: a max-reduce for stability, then an
+    exp-sum. This is the log-domain form of their u = a/(Kv), v = b/(K^T u).
+
+    Returns (f, g, empty). A row (or column) with no sampled entry cannot transport its
+    mass anywhere: its logsumexp is -inf and the potential diverges. Their linear-domain
+    formulation hides this -- the row simply gets zero mass in T and contributes nothing
+    to <T,C> -- but the marginal constraint is violated either way. We surface it instead:
+    `empty` counts such rows plus columns, and the caller reports N/A for rmae_pct when it
+    is nonzero. This is not rare at their published subsample sizes; see analysis.md.
+    """
+    n = log_a.shape[0]
+    m = log_b.shape[0]
+    f = torch.zeros_like(log_a)
+    g = torch.zeros_like(log_b)
+    neg_inf = torch.finfo(log_values.dtype).min
+
+    def segmented_lse(z: torch.Tensor, index: torch.Tensor, size: int) -> torch.Tensor:
+        mx = torch.full((size,), neg_inf, device=z.device, dtype=z.dtype)
+        mx = mx.scatter_reduce(0, index, z, reduce="amax", include_self=True)
+        acc = torch.zeros(size, device=z.device, dtype=z.dtype)
+        acc = acc.index_add(0, index, (z - mx[index]).exp())
+        return mx + acc.clamp_min(torch.finfo(z.dtype).tiny).log()
+
+    empty = int(n - rows.unique().numel() + m - cols.unique().numel())
+
+    for _ in range(n_iters):
+        f = eps * (log_a - segmented_lse(log_values + g[cols] / eps, rows, n))
+        g = eps * (log_b - segmented_lse(log_values + f[rows] / eps, cols, m))
+    return f, g, empty
+
+
+def bench_sparsink(
+    n: int, m: int, d: int, eps: float, n_iters: int,
+    device: torch.device, warmup: int, rep: int,
+    *,
+    nvtx: bool = False,
+    allow_tf32: bool = False,
+    dataset: str = "gaussian",
+    rmae_check: bool = True,
+    method: str = "spar_sink",
+    sample_size: int = 2000,
+    replicates: int = 10,
+) -> TimingResult:
+    """Benchmark Spar-Sink / Rand-Sink with fixed iterations.
+
+    Sampling is stochastic, so a single draw reports sampling noise as method quality;
+    their paper averages 100 replications. We draw `replicates` independent kernels,
+    seeded per replicate, and report mean RMAE (with rmae_std) and mean timing.
+
+    Setup (sampling and building the sparse kernel) is timed into setup_ms; mean_ms
+    covers the solve loop alone, so it stays comparable to the other rows. The
+    probability matrix is built densely -- setup only, O(n*m) -- while the iterations
+    are O(nnz), as in their implementation, which also switches to sparse above 200
+    columns.
+    """
+    _set_tf32(allow_tf32)
+
+    torch.manual_seed(0)
+    x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
+    y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
+    a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
+    b = torch.rand(m, device=device, dtype=torch.float32) + 0.1
+    a = a / a.sum()
+    b = b / b.sum()
+
+    try:
+        cost = torch.cdist(x, y, p=2) ** 2
+        log_a, log_b = a.log(), b.log()
+    except torch.cuda.OutOfMemoryError:
+        return TimingResult(
+            method, n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
+            n_iters=n_iters, dataset=dataset, tf32=allow_tf32, sample_size=sample_size,
+        )
+
+    # Their kernel is exp(-C/eps); ours carries a (x) b inside. The duals differ by
+    # exactly eps*(H(a) + H(b)), so add it back to compare against the shared reference.
+    convention_shift = -eps * float((a * log_a).sum() + (b * log_b).sum())
+
+    reference = None
+    if rmae_check:
+        reference = _cached_entropic_ot_reference(n, m, d, eps, x, y, a, b, dataset=dataset)
+
+    # Warm up the sampling path: the first call in a process absorbs one-time CUDA
+    # initialisation, which would otherwise land in setup_ms (~40ms against ~0.1ms).
+    build_sparse_kernel(cost, a, b, eps, method=method, sample_size=sample_size, seed=0)
+    torch.cuda.synchronize()
+
+    losses, nnzs, empties = [], [], 0
+    build_ms = []
+    for r in range(replicates):
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        rows, cols, log_values = build_sparse_kernel(
+            cost, a, b, eps, method=method, sample_size=sample_size, seed=r,
+        )
+        torch.cuda.synchronize()
+        build_ms.append((time.perf_counter() - t0) * 1e3)
+
+        f, g, empty = _sparsink_sinkhorn(rows, cols, log_values, log_a, log_b, eps, n_iters)
+        nnzs.append(rows.numel())
+        empties += empty
+        if empty == 0:
+            losses.append(float((a * f).sum() + (b * g).sum()) + convention_shift)
+
+    rmae_pct = None
+    rmae_std = None
+    if rmae_check and reference is not None and losses:
+        errs = torch.tensor([_rmae_pct(v, reference) for v in losses])
+        rmae_pct = float(errs.mean())
+        rmae_std = float(errs.std()) if errs.numel() > 1 else 0.0
+
+    # Time one representative draw (the last), warmed up like every other method.
+    rows, cols, log_values = build_sparse_kernel(
+        cost, a, b, eps, method=method, sample_size=sample_size, seed=0,
+    )
+
+    def run():
+        _sparsink_sinkhorn(rows, cols, log_values, log_a, log_b, eps, n_iters)
+
+    try:
+        run()
+        torch.cuda.synchronize()
+        mean, std, min_t, max_t, median = bench_with_stats(
+            run, warmup, rep, nvtx=nvtx,
+            nvtx_label=f"{method} n={n} d={d} eps={eps} iters={n_iters} s={sample_size}",
+        )
+        gpu_memory_mb = gpu_memory_used_mb(device)
+        return TimingResult(
+            method, n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False,
+            n_iters=n_iters, rmae_pct=rmae_pct, rmae_std=rmae_std, dataset=dataset,
+            tf32=allow_tf32, sample_size=sample_size,
+            nnz=int(sum(nnzs) / len(nnzs)), empty_lines=empties,
+            valid_replicates=len(losses),
+            setup_ms=float(sum(build_ms) / len(build_ms)),
+        )
+    except torch.cuda.OutOfMemoryError:
+        return TimingResult(
+            method, n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
+            n_iters=n_iters, dataset=dataset, tf32=allow_tf32, sample_size=sample_size,
         )
 
 
@@ -1602,6 +1823,9 @@ def run_forward_benchmark(
     include_srot: bool = False,
     srot_slices: Optional[List[int]] = None,
     srot_delta: float = 1e-8,
+    include_sparsink: bool = False,
+    sparsink_s: Optional[List[int]] = None,
+    sparsink_replicates: int = 10,
 ) -> List[TimingResult]:
     """Run forward pass benchmark.
 
@@ -1700,10 +1924,30 @@ def run_forward_benchmark(
                     results.append(res)
                     if verbose:
                         status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
-                        plan = "" if res.plan_ms is None else f" (plan {res.plan_ms:.1f} ms)"
+                        plan = "" if res.setup_ms is None else f" (plan {res.setup_ms:.1f} ms)"
                         print(f"  SROT L={slices}: {status}{plan}")
             elif verbose and include_srot and n > max_dense_size:
                 print(f"  SROT:                  SKIPPED (n > max_dense_size={max_dense_size})")
+
+            # Spar-Sink / Rand-Sink (dense probability build, so gated like the other
+            # O(n*m)-setup baselines). One row per (method, s).
+            if include_sparsink and n <= max_dense_size:
+                for sparsink_method in SPARSINK_METHODS:
+                    for s_size in (sparsink_s or [2000]):
+                        res = bench_sparsink(
+                            n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx,
+                            allow_tf32=allow_tf32, dataset=dataset, rmae_check=rmae_check,
+                            method=sparsink_method, sample_size=s_size,
+                            replicates=sparsink_replicates,
+                        )
+                        results.append(res)
+                        if verbose:
+                            status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
+                            extra = "" if res.nnz is None else f" (nnz {res.nnz}, setup {res.setup_ms:.1f} ms)"
+                            warn = "" if not res.empty_lines else f" [{res.empty_lines} empty rows/cols]"
+                            print(f"  {sparsink_method} s={s_size}: {status}{extra}{warn}")
+            elif verbose and include_sparsink and n > max_dense_size:
+                print(f"  Spar-Sink/Rand-Sink:   SKIPPED (n > max_dense_size={max_dense_size})")
 
             # OTT-JAX online
             if include_ott:
@@ -1740,7 +1984,8 @@ def run_forward_benchmark(
 FORWARD_CSV_COLUMNS = [
     "dataset", "tf32", "method", "n", "m", "d", "eps",
     "mean_ms", "std_ms", "min_ms", "max_ms", "median_ms", "gpu_memory_mb",
-    "oom", "n_iters", "rmae_pct", "srot_slices", "plan_ms",
+    "oom", "n_iters", "rmae_pct", "rmae_std", "srot_slices", "sample_size",
+    "nnz", "empty_lines", "valid_replicates", "setup_ms",
 ]
 
 
@@ -1764,7 +2009,12 @@ def _forward_row(r: TimingResult) -> dict:
         "n": r.n, "m": r.m, "d": r.d,
         "eps": r.eps, "n_iters": r.n_iters,
         "srot_slices": r.srot_slices if r.srot_slices is not None else "N/A",
-        "plan_ms": f"{r.plan_ms:.4f}" if r.plan_ms is not None else "N/A",
+        "sample_size": r.sample_size if r.sample_size is not None else "N/A",
+        "nnz": r.nnz if r.nnz is not None else "N/A",
+        "empty_lines": r.empty_lines if r.empty_lines is not None else "N/A",
+        "valid_replicates": r.valid_replicates if r.valid_replicates is not None else "N/A",
+        "rmae_std": f"{r.rmae_std:.4f}" if r.rmae_std is not None else "N/A",
+        "setup_ms": f"{r.setup_ms:.4f}" if r.setup_ms is not None else "N/A",
         **timings,
     }
 
@@ -1779,6 +2029,7 @@ def _forward_key(row: dict) -> tuple:
     return (
         row["dataset"], str(row["tf32"]), row["method"], str(row["n"]), str(row["m"]),
         str(row["d"]), str(row["eps"]), str(row["n_iters"]), str(row["srot_slices"]),
+        str(row["sample_size"]),
     )
 
 
@@ -2174,6 +2425,11 @@ def run_forward_benchmark_subprocess(
             cmd.append("--no-flash-symmetric")
         if args.no_flash_alternating:
             cmd.append("--no-flash-alternating")
+        if args.no_sparsink:
+            cmd.append("--no-sparsink")
+        else:
+            cmd.extend(["--sparsink-s", args.sparsink_s,
+                        "--sparsink-replicates", str(args.sparsink_replicates)])
         if args.no_srot:
             cmd.append("--no-srot")
         else:
@@ -2255,6 +2511,15 @@ def main() -> None:
              "(draws its own point cloud via JAX's RNG). Default: gaussian.",
     )
     parser.add_argument("--no-srot", action="store_true", help="Skip SROT benchmarks.")
+    parser.add_argument("--no-sparsink", action="store_true", help="Skip Spar-Sink/Rand-Sink benchmarks.")
+    parser.add_argument(
+        "--sparsink-s", type=str, default="2000",
+        help="Comma-separated expected subsample sizes s for Spar-Sink/Rand-Sink.",
+    )
+    parser.add_argument(
+        "--sparsink-replicates", type=int, default=10,
+        help="Independent kernel draws averaged for Spar-Sink/Rand-Sink (sampling is stochastic).",
+    )
     parser.add_argument(
         "--srot-slices", type=str, default="50",
         help="Comma-separated L values (number of random 1-D projections) for SROT.",
@@ -2268,7 +2533,8 @@ def main() -> None:
     parser.add_argument("--no-flash-alternating", action="store_true", help="Skip FlashSinkhorn alternating backend.")
     parser.add_argument(
         "--only",
-        choices=("flash_symmetric", "flash_alternating", "flash", "geomloss", "ott", "srot"),
+        choices=("flash_symmetric", "flash_alternating", "flash", "geomloss", "ott", "srot",
+                 "spar_sink", "rand_sink"),
         default=None,
         help="Run only one method (useful for Nsight Systems profiling). 'flash' runs both FlashSinkhorn backends.",
     )
@@ -2320,6 +2586,7 @@ def main() -> None:
     args = parser.parse_args()
 
     srot_slices = [int(v) for v in str(args.srot_slices).split(",") if v.strip()]
+    sparsink_s = [int(v) for v in str(args.sparsink_s).split(",") if v.strip()]
 
     # =====================================================================
     # Worker mode: benchmark a single (n, d) and emit JSON to stdout
@@ -2340,6 +2607,7 @@ def main() -> None:
         include_geomloss = not args.no_geomloss
         include_ott = not args.no_ott
         include_srot = not args.no_srot
+        include_sparsink = not args.no_sparsink
         include_tensorized = bool(args.tensorized)
 
         if args.only is not None:
@@ -2348,6 +2616,7 @@ def main() -> None:
             include_geomloss = args.only == "geomloss"
             include_ott = args.only == "ott"
             include_srot = args.only == "srot"
+            include_sparsink = args.only in SPARSINK_METHODS
             include_tensorized = False
 
         results = run_forward_benchmark(
@@ -2372,6 +2641,9 @@ def main() -> None:
             include_srot=include_srot,
             srot_slices=srot_slices,
             srot_delta=args.srot_delta,
+            include_sparsink=include_sparsink,
+            sparsink_s=sparsink_s,
+            sparsink_replicates=args.sparsink_replicates,
         )
 
         # Emit JSON lines to stdout for the orchestrator to parse
@@ -2444,6 +2716,7 @@ def main() -> None:
     include_geomloss = not args.no_geomloss
     include_ott = not args.no_ott
     include_srot = not args.no_srot
+    include_sparsink = not args.no_sparsink
     include_tensorized = bool(args.tensorized)
 
     if args.only is not None:
@@ -2452,6 +2725,7 @@ def main() -> None:
         include_geomloss = args.only == "geomloss"
         include_ott = args.only == "ott"
         include_srot = args.only == "srot"
+        include_sparsink = args.only in SPARSINK_METHODS
         if include_tensorized:
             print("Warning: Ignoring --tensorized because --only is set.")
             include_tensorized = False
@@ -2506,6 +2780,9 @@ def main() -> None:
             include_srot=include_srot,
             srot_slices=srot_slices,
             srot_delta=args.srot_delta,
+            include_sparsink=include_sparsink,
+            sparsink_s=sparsink_s,
+            sparsink_replicates=args.sparsink_replicates,
         )
 
     output_dir = Path(args.output_dir)
