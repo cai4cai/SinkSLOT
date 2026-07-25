@@ -175,6 +175,7 @@ class TimingResult:
     empty_lines: Optional[int] = None  # Spar-Sink/Rand-Sink only: rows+cols with no sampled entry
     rmae_std: Optional[float] = None  # std of rmae_pct across replicates (sampling methods)
     valid_replicates: Optional[int] = None  # draws that produced a finite loss (no empty rows/cols)
+    seed: int = 0  # data-generation seed (x, y, a, b) only -- not method-internal randomness
 
 
 @dataclass
@@ -202,7 +203,7 @@ def timing_result_to_json(r: TimingResult) -> str:
         "iters_run": r.iters_run, "converged": r.converged, "final_viol": r.final_viol,
         "sample_size": r.sample_size, "nnz": r.nnz,
         "empty_lines": r.empty_lines, "rmae_std": r.rmae_std,
-        "valid_replicates": r.valid_replicates,
+        "valid_replicates": r.valid_replicates, "seed": r.seed,
     })
 
 
@@ -809,6 +810,7 @@ def bench_flashsinkhorn(
     rmae_check: bool = True,
     dataset: str = "gaussian",
     stop: "StopCfg" = None,
+    seed: int = 0,
 ) -> TimingResult:
     """Benchmark FlashSinkhorn with fixed iterations.
 
@@ -816,13 +818,16 @@ def bench_flashsinkhorn(
         backend: "symmetric" (GeomLoss-style) or "alternating" (OTT-JAX-style)
         allow_tf32: Enable TF32 for ~2x speedup (default: False for strict fp32)
         dataset: "gaussian" (default) or "8gaussians"; see sample_point_cloud().
+        seed: data-generation seed only (x, y, a, b). Does not affect any
+            method-internal randomness (e.g. SROT/SinkSLOT's slice projections,
+            Spar-Sink's kernel sampling), which stay independently seeded.
 
     Uses full squared Euclidean cost C(x,y) = ||x-y||² (half_cost=False default).
     Autotuning is enabled for best Triton kernel performance (~2-3s first call overhead).
     """
     from flash_sinkhorn import SamplesLoss
 
-    torch.manual_seed(0)
+    torch.manual_seed(seed)
     x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
     y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
     a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
@@ -901,6 +906,7 @@ def bench_geomloss_online(
     nvtx: bool = False,
     rmae_check: bool = True,
     dataset: str = "gaussian",
+    seed: int = 0,
 ) -> TimingResult:
     """Benchmark GeomLoss online (KeOps) with fixed iterations.
 
@@ -909,6 +915,7 @@ def bench_geomloss_online(
 
     Cost convention: SqDist(X,Y) = ||x-y||² (full squared Euclidean, matches FlashSinkhorn).
     dataset: "gaussian" (default) or "8gaussians"; see sample_point_cloud().
+    seed: data-generation seed only (x, y, a, b).
     """
     try:
         from pykeops.torch import generic_logsumexp  # noqa: F401 - needed by lse_genred
@@ -918,7 +925,7 @@ def bench_geomloss_online(
     from geomloss.sinkhorn_divergence import log_weights, sinkhorn_cost, sinkhorn_loop
     from geomloss.sinkhorn_samples import lse_genred, softmin_online
 
-    torch.manual_seed(0)
+    torch.manual_seed(seed)
     x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
     y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
     a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
@@ -989,17 +996,19 @@ def bench_geomloss_tensorized(
     nvtx: bool = False,
     rmae_check: bool = True,
     dataset: str = "gaussian",
+    seed: int = 0,
 ) -> TimingResult:
     """Benchmark GeomLoss tensorized (dense) with fixed iterations.
 
     Materializes O(n²) cost matrix in GPU memory.
     Cost convention: ||x-y||² (full squared Euclidean, matches FlashSinkhorn).
     dataset: "gaussian" (default) or "8gaussians"; see sample_point_cloud().
+    seed: data-generation seed only (x, y, a, b).
     """
     from geomloss.sinkhorn_divergence import log_weights, sinkhorn_cost, sinkhorn_loop
     from geomloss.sinkhorn_samples import softmin_tensorized
 
-    torch.manual_seed(0)
+    torch.manual_seed(seed)
     x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
     y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
     a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
@@ -1080,6 +1089,7 @@ def bench_srot(
     slices: int = 50,
     delta: float = 1e-8,
     stop: "StopCfg" = None,
+    seed: int = 0,
 ) -> TimingResult:
     """Benchmark SROT with fixed iterations.
 
@@ -1094,10 +1104,12 @@ def bench_srot(
     setup_ms is the term that scales with L, which is the point of sweeping it.
 
     Cost convention: ||x-y||^2 (full squared Euclidean, matches FlashSinkhorn).
+    seed: data-generation seed only (x, y, a, b). build_sot_plan's own projection
+    RNG (thetas) stays at its independent default seed=0, unaffected by this.
     """
     _set_tf32(allow_tf32)
 
-    torch.manual_seed(0)
+    torch.manual_seed(seed)
     x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
     y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
     a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
@@ -1365,6 +1377,7 @@ def bench_sparsink(
     sample_size: int = 2000,
     replicates: int = 10,
     stop: "StopCfg" = None,
+    seed: int = 0,
 ) -> TimingResult:
     """Benchmark Spar-Sink / Rand-Sink with fixed iterations.
 
@@ -1377,10 +1390,14 @@ def bench_sparsink(
     probability matrix is built densely -- setup only, O(n*m) -- while the iterations
     are O(nnz), as in their implementation, which also switches to sparse above 200
     columns.
+
+    seed: data-generation seed only (x, y, a, b). The per-replicate kernel draws
+    below (seed=0 for warmup/reference, seed=r for r in range(replicates)) stay
+    independent of this, unaffected.
     """
     _set_tf32(allow_tf32)
 
-    torch.manual_seed(0)
+    torch.manual_seed(seed)
     x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
     y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
     a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
@@ -1544,6 +1561,7 @@ def bench_sinkslot(
     rmae_check: bool = True,
     slices: int = 50,
     stop: "StopCfg" = None,
+    seed: int = 0,
 ) -> TimingResult:
     """Benchmark SinkSLOT v5 (fused-Triton, gamma=0 sparse SROT).
 
@@ -1551,13 +1569,16 @@ def bench_sinkslot(
     setup_ms; the timed loop is the fused-Triton alternating half-steps. fp32 (no
     matmul, so TF32 does not apply). Reference is the converged gamma=0 optimum on
     the same support. See torch-ext/flash_sinkhorn/bench/sinkslot.py.
+
+    seed: data-generation seed only (x, y, a, b). sot_plan_coo's own projection
+    RNG stays at its independent default seed=0, unaffected by this.
     """
     from flash_sinkhorn.bench.sinkslot import (
         sot_plan_coo, to_csr, launch_cfg, seg_lse_online, _run_v5,
     )
     _set_tf32(allow_tf32)
 
-    torch.manual_seed(0)
+    torch.manual_seed(seed)
     x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
     y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
     a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
@@ -1627,6 +1648,7 @@ def bench_sinkslotcuda(
     rmae_check: bool = True,
     slices: int = 50,
     stop: "StopCfg" = None,
+    seed: int = 0,
 ) -> TimingResult:
     """Benchmark SinkSLOT-CUDA: SinkSLOT v5 with the CUDA-optimised setup path.
 
@@ -1643,13 +1665,16 @@ def bench_sinkslotcuda(
     the baseline's fp32 scan, SinkSLOT-CUDA carries its own converged-reference
     cache. Its RMAE is therefore measured against its own plan's optimum, exactly
     as SinkSLOT is against the baseline plan. See sinkslot.py.
+
+    seed: data-generation seed only (x, y, a, b). sot_plan_coo's own projection
+    RNG stays at its independent default seed=0, unaffected by this.
     """
     from flash_sinkhorn.bench.sinkslot import (
         sot_plan_coo, to_csr, sparse_sqeuclidean_cost, _ot_1d_coo_batched_cuda, _run_v5,
     )
     _set_tf32(allow_tf32)
 
-    torch.manual_seed(0)
+    torch.manual_seed(seed)
     x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
     y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
     a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
@@ -2319,6 +2344,7 @@ def run_forward_benchmark(
     sparsink_s: Optional[List[int]] = None,
     sparsink_replicates: int = 10,
     stop: "StopCfg" = None,
+    seed: int = 0,
 ) -> List[TimingResult]:
     """Run forward pass benchmark.
 
@@ -2336,6 +2362,12 @@ def run_forward_benchmark(
 
     dataset: "gaussian" (default) or "8gaussians"; see sample_point_cloud(). Not
     applied to OTT-JAX, which draws its own point cloud via JAX's RNG.
+
+    seed: data-generation seed only (x, y, a, b), passed through to every method.
+    Method-internal randomness (SROT/SinkSLOT's slice projections, Spar-Sink's
+    kernel sampling) stays at its own independent default, unaffected by this --
+    varying seed changes only the underlying problem instance. Not applied to
+    OTT-JAX, which draws its own point cloud via JAX's RNG.
     """
     results = []
 
@@ -2358,9 +2390,11 @@ def run_forward_benchmark(
                 res = bench_flashsinkhorn(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, backend="symmetric",
                     allow_tf32=allow_tf32, rmae_check=rmae_check, dataset=dataset, stop=stop,
+                    seed=seed,
                 )
                 res.dataset = dataset
                 res.tf32 = allow_tf32
+                res.seed = seed
                 results.append(res)
                 if verbose:
                     status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
@@ -2371,9 +2405,11 @@ def run_forward_benchmark(
                 res = bench_flashsinkhorn(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, backend="alternating",
                     allow_tf32=allow_tf32, rmae_check=rmae_check, dataset=dataset, stop=stop,
+                    seed=seed,
                 )
                 res.dataset = dataset
                 res.tf32 = allow_tf32
+                res.seed = seed
                 results.append(res)
                 if verbose:
                     status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
@@ -2383,10 +2419,11 @@ def run_forward_benchmark(
             if include_geomloss:
                 res = bench_geomloss_online(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, rmae_check=rmae_check,
-                    dataset=dataset,
+                    dataset=dataset, seed=seed,
                 )
                 res.dataset = dataset
                 res.tf32 = allow_tf32
+                res.seed = seed
                 results.append(res)
                 if verbose:
                     status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
@@ -2396,10 +2433,11 @@ def run_forward_benchmark(
             if include_geomloss and include_tensorized and n <= max_dense_size:
                 res = bench_geomloss_tensorized(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, rmae_check=rmae_check,
-                    dataset=dataset,
+                    dataset=dataset, seed=seed,
                 )
                 res.dataset = dataset
                 res.tf32 = allow_tf32
+                res.seed = seed
                 results.append(res)
                 if verbose:
                     status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
@@ -2412,8 +2450,9 @@ def run_forward_benchmark(
                     res = bench_srot(
                         n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx,
                         allow_tf32=allow_tf32, dataset=dataset, rmae_check=rmae_check,
-                        slices=slices, delta=srot_delta, stop=stop,
+                        slices=slices, delta=srot_delta, stop=stop, seed=seed,
                     )
+                    res.seed = seed
                     results.append(res)
                     if verbose:
                         status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
@@ -2429,8 +2468,9 @@ def run_forward_benchmark(
                     res = bench_sinkslot(
                         n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx,
                         allow_tf32=allow_tf32, dataset=dataset, rmae_check=rmae_check,
-                        slices=slices, stop=stop,
+                        slices=slices, stop=stop, seed=seed,
                     )
+                    res.seed = seed
                     results.append(res)
                     if verbose:
                         status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
@@ -2442,8 +2482,9 @@ def run_forward_benchmark(
                     res = bench_sinkslotcuda(
                         n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx,
                         allow_tf32=allow_tf32, dataset=dataset, rmae_check=rmae_check,
-                        slices=slices, stop=stop,
+                        slices=slices, stop=stop, seed=seed,
                     )
+                    res.seed = seed
                     results.append(res)
                     if verbose:
                         status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
@@ -2459,8 +2500,9 @@ def run_forward_benchmark(
                             n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx,
                             allow_tf32=allow_tf32, dataset=dataset, rmae_check=rmae_check,
                             method=sparsink_method, sample_size=s_size,
-                            replicates=sparsink_replicates, stop=stop,
+                            replicates=sparsink_replicates, stop=stop, seed=seed,
                         )
+                        res.seed = seed
                         results.append(res)
                         if verbose:
                             status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
@@ -2503,7 +2545,7 @@ def run_forward_benchmark(
 
 
 FORWARD_CSV_COLUMNS = [
-    "dataset", "tf32", "method", "n", "m", "d", "eps",
+    "dataset", "tf32", "method", "n", "m", "d", "eps", "seed",
     "mean_ms", "std_ms", "min_ms", "max_ms", "median_ms", "gpu_memory_mb",
     "oom", "n_iters", "iters_run", "converged", "final_viol",
     "rmae_pct", "rmae_std", "srot_slices", "sample_size",
@@ -2528,7 +2570,7 @@ def _forward_row(r: TimingResult) -> dict:
         }
     return {
         "dataset": r.dataset, "tf32": r.tf32, "method": r.method,
-        "n": r.n, "m": r.m, "d": r.d,
+        "n": r.n, "m": r.m, "d": r.d, "seed": r.seed,
         "eps": r.eps, "n_iters": r.n_iters,
         "iters_run": r.iters_run if r.iters_run is not None else "N/A",
         "converged": r.converged if r.converged is not None else "N/A",
@@ -3031,6 +3073,12 @@ def main() -> None:
     )
     parser.add_argument("--eps", type=float, default=0.1, help="Regularization epsilon.")
     parser.add_argument("--n-iters", type=int, default=10, help="Sinkhorn iterations.")
+    parser.add_argument(
+        "--seed", type=int, default=0,
+        help="Data-generation seed (x, y, a, b) only. Does not affect method-internal "
+             "randomness (e.g. SROT/SinkSLOT's slice projections, Spar-Sink's kernel "
+             "sampling), which stays independently seeded. Not applied to OTT-JAX.",
+    )
     parser.add_argument("--warmup", type=int, default=10, help="Warmup iterations.")
     parser.add_argument("--rep", type=int, default=50, help="Timed repetitions.")
     parser.add_argument("--no-ott", action="store_true", help="Skip OTT-JAX benchmarks.")
@@ -3212,6 +3260,7 @@ def main() -> None:
             include_sinkslotcuda=include_sinkslotcuda,
             sinkslotcuda_slices=sinkslotcuda_slices,
             stop=_stop_cfg,
+            seed=args.seed,
         )
 
         # Emit JSON lines to stdout for the orchestrator to parse
@@ -3316,6 +3365,7 @@ def main() -> None:
     print(f"  References: GeomLoss={include_geomloss}, OTT-JAX={include_ott}")
     print(f"  RMAE check (converged entropic OT via POT): {not args.no_rmae_check}")
     print(f"  Dataset: {args.dataset}")
+    print(f"  Seed: {args.seed} (data only)")
     print(f"  Stop: {args.stop_mode}" + ("" if args.stop_mode=="fixed" else f" (tol={args.stop_tol:g}, max_iter={args.max_iter}, every={args.check_every})"))
     print(f"  Include tensorized: {args.tensorized} (max size: {args.max_dense_size})")
     if args.only is not None:
@@ -3361,6 +3411,7 @@ def main() -> None:
             include_sinkslotcuda=include_sinkslotcuda,
             sinkslotcuda_slices=sinkslotcuda_slices,
             stop=_stop_cfg,
+            seed=args.seed,
         )
 
     output_dir = Path(args.output_dir)

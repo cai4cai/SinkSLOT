@@ -30,7 +30,7 @@ from config import BenchConfig
 def build_command(
     cfg: BenchConfig, dataset: str, eps: float, output_dir: str,
     *, method: Optional[str] = None, size: Optional[int] = None, dim: Optional[int] = None,
-    slices: Optional[int] = None,
+    slices: Optional[int] = None, seed: Optional[int] = None,
 ) -> List[str]:
     """Build the benchmark command for a single unit of work.
 
@@ -38,6 +38,9 @@ def build_command(
     passed explicitly rather than read off cfg. When method/size/dim are given the run is
     narrowed to that single measurement (isolation mode); otherwise the full grid runs in
     one process.
+
+    seed: data-generation seed for this unit (defaults to cfg.seeds[0] if not given).
+    Only affects (x, y, a, b); method-internal randomness stays independently seeded.
     """
     if cfg.which not in ("forward", "backward"):
         raise ValueError(f"Unknown benchmark kind: {cfg.which!r}")
@@ -53,6 +56,7 @@ def build_command(
         "--rep", str(cfg.rep),
         "--max-dense-size", str(cfg.max_dense_size),
         "--output-dir", output_dir,
+        "--seed", str(seed if seed is not None else cfg.seeds[0]),
     ]
 
     if not cfg.tf32:
@@ -160,38 +164,43 @@ def _methods(cfg: BenchConfig) -> List[str]:
 
 
 def _units(cfg: BenchConfig):
-    """Yield one (dataset, eps, method, size, dim) unit of work per subprocess.
+    """Yield one (dataset, eps, method, size, dim, slices, seed) unit of work per subprocess.
 
     With cfg.isolate the sweep is fully unrolled so every measured row gets a fresh
     process -- necessary because gpu_memory_mb reports whole-device usage, which is
-    cumulative within a process. Without it, one process per (dataset, eps).
+    cumulative within a process. Without it, one process per (dataset, eps, seed).
+
+    seed is the outermost loop: it varies only the underlying problem instance
+    (x, y, a, b), so every (dataset, eps, method, size, dim, slices) combination gets
+    repeated once per seed, letting results be aggregated across seeds afterward.
     """
-    for dataset in cfg.datasets:
-        for eps in cfg.eps_values:
-            if not cfg.isolate:
-                yield dataset, eps, None, None, None, None
-                continue
-            for method in _methods(cfg):
-                for size in cfg.sizes:
-                    for dim in cfg.dims:
-                        if method in ("spar_sink", "rand_sink"):
-                            # s expands these two only, like L for SROT.
-                            for s_size in cfg.sparsink_s:
-                                yield dataset, eps, method, size, dim, s_size
-                        elif method in ("srot", "sinkslot", "sinkslotcuda"):
-                            # L expands the sliced methods only -- for every other method
-                            # it is meaningless, and sweeping it at the top level would
-                            # just duplicate identical rows. Each method carries its own
-                            # L list (srot_slices / sinkslot_slices / sinkslotcuda_slices).
-                            l_values = {
-                                "srot": cfg.srot_slices,
-                                "sinkslot": cfg.sinkslot_slices,
-                                "sinkslotcuda": cfg.sinkslotcuda_slices,
-                            }[method]
-                            for slices in l_values:
-                                yield dataset, eps, method, size, dim, slices
-                        else:
-                            yield dataset, eps, method, size, dim, None
+    for seed in cfg.seeds:
+        for dataset in cfg.datasets:
+            for eps in cfg.eps_values:
+                if not cfg.isolate:
+                    yield dataset, eps, None, None, None, None, seed
+                    continue
+                for method in _methods(cfg):
+                    for size in cfg.sizes:
+                        for dim in cfg.dims:
+                            if method in ("spar_sink", "rand_sink"):
+                                # s expands these two only, like L for SROT.
+                                for s_size in cfg.sparsink_s:
+                                    yield dataset, eps, method, size, dim, s_size, seed
+                            elif method in ("srot", "sinkslot", "sinkslotcuda"):
+                                # L expands the sliced methods only -- for every other method
+                                # it is meaningless, and sweeping it at the top level would
+                                # just duplicate identical rows. Each method carries its own
+                                # L list (srot_slices / sinkslot_slices / sinkslotcuda_slices).
+                                l_values = {
+                                    "srot": cfg.srot_slices,
+                                    "sinkslot": cfg.sinkslot_slices,
+                                    "sinkslotcuda": cfg.sinkslotcuda_slices,
+                                }[method]
+                                for slices in l_values:
+                                    yield dataset, eps, method, size, dim, slices, seed
+                            else:
+                                yield dataset, eps, method, size, dim, None, seed
 
 
 def run_sweep(cfg: BenchConfig, base_dir: str, *, dry_run: bool, label: str = "") -> None:
@@ -201,12 +210,13 @@ def run_sweep(cfg: BenchConfig, base_dir: str, *, dry_run: bool, label: str = ""
         _clear_csvs(cfg, base_dir)
     units = list(_units(cfg))
     failures: List[Tuple[str, int]] = []
-    for i, (dataset, eps, method, size, dim, slices) in enumerate(units, 1):
+    for i, (dataset, eps, method, size, dim, slices, seed) in enumerate(units, 1):
         cmd = build_command(
             cfg, dataset, eps, base_dir, method=method, size=size, dim=dim, slices=slices,
+            seed=seed,
         )
         printable = " ".join(cmd)
-        tag = f"dataset={dataset} eps={eps}"
+        tag = f"dataset={dataset} eps={eps} seed={seed}"
         if method is not None:
             tag += f" {method} n={size} d={dim}"
         if slices is not None:
