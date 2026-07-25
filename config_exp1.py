@@ -23,8 +23,9 @@ Design:
 - eps: a 10-point log sweep from 1e-3 to 1e-1 (same range/style as the earlier
   3-point sweep in config_paper.py, just finer).
 - L: a 10-point sweep, 8 -> 4096 (doubling each step), applied to SROT, SinkSLOT and
-  SinkSLOT-CUDA. Spar-Sink/Rand-Sink's own knob (s, not L) is left at config_paper's
-  values since a 10-point sweep wasn't requested for it.
+  SinkSLOT-CUDA. Spar-Sink/Rand-Sink's own knob is s, not L; matched to a 10-point
+  sweep of its own via s = L * 2 * n for the same 10 L values (160,000 -> 81,920,000)
+  -- see the caveat on sparsink_s below about the largest few values.
 - Stopping: "potential_linf" everywhere, not "fixed" -- max(|df|, |dg|) < stop_tol
   since the last check, capped at max_iter=10000. This is FlashSinkhorn's own native
   rule, ported verbatim to srot/sinkslot/sinkslotcuda/spar_sink/rand_sink (see the
@@ -37,16 +38,26 @@ Design:
 - warmup=0 (none), tf32=False (strict fp32 everywhere, no TF32 -- so timing isn't a
   mix of two different arithmetic modes across methods).
 
-Caveat carried over from verifying potential_linf (see the branch's PR description):
-Spar-Sink/Rand-Sink's importance-sampled sparse kernel can have weakly-connected
-components with a local contraction rate near 1, so a check_every that's too small
-relative to that support's mixing timescale can satisfy stop_tol while still
-meaningfully far from the true fixed point. check_every=10 here is the codebase's
-existing default, carried over untuned for this specific grid -- after a first run,
-check Spar-Sink/Rand-Sink's `converged`/`iters_run` columns: many rows hitting
-max_iter suggests stop_tol is too strict; suspiciously fast convergence at very
-small iters_run is worth cross-checking against a deep/fixed-iteration run before
-trusting it.
+stop_tol=1e-6 is deliberately tight (chosen over the codebase's 1e-4 default), applied
+identically to every method via the single shared stop_mode/stop_tol -- not a per-
+method value. Two known risks at this tolerance, both explored while verifying
+potential_linf (see the branch's PR description):
+
+- fp32 noise floor: max(|df|,|dg|) at ~1e-6 absolute is close to where fp32 rounding
+  noise lives for O(1)-O(10)-magnitude potentials, so the check may rarely fire
+  cleanly for ANY method, not just the slow ones.
+- Spar-Sink/Rand-Sink's importance-sampled sparse kernel can have weakly-connected
+  components with a local contraction rate near 1 (measured plateau ~5.6e-3 at
+  n=256, three orders above this tolerance) -- at 1e-6 those rows will very likely
+  never satisfy stop_tol and will run to max_iter every time. Same rule as
+  everyone else, but for those rows it stops discriminating: timing reflects a
+  fixed max_iter budget rather than "converged to X accuracy," the same way it
+  would for any method that can't reach the threshold.
+
+After a first run, check the `converged`/`iters_run` columns for every method, not
+just Spar-Sink/Rand-Sink: widespread `converged=False` at `iters_run=max_iter` means
+1e-6 wasn't reachable there and the timing numbers should be read as "cost of
+max_iter=10000 iterations," not "cost of converging."
 
 Not yet wired in: cost_gap / barycentric_sym against a true unregularized exact-OT
 reference (as opposed to rmae_pct against a converged entropic reference at the same
@@ -70,7 +81,7 @@ CONFIG = BenchConfig(
 
     stop_mode="potential_linf",
     max_iter=10000,
-    stop_tol=1e-4,
+    stop_tol=1e-6,
     potential_tol=1e-6,
     mass_tol=1e-6,
     check_every=10,  # see the Spar-Sink caveat above -- untuned for this grid yet
@@ -93,7 +104,13 @@ CONFIG = BenchConfig(
     sinkslotcuda_slices=[8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096],
 
     no_sparsink=False,
-    sparsink_s=[2000, 8000, 32000],  # config_paper's values; not part of the requested L sweep
+    # 10-point sweep, s = L * 2 * n for the same L = 8..4096 used above (n=10,000):
+    # 160,000 -> 81,920,000. NOTE: the top few values are a large fraction of the full
+    # n*m=1e8 entry count -- Spar-Sink/Rand-Sink's probability-matrix build is dense
+    # O(n*m) regardless of s, so this is a big jump from config_paper's max of 32,000
+    # and may be memory/compute heavy or OOM at the largest s; untested at this scale.
+    sparsink_s=[160000, 320000, 640000, 1280000, 2560000, 5120000,
+                10240000, 20480000, 40960000, 81920000],
     sparsink_replicates=50,
 
     no_ott=True,           # no early-stopping hook -- dropped
