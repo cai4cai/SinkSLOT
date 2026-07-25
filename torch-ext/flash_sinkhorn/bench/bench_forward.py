@@ -415,7 +415,12 @@ class StopCfg:
     mode="fixed" runs exactly n_iters. mode="marginal" runs up to max_iter,
     stopping when the total-variation marginal violation <= tol and |mass-1| <=
     mass_tol. mode="potential" stops on ||du||_1+||dv||_1 <= tol (Spar-Sink's rule).
-    Checked every `check_every` iterations. `fixed(n)` is the no-stopping default.
+    mode="potential_linf" stops once the dual potentials themselves stop moving,
+    max(|Δf|, |Δg|) < tol since the last check -- FlashSinkhorn's own native rule
+    (see sinkhorn_solvers.py), reproduced verbatim for srot/sinkslot/sinkslotcuda/
+    spar_sink/rand_sink so every method can share the identical stopping rule,
+    check frequency and threshold. Checked every `check_every` iterations.
+    `fixed(n)` is the no-stopping default.
     """
     mode: str = "fixed"
     max_iter: int = 10000
@@ -599,6 +604,11 @@ def _srot_sinkhorn(
     Returns (f, g, iters_run, converged, final_viol). stop None / "fixed" runs
     n_iters. "marginal"/"potential" run to stop.max_iter, stopping on the TV
     marginal violation (row marginal = exp(f/eps + LSE_row(g)); col is exactly b).
+    "potential_linf" reproduces FlashSinkhorn's own native rule exactly: stop once
+    the dual potentials themselves stop moving, max(|Δf|, |Δg|) < stop.tol, measured
+    since the last check (not the last iteration) -- see the identical check in
+    sinkhorn_solvers.py. f, g here are already the standard (non-absorbed) potentials,
+    same scale as FlashSinkhorn's unshifted f, g, so stop.tol means the same thing.
     """
     f = torch.zeros_like(log_a)
     g = torch.zeros_like(log_b)
@@ -609,11 +619,31 @@ def _srot_sinkhorn(
     def _col_lse(fv):
         return torch.logsumexp(log_pi + (fv.unsqueeze(1) - cost) / eps, dim=0)
 
-    if stop is None or getattr(stop, "mode", "fixed") == "fixed":
+    mode = getattr(stop, "mode", "fixed") if stop is not None else "fixed"
+
+    if mode == "fixed":
         for _ in range(n_iters):
             f = eps * (log_a - _row_lse(g))
             g = eps * (log_b - _col_lse(f))
         return f, g, n_iters, None, None
+
+    if mode == "potential_linf":
+        prev_f, prev_g = f.clone(), g.clone()
+        it = 0
+        converged = False
+        change = float("inf")
+        while it < stop.max_iter:
+            f = eps * (log_a - _row_lse(g))
+            g = eps * (log_b - _col_lse(f))
+            it += 1
+            if it % stop.check_every == 0:
+                change = max((f - prev_f).abs().max().item(), (g - prev_g).abs().max().item())
+                if change < stop.tol:
+                    converged = True
+                    break
+                prev_f.copy_(f)
+                prev_g.copy_(g)
+        return f, g, it, converged, change
 
     a = log_a.exp()
     it = 0
@@ -1256,11 +1286,46 @@ def _sparsink_sinkhorn(
     def _col_lse(fv):
         return segmented_lse(log_values + fv[rows] / eps, cols, m)
 
-    if stop is None or getattr(stop, "mode", "fixed") == "fixed":
+    mode = getattr(stop, "mode", "fixed") if stop is not None else "fixed"
+
+    if mode == "fixed":
         for _ in range(n_iters):
             f = eps * (log_a - _row_lse(g))
             g = eps * (log_b - _col_lse(f))
         return f, g, empty, n_iters, None, None
+
+    if mode == "potential_linf":
+        # FlashSinkhorn's own rule, verbatim: max(|Δf|, |Δg|) < stop.tol since the
+        # last check. f, g are already standard-scale here (f = eps*(...)), matching
+        # Flash's unshifted potentials, so stop.tol needs no rescaling. Distinct from
+        # Spar-Sink's own "potential" mode below, which uses L1 change in the scaling
+        # vectors u=exp(f/eps) measured every single iteration, not every check.
+        #
+        # Caveat (found while verifying this against a deep-converged reference):
+        # importance-sampled sparse supports can have weakly-connected components
+        # with a local contraction rate near 1, so "iterate barely moved since the
+        # last check" can be satisfied while still meaningfully far from the true
+        # fixed point -- worse the smaller check_every is, since a short window
+        # only sees a thin slice of a slow drift. Not a bug in this check (it's the
+        # same rule FlashSinkhorn uses natively) -- just don't assume tol alone
+        # bounds solution error here the way it more safely does for SROT/SinkSLOT's
+        # denser supports. check_every should span the support's mixing timescale.
+        prev_f, prev_g = f.clone(), g.clone()
+        it = 0
+        converged = False
+        change = float("inf")
+        while it < stop.max_iter:
+            f = eps * (log_a - _row_lse(g))
+            g = eps * (log_b - _col_lse(f))
+            it += 1
+            if it % stop.check_every == 0:
+                change = max((f - prev_f).abs().max().item(), (g - prev_g).abs().max().item())
+                if change < stop.tol:
+                    converged = True
+                    break
+                prev_f.copy_(f)
+                prev_g.copy_(g)
+        return f, g, empty, it, converged, change
 
     a = log_a.exp()
     it = 0
@@ -1525,10 +1590,10 @@ def bench_sinkslot(
     _stop = stop or StopCfg.fixed()
 
     def run():
-        _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop)
+        _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
 
     phi, psi, iters_run, converged, final_viol = _run_v5(
-        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop)
+        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
     rmae_pct = None
     if rmae_check:
         reference = _cached_sinkslot_reference(n, m, d, eps, slices, rows, cols, log_S,
@@ -1617,10 +1682,10 @@ def bench_sinkslotcuda(
     _stop = stop or StopCfg.fixed()
 
     def run():
-        _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop)
+        _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
 
     phi, psi, iters_run, converged, final_viol = _run_v5(
-        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop)
+        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
     rmae_pct = None
     if rmae_check:
         reference = _cached_sinkslotcuda_reference(n, m, d, eps, slices, rows, cols, log_S,
@@ -2980,8 +3045,12 @@ def main() -> None:
     )
     parser.add_argument("--no-srot", action="store_true", help="Skip SROT benchmarks.")
     parser.add_argument("--no-sinkslot", action="store_true", help="Skip SinkSLOT benchmarks.")
-    parser.add_argument("--stop-mode", choices=("fixed", "marginal", "potential"), default="fixed",
-                        help="Early stopping: 'fixed' runs n_iters; 'marginal'/'potential' run to convergence.")
+    parser.add_argument("--stop-mode", choices=("fixed", "marginal", "potential", "potential_linf"),
+                        default="fixed",
+                        help="Early stopping: 'fixed' runs n_iters; 'marginal'/'potential' run to "
+                             "convergence; 'potential_linf' reproduces FlashSinkhorn's own native rule "
+                             "(max L_inf change in the dual potentials) for srot/sinkslot/sinkslotcuda/"
+                             "spar_sink/rand_sink too.")
     parser.add_argument("--max-iter", type=int, default=10000, help="Iteration cap in non-fixed stop modes.")
     parser.add_argument("--stop-tol", type=float, default=1e-4, help="TV marginal-violation threshold.")
     parser.add_argument("--potential-tol", type=float, default=1e-6, help="Spar-Sink ||du||+||dv|| threshold.")

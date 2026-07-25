@@ -481,7 +481,7 @@ def seg_lse_online(indptr, colidx, lam, phi, psi, n, block=None, num_warps=None,
 
 
 def _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
-            n_iters, stop=None):
+            n_iters, stop=None, eps=None):
     """v5: alternating fused half-steps over prebuilt CSR/CSC.
 
     Potentials are absorbed (phi = f/eps, psi = g/eps): lam already carries
@@ -497,17 +497,47 @@ def _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
     r = a * exp(phi - phi_next) where phi_next is the next row LSE -- one extra
     LSE, no O(nnz) work. (potential mode falls back to the marginal check here;
     the u/v-change rule is Spar-Sink's and is applied there.)
+
+    stop.mode == "potential_linf" reproduces FlashSinkhorn's own native rule:
+    stop once the dual potentials stop moving, max(|Δf|, |Δg|) < stop.tol since
+    the last check, with no extra LSE call (unlike marginal mode). Since phi, psi
+    are absorbed (phi=f/eps), the raw phi/psi change is rescaled by `eps`
+    (required in this mode) so stop.tol compares on the same physical scale as
+    FlashSinkhorn's and SROT's unabsorbed f, g.
     """
     r_blk, r_w = launch_cfg(r_idx.numel(), n)
     c_blk, c_w = launch_cfg(c_idx.numel(), m)
     phi, psi = torch.zeros_like(log_a), torch.zeros_like(log_b)
     z_n, z_m = torch.zeros_like(log_a), torch.zeros_like(log_b)
 
-    if stop is None or getattr(stop, "mode", "fixed") == "fixed":
+    mode = getattr(stop, "mode", "fixed") if stop is not None else "fixed"
+
+    if mode == "fixed":
         for _ in range(n_iters):
             seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi)
             seg_lse_online(c_ptr, c_idx, c_lam, z_m, phi, m, c_blk, c_w, base=log_b, out=psi)
         return phi, psi, n_iters, None, None
+
+    if mode == "potential_linf":
+        if eps is None:
+            raise ValueError("eps is required for stop.mode == 'potential_linf'")
+        prev_phi, prev_psi = phi.clone(), psi.clone()
+        it = 0
+        converged = False
+        change = float("inf")
+        while it < stop.max_iter:
+            seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi)
+            seg_lse_online(c_ptr, c_idx, c_lam, z_m, phi, m, c_blk, c_w, base=log_b, out=psi)
+            it += 1
+            if it % stop.check_every == 0:
+                change = eps * max((phi - prev_phi).abs().max().item(),
+                                    (psi - prev_psi).abs().max().item())
+                if change < stop.tol:
+                    converged = True
+                    break
+                prev_phi.copy_(phi)
+                prev_psi.copy_(psi)
+        return phi, psi, it, converged, change
 
     a = log_a.exp()
     phi_next = torch.empty_like(log_a)
