@@ -1970,6 +1970,9 @@ def bench_sinkslotcuda(
     cost_gap_pct = None
     bary = None
     if rmae_check:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
+        # lam is local to _setup() and never returned -- recompute from log_S/cost,
+        # both of which ARE returned (fixes a NameError that crashed every unit).
+        lam = log_S - cost / eps
         T_vals = (phi[rows] + psi[cols] + lam).exp()
         plan_cost = float((T_vals * cost).sum())
         Tx, Ty, r, c = plan_barycentric_sparse(T_vals, rows, cols, x, y)
