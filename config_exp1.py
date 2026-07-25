@@ -8,6 +8,18 @@ stopping rule, check frequency, threshold, and precision. Run with:
 
     python run.py --config config_exp1 --execute
 
+This is exp1's leg for srot/sinkslot/sinkslotcuda/spar_sink/rand_sink (both
+flash backends are OFF here -- no_flash_symmetric/no_flash_alternating=True).
+Flash is covered separately by ``config_exp1_flash.py``, which is still part of
+exp1, not a different experiment: BenchConfig has one shared eps_values list
+for every method, so Flash (which has no L/s-style sweep knob of its own)
+can't reach the same 200-row count as everyone else without its OWN eps sweep
+at a different point count -- run BOTH configs for the complete exp1 grid, then
+concatenate their CSVs (every row is self-describing by ``method``, so this is
+safe). They write to separate output_dir's on purpose: run.py clears its
+target dir's CSVs at the start of every sweep, so pointing both at the same
+dir would let the second run silently wipe the first's results.
+
 Design:
 
 - ``gaussian`` only (isotropic normal), d in {3, 64} -- a low- and high-dimensional
@@ -120,8 +132,8 @@ CONFIG = BenchConfig(
     no_ott=True,           # no early-stopping hook -- dropped
     no_rmae_check=False,
     no_geomloss=True,      # no early-stopping hook -- dropped
-    no_flash_symmetric=False,
-    no_flash_alternating=False,
+    no_flash_symmetric=True,   # moved to config_exp1_flash.py -- 100-pt eps sweep to
+    no_flash_alternating=True, # match everyone else's row count; run that config too
 
     isolate=True,
     tensorized=False,
