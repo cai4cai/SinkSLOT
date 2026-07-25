@@ -61,10 +61,12 @@ just Spar-Sink/Rand-Sink: widespread `converged=False` at `iters_run=max_iter` m
 1e-6 wasn't reachable there and the timing numbers should be read as "cost of
 max_iter=10000 iterations," not "cost of converging."
 
-Not yet wired in: cost_gap / barycentric_sym against a true unregularized exact-OT
-reference (as opposed to rmae_pct against a converged entropic reference at the same
-eps). This config only changes the sweep grid and stopping policy; the accuracy
-metric is still whatever bench_forward.py currently reports.
+cost_gap_pct / barycentric_sym (vs. a true unregularized exact-OT reference, cached
+per (dataset, n, d, seed) and shared across every eps) are now wired in, replacing
+rmae_pct for every retained method. mass / marg_viol / hit_max_iters are also
+recorded unconditionally for every row, letting untrustworthy (non-converged)
+cost_gap_pct/barycentric_sym values be identified rather than silently trusted --
+see the branch's PR description for how this was verified.
 """
 
 from config import BenchConfig
