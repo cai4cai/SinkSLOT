@@ -1130,8 +1130,8 @@ def bench_geomloss_online(
     except ImportError:
         return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
 
-    from geomloss.sinkhorn_divergence import log_weights, sinkhorn_cost, sinkhorn_loop
-    from geomloss.sinkhorn_samples import lse_genred, softmin_online
+    from geomloss._legacy.sinkhorn_divergence import log_weights, sinkhorn_cost, sinkhorn_loop
+    from geomloss._legacy.sinkhorn_samples import lse_genred, softmin_online
 
     torch.manual_seed(seed)
     x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
@@ -1157,18 +1157,30 @@ def bench_geomloss_online(
             C_xy, C_yx, eps_list,
             rho=None, debias=False, last_extrapolation=False,
         )
-        loss_value = sinkhorn_cost(
-            eps, None, a, b, None, None, g_ab, f_ba,
-            batch=False, debias=False, potentials=False,
-        ).item()
         torch.cuda.synchronize()
     except Exception:
         return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
 
-    rmae_pct = None
-    if rmae_check:
-        reference = _cached_entropic_ot_reference(n, m, d, eps, x, y, a, b, dataset=dataset)
-        rmae_pct = _rmae_pct(loss_value, reference)
+    cost_gap_pct = None
+    bary = None
+    feas: dict = {}
+    if rmae_check:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
+        # sinkhorn_loop already returned dual potentials (g_ab, f_ba) from the SAME solve
+        # used for timing -- no separate untimed call needed, unlike Flash. f_ba is the
+        # source-side potential (on a's points), g_ab the target-side (on b's) -- same
+        # GeomLoss convention bench_flashsinkhorn's "both report the dual" note refers to.
+        # Both come back with a leading batch dim (1, n)/(1, m) even for this non-batched
+        # call -- squeeze it before treating them as plain (n,)/(m,) potentials.
+        f_ba_flat = f_ba.squeeze(0)
+        g_ab_flat = g_ab.squeeze(0)
+        cost = torch.cdist(x, y, p=2) ** 2
+        T = a.unsqueeze(1) * b.unsqueeze(0) * ((f_ba_flat.unsqueeze(1) + g_ab_flat.unsqueeze(0) - cost) / eps).exp()
+        plan_cost = float((T * cost).sum())
+        Tx, Ty, r, c = plan_barycentric_dense(T, x, y)
+        ref = _cached_exact_ot_reference(n, m, d, seed, x, y, a, b, dataset=dataset)
+        cost_gap_pct = cost_gap(plan_cost, ref)
+        bary = barycentric_sym(Tx, Ty, ref, a, b)
+        feas = plan_feasibility(r, c, a, b)
 
     def run():
         sinkhorn_loop(
@@ -1191,10 +1203,13 @@ def bench_geomloss_online(
         gpu_memory_mb = gpu_memory_used_mb(device)
         return TimingResult(
             "geomloss_online", n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False,
-            n_iters=n_iters, rmae_pct=rmae_pct,
+            n_iters=n_iters, cost_gap_pct=cost_gap_pct, barycentric_sym=bary,
+            iters_run=n_iters, converged=None, hit_max_iters=None,  # always fixed-iteration, no stopping check
+            seed=seed, **feas,
         )
     except torch.cuda.OutOfMemoryError:
-        return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
+        return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
+                            n_iters=n_iters, seed=seed)
 
 
 def bench_geomloss_tensorized(
@@ -1213,8 +1228,8 @@ def bench_geomloss_tensorized(
     dataset: "gaussian" (default) or "8gaussians"; see sample_point_cloud().
     seed: data-generation seed only (x, y, a, b).
     """
-    from geomloss.sinkhorn_divergence import log_weights, sinkhorn_cost, sinkhorn_loop
-    from geomloss.sinkhorn_samples import softmin_tensorized
+    from geomloss._legacy.sinkhorn_divergence import log_weights, sinkhorn_cost, sinkhorn_loop
+    from geomloss._legacy.sinkhorn_samples import softmin_tensorized
 
     torch.manual_seed(seed)
     x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
@@ -2401,8 +2416,8 @@ def measure_jit_overhead(
             # Force KeOps to recompile by using a fresh import context
             # Note: KeOps caches compiled kernels on disk, so true cold start
             # requires clearing ~/.cache/keops* (not done here for safety)
-            from geomloss.sinkhorn_divergence import log_weights, sinkhorn_loop
-            from geomloss.sinkhorn_samples import lse_genred, softmin_online
+            from geomloss._legacy.sinkhorn_divergence import log_weights, sinkhorn_loop
+            from geomloss._legacy.sinkhorn_samples import lse_genred, softmin_online
 
             eps_list = [eps] * n_iters
             a_log = log_weights(a)
@@ -3097,8 +3112,8 @@ def verify_loss_parity(
 
     # GeomLoss loss
     try:
-        from geomloss.sinkhorn_divergence import log_weights, sinkhorn_cost, sinkhorn_loop
-        from geomloss.sinkhorn_samples import lse_genred, softmin_online
+        from geomloss._legacy.sinkhorn_divergence import log_weights, sinkhorn_cost, sinkhorn_loop
+        from geomloss._legacy.sinkhorn_samples import lse_genred, softmin_online
 
         eps_list = [eps] * n_iters
         a_log = log_weights(a)
