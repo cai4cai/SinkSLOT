@@ -15,17 +15,19 @@ Design:
 - n=10,000, fixed across every method/eps/L. ``max_dense_size`` is set to 10,000 so
   the dense O(n^2) baselines (SROT, Spar-Sink, Rand-Sink) are NOT excluded here --
   every method gets a row at this one size, unlike config_paper's scaling story.
-- 5 seeds -- a real repeat of the full grid per seed (data only: x, y, a, b).
-  Method-internal randomness (SROT/SinkSLOT's slice projections, Spar-Sink's kernel
-  sampling) is untouched by this, so it stays independently/deterministically seeded
-  regardless of which data seed is active -- only the underlying problem instance
-  varies across seeds, not each method's own algorithmic randomness.
+- 1 seed (seed=0) for now, not the originally-planned 5 -- keeping the first real run
+  cheap while stop_tol/criterion feasibility is still being worked out. The seeds
+  field (BenchConfig.seeds) supports repeating the full grid per seed already (data
+  only: x, y, a, b; method-internal randomness like SROT/SinkSLOT's slice
+  projections and Spar-Sink's kernel sampling stays independent of it) -- revisit
+  once a single-seed run's timing is known.
 - eps: a 10-point log sweep from 1e-3 to 1e-1 (same range/style as the earlier
   3-point sweep in config_paper.py, just finer).
 - L: a 10-point sweep, 8 -> 4096 (doubling each step), applied to SROT, SinkSLOT and
-  SinkSLOT-CUDA. Spar-Sink/Rand-Sink's own knob is s, not L; matched to a 10-point
-  sweep of its own via s = L * 2 * n for the same 10 L values (160,000 -> 81,920,000)
-  -- see the caveat on sparsink_s below about the largest few values.
+  SinkSLOT-CUDA. Spar-Sink/Rand-Sink's own knob is s, not L; a first attempt tied it
+  to L directly (s = L*2*n, topping out at 81.92M) but the largest value didn't
+  complete a single solve within several minutes -- replaced with its own 10-point
+  doubling sweep, 2,000 -> 1,024,000, starting at config_paper's own value.
 - Stopping: "potential_linf" everywhere, not "fixed" -- max(|df|, |dg|) < stop_tol
   since the last check, capped at max_iter=10000. This is FlashSinkhorn's own native
   rule, ported verbatim to srot/sinkslot/sinkslotcuda/spar_sink/rand_sink (see the
@@ -87,10 +89,11 @@ CONFIG = BenchConfig(
     check_every=10,  # see the Spar-Sink caveat above -- untuned for this grid yet
 
     warmup=0,
-    rep=50,
+    rep=5,  # bench_with_stats' own mean+-std over rep calls is the timing error bound;
+            # 5 is enough for a usable std_ms without the 50x cost multiplier
     tf32=False,  # strict fp32 everywhere -- no method gets a TF32 speed advantage
 
-    seeds=[0, 1, 2, 3, 4],
+    seeds=[0],  # single seed for now -- revisit once a real run's timing is known
     datasets=["gaussian"],
 
     no_srot=False,
@@ -104,13 +107,12 @@ CONFIG = BenchConfig(
     sinkslotcuda_slices=[8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096],
 
     no_sparsink=False,
-    # 10-point sweep, s = L * 2 * n for the same L = 8..4096 used above (n=10,000):
-    # 160,000 -> 81,920,000. NOTE: the top few values are a large fraction of the full
-    # n*m=1e8 entry count -- Spar-Sink/Rand-Sink's probability-matrix build is dense
-    # O(n*m) regardless of s, so this is a big jump from config_paper's max of 32,000
-    # and may be memory/compute heavy or OOM at the largest s; untested at this scale.
-    sparsink_s=[160000, 320000, 640000, 1280000, 2560000, 5120000,
-                10240000, 20480000, 40960000, 81920000],
+    # 10-point doubling sweep, 2,000 -> 1,024,000 -- s = L*2*n topped out at 81.92M,
+    # which didn't complete a single solve within several minutes in timing
+    # validation (setup alone is dense O(n*m) regardless of s). This range starts
+    # at config_paper's own s=2,000 and extends it 32x past its old max (32,000),
+    # rather than jumping straight to a scale nothing here has been shown to handle.
+    sparsink_s=[2000, 4000, 8000, 16000, 32000, 64000, 128000, 256000, 512000, 1024000],
     sparsink_replicates=50,
 
     no_ott=True,           # no early-stopping hook -- dropped

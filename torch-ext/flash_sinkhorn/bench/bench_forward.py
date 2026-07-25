@@ -183,6 +183,19 @@ class TimingResult:
     valid_replicates: Optional[int] = None  # draws that produced a finite loss (no empty rows/cols)
     seed: int = 0  # data-generation seed (x, y, a, b) only -- not method-internal randomness
 
+    # Feasibility diagnostics on the solved plan itself, computed unconditionally
+    # for every row (not gated by stop mode) -- matching the SLOT repo's own
+    # convention (bench/run.py): mass and marg_viol measure DIFFERENT failures and
+    # must not be conflated. mass < 1 is STRUCTURAL (the solver's support cannot
+    # carry the marginals, e.g. a sparse method with an empty row/column) and no
+    # amount of iteration fixes it; mass ~= 1 with large marg_viol is ordinary
+    # non-convergence.
+    mass: Optional[float] = None  # T.sum() -- achieved total transported mass (target: 1.0)
+    marg_viol: Optional[float] = None  # max(||r-a||_inf, ||c-b||_inf), achieved vs target marginals
+    plan_empty_rows: Optional[int] = None  # rows of T with zero achieved mass
+    plan_empty_cols: Optional[int] = None  # cols of T with zero achieved mass
+    hit_max_iters: Optional[bool] = None  # iters_run >= stop.max_iter (None under "fixed" mode)
+
 
 @dataclass
 class JITOverheadResult:
@@ -211,6 +224,9 @@ def timing_result_to_json(r: TimingResult) -> str:
         "empty_lines": r.empty_lines, "rmae_std": r.rmae_std,
         "valid_replicates": r.valid_replicates, "seed": r.seed,
         "cost_gap_pct": r.cost_gap_pct, "barycentric_sym": r.barycentric_sym,
+        "mass": r.mass, "marg_viol": r.marg_viol,
+        "plan_empty_rows": r.plan_empty_rows, "plan_empty_cols": r.plan_empty_cols,
+        "hit_max_iters": r.hit_max_iters,
     })
 
 
@@ -511,20 +527,20 @@ def cost_gap(cost: float, ref: ExactRef) -> float:
 def barycentric_sym(
     Tx: torch.Tensor, Ty: torch.Tensor, ref: ExactRef, a: torch.Tensor, b: torch.Tensor,
 ) -> float:
-    """Weighted RMS deviation of both barycentric projections from the exact ones."""
-    import numpy as np
-
+    """Weighted squared deviation of both barycentric projections from the exact ones."""
     rx = torch.as_tensor(ref.bary_x, dtype=Tx.dtype, device=Tx.device)
     ry = torch.as_tensor(ref.bary_y, dtype=Ty.dtype, device=Ty.device)
     ex = float((a * ((Tx - rx) ** 2).sum(1)).sum())
     ey = float((b * ((Ty - ry) ** 2).sum(1)).sum())
-    return float(np.sqrt(ex + ey))
+    return ex + ey
 
 
 def plan_barycentric_dense(
     T: torch.Tensor, x: torch.Tensor, y: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Barycentric projections (Tx, Ty) of a dense plan T [n, m].
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Barycentric projections (Tx, Ty) of a dense plan T [n, m], plus its achieved
+    marginals (r, c) -- returned rather than discarded so callers can record
+    mass/marg_viol (see plan_feasibility) instead of just consuming the normalization.
 
     Normalizes by T's own ACHIEVED marginals (row/col sums), not the target a, b --
     the identity Tx_i = sum_j T_ij y_j / r_i stays exact even when the solve has not
@@ -538,14 +554,15 @@ def plan_barycentric_dense(
     c = T.sum(0)
     Tx = (T @ y) / r.clamp_min(tiny).unsqueeze(1)
     Ty = (T.t() @ x) / c.clamp_min(tiny).unsqueeze(1)
-    return Tx, Ty
+    return Tx, Ty, r, c
 
 
 def plan_barycentric_sparse(
     T_vals: torch.Tensor, rows: torch.Tensor, cols: torch.Tensor,
     x: torch.Tensor, y: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Barycentric projections (Tx, Ty) of a sparse plan given as (rows, cols, T_vals).
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Barycentric projections (Tx, Ty) of a sparse plan given as (rows, cols, T_vals),
+    plus its achieved marginals (r, c) -- see plan_barycentric_dense's docstring.
 
     Normalizes by the plan's own ACHIEVED marginals (scatter-summed from T_vals), not
     the target a, b -- see plan_barycentric_dense's docstring for why.
@@ -561,7 +578,21 @@ def plan_barycentric_sparse(
         0, cols, T_vals.unsqueeze(1) * x[rows])
     Tx = Tx / r.clamp_min(tiny).unsqueeze(1)
     Ty = Ty / c.clamp_min(tiny).unsqueeze(1)
-    return Tx, Ty
+    return Tx, Ty, r, c
+
+
+def plan_feasibility(r: torch.Tensor, c: torch.Tensor, a: torch.Tensor, b: torch.Tensor) -> dict:
+    """mass, marg_viol, plan_empty_rows/cols from a plan's achieved marginals (r, c)
+    vs its targets (a, b). Matches the SLOT repo's bench/run.py convention exactly
+    (mass = r.sum(); marg_viol = max(||r-a||_inf, ||c-b||_inf)) -- computed the same
+    way regardless of stop mode, unlike final_viol which is mode-dependent.
+    """
+    return {
+        "mass": float(r.sum()),
+        "marg_viol": max(float((r - a).abs().max()), float((c - b).abs().max())),
+        "plan_empty_rows": int((r == 0).sum()),
+        "plan_empty_cols": int((c == 0).sum()),
+    }
 
 
 @_dataclass
@@ -1024,6 +1055,7 @@ def bench_flashsinkhorn(
 
     cost_gap_pct = None
     bary = None
+    feas: dict = {}
     if rmae_check:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
         # Flash never materializes a plan (the point of its streaming kernels), so
         # cost_gap/barycentric_sym need one extra, UNTIMED potentials call for (f, g),
@@ -1043,10 +1075,11 @@ def bench_flashsinkhorn(
         cost = torch.cdist(x, y, p=2) ** 2
         T = a.unsqueeze(1) * b.unsqueeze(0) * ((f.unsqueeze(1) + g.unsqueeze(0) - cost) / eps).exp()
         plan_cost = float((T * cost).sum())
-        Tx, Ty = plan_barycentric_dense(T, x, y)
+        Tx, Ty, r, c = plan_barycentric_dense(T, x, y)
         ref = _cached_exact_ot_reference(n, m, d, seed, x, y, a, b, dataset=dataset)
         cost_gap_pct = cost_gap(plan_cost, ref)
         bary = barycentric_sym(Tx, Ty, ref, a, b)
+        feas = plan_feasibility(r, c, a, b)
 
     try:
         # Measure peak memory during benchmark
@@ -1064,7 +1097,7 @@ def bench_flashsinkhorn(
             method_name, n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False,
             n_iters=n_iters, cost_gap_pct=cost_gap_pct, barycentric_sym=bary,
             iters_run=(n_iters if _stop.mode == "fixed" else None),
-            converged=None,
+            converged=None, **feas,
         )
     except torch.cuda.OutOfMemoryError:
         return TimingResult(method_name, n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
@@ -1346,10 +1379,15 @@ def bench_srot(
         # old per-eps entropic reference this replaces.
         T = pi_sot * ((f.unsqueeze(1) + g.unsqueeze(0) - cost) / eps).exp()
         plan_cost = float((T * cost).sum())
-        Tx, Ty = plan_barycentric_dense(T, x, y)
+        Tx, Ty, r, c = plan_barycentric_dense(T, x, y)
         ref = _cached_exact_ot_reference(n, m, d, seed, x, y, a, b, dataset=dataset)
         cost_gap_pct = cost_gap(plan_cost, ref)
         bary = barycentric_sym(Tx, Ty, ref, a, b)
+        feas = plan_feasibility(r, c, a, b)
+    else:
+        feas = {}
+
+    hit_max_iters = (iters_run >= _stop.max_iter) if _stop.mode != "fixed" else None
 
     try:
         mean, std, min_t, max_t, median = bench_with_stats(
@@ -1363,6 +1401,7 @@ def bench_srot(
             dataset=dataset, tf32=allow_tf32,
             srot_slices=slices, setup_ms=setup_ms,
             iters_run=iters_run, converged=converged, final_viol=final_viol, seed=seed,
+            hit_max_iters=hit_max_iters, **feas,
         )
     except torch.cuda.OutOfMemoryError:
         return TimingResult(
@@ -1605,11 +1644,12 @@ def bench_sparsink(
     plan_costs, barys, nnzs, empties = [], [], [], 0
     build_ms = []
     iters_list, conv_list, viol_list = [], [], []
-    for r in range(replicates):
+    feas_list = []
+    for rep_i in range(replicates):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         rows, cols, log_values = build_sparse_kernel(
-            cost, a, b, eps, method=method, sample_size=sample_size, seed=r,
+            cost, a, b, eps, method=method, sample_size=sample_size, seed=rep_i,
         )
         torch.cuda.synchronize()
         build_ms.append((time.perf_counter() - t0) * 1e3)
@@ -1630,15 +1670,23 @@ def bench_sparsink(
             log_T = log_values + (f[rows] + g[cols]) / eps
             T = log_T.exp()
             plan_cost = float((T * cost[rows, cols]).sum())
-            Tx, Ty = plan_barycentric_sparse(T, rows, cols, x, y)
+            Tx, Ty, r_marg, c_marg = plan_barycentric_sparse(T, rows, cols, x, y)
             plan_costs.append(cost_gap(plan_cost, ref))
             barys.append(barycentric_sym(Tx, Ty, ref, a, b))
+            feas_list.append(plan_feasibility(r_marg, c_marg, a, b))
 
     cost_gap_pct = None
     bary = None
+    feas = {}
     if plan_costs:
         cost_gap_pct = float(torch.tensor(plan_costs).mean())
         bary = float(torch.tensor(barys).mean())
+        feas = {
+            "mass": sum(f["mass"] for f in feas_list) / len(feas_list),
+            "marg_viol": sum(f["marg_viol"] for f in feas_list) / len(feas_list),
+            "plan_empty_rows": sum(f["plan_empty_rows"] for f in feas_list) / len(feas_list),
+            "plan_empty_cols": sum(f["plan_empty_cols"] for f in feas_list) / len(feas_list),
+        }
 
     # Time one representative draw (the last), warmed up like every other method.
     rows, cols, log_values = build_sparse_kernel(
@@ -1664,8 +1712,10 @@ def bench_sparsink(
             iters_run=(int(sum(_it) / len(_it)) if (_it := [v for v in iters_list if v is not None]) else None),
             converged=(all(_cv) if (_cv := [v for v in conv_list if v is not None]) else None),
             final_viol=(sum(_vl) / len(_vl) if (_vl := [v for v in viol_list if v is not None]) else None),
+            hit_max_iters=(any(it >= _stop.max_iter for it in iters_list)
+                           if (_stop.mode != "fixed" and iters_list) else None),
             valid_replicates=len(plan_costs),
-            setup_ms=float(sum(build_ms) / len(build_ms)), seed=seed,
+            setup_ms=float(sum(build_ms) / len(build_ms)), seed=seed, **feas,
         )
     except torch.cuda.OutOfMemoryError:
         return TimingResult(
@@ -1799,10 +1849,15 @@ def bench_sinkslot(
         # (dataset, n, d, seed).
         T_vals = (phi[rows] + psi[cols] + lam).exp()
         plan_cost = float((T_vals * cost).sum())
-        Tx, Ty = plan_barycentric_sparse(T_vals, rows, cols, x, y)
+        Tx, Ty, r, c = plan_barycentric_sparse(T_vals, rows, cols, x, y)
         ref = _cached_exact_ot_reference(n, m, d, seed, x, y, a, b, dataset=dataset)
         cost_gap_pct = cost_gap(plan_cost, ref)
         bary = barycentric_sym(Tx, Ty, ref, a, b)
+        feas = plan_feasibility(r, c, a, b)
+    else:
+        feas = {}
+
+    hit_max_iters = (iters_run >= _stop.max_iter) if _stop.mode != "fixed" else None
 
     try:
         run(); torch.cuda.synchronize()
@@ -1816,7 +1871,7 @@ def bench_sinkslot(
                             dataset=dataset, tf32=allow_tf32, srot_slices=slices,
                             nnz=int(rows.numel()), setup_ms=setup_ms,
                             iters_run=iters_run, converged=converged, final_viol=final_viol,
-                            seed=seed)
+                            hit_max_iters=hit_max_iters, seed=seed, **feas)
     except torch.cuda.OutOfMemoryError:
         return TimingResult("sinkslot", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
                             n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices,
@@ -1902,10 +1957,15 @@ def bench_sinkslotcuda(
     if rmae_check:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
         T_vals = (phi[rows] + psi[cols] + lam).exp()
         plan_cost = float((T_vals * cost).sum())
-        Tx, Ty = plan_barycentric_sparse(T_vals, rows, cols, x, y)
+        Tx, Ty, r, c = plan_barycentric_sparse(T_vals, rows, cols, x, y)
         ref = _cached_exact_ot_reference(n, m, d, seed, x, y, a, b, dataset=dataset)
         cost_gap_pct = cost_gap(plan_cost, ref)
         bary = barycentric_sym(Tx, Ty, ref, a, b)
+        feas = plan_feasibility(r, c, a, b)
+    else:
+        feas = {}
+
+    hit_max_iters = (iters_run >= _stop.max_iter) if _stop.mode != "fixed" else None
 
     try:
         run(); torch.cuda.synchronize()
@@ -1919,7 +1979,7 @@ def bench_sinkslotcuda(
                             dataset=dataset, tf32=allow_tf32, srot_slices=slices,
                             nnz=int(rows.numel()), setup_ms=setup_ms,
                             iters_run=iters_run, converged=converged, final_viol=final_viol,
-                            seed=seed)
+                            hit_max_iters=hit_max_iters, seed=seed, **feas)
     except torch.cuda.OutOfMemoryError:
         return TimingResult("sinkslotcuda", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
                             n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices,
@@ -2739,8 +2799,10 @@ def run_forward_benchmark(
 FORWARD_CSV_COLUMNS = [
     "dataset", "tf32", "method", "n", "m", "d", "eps", "seed",
     "mean_ms", "std_ms", "min_ms", "max_ms", "median_ms", "gpu_memory_mb",
-    "oom", "n_iters", "iters_run", "converged", "final_viol",
-    "cost_gap_pct", "barycentric_sym", "rmae_pct", "rmae_std", "srot_slices", "sample_size",
+    "oom", "n_iters", "iters_run", "converged", "final_viol", "hit_max_iters",
+    "cost_gap_pct", "barycentric_sym", "mass", "marg_viol",
+    "plan_empty_rows", "plan_empty_cols",
+    "rmae_pct", "rmae_std", "srot_slices", "sample_size",
     "nnz", "empty_lines", "valid_replicates", "setup_ms",
 ]
 
@@ -2767,8 +2829,13 @@ def _forward_row(r: TimingResult) -> dict:
         "iters_run": r.iters_run if r.iters_run is not None else "N/A",
         "converged": r.converged if r.converged is not None else "N/A",
         "final_viol": f"{r.final_viol:.3e}" if r.final_viol is not None else "N/A",
+        "hit_max_iters": r.hit_max_iters if r.hit_max_iters is not None else "N/A",
         "cost_gap_pct": f"{r.cost_gap_pct:.4f}" if r.cost_gap_pct is not None else "N/A",
         "barycentric_sym": f"{r.barycentric_sym:.6e}" if r.barycentric_sym is not None else "N/A",
+        "mass": f"{r.mass:.6f}" if r.mass is not None else "N/A",
+        "marg_viol": f"{r.marg_viol:.3e}" if r.marg_viol is not None else "N/A",
+        "plan_empty_rows": r.plan_empty_rows if r.plan_empty_rows is not None else "N/A",
+        "plan_empty_cols": r.plan_empty_cols if r.plan_empty_cols is not None else "N/A",
         "srot_slices": r.srot_slices if r.srot_slices is not None else "N/A",
         "sample_size": r.sample_size if r.sample_size is not None else "N/A",
         "nnz": r.nnz if r.nnz is not None else "N/A",
