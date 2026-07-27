@@ -71,14 +71,8 @@ def _ot_1d_coo_batched(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: t
     m = PY.shape[0]
     ix = torch.argsort(PX, dim=0)                     # (n, C)
     iy = torch.argsort(PY, dim=0)                     # (m, C)
-    # fp64 scan, fp32 result. Plan entries are differences of adjacent breakpoints
-    # -- O(1) cumulative masses whose difference is O(1/n) -- so the subtraction
-    # cancels away most of the mantissa. At n=4096 the widths are ~2e-4 against
-    # fp32 eps ~1e-7 (three digits left) and it degrades linearly in n. The scan is
-    # O(C(n+m)), negligible against the O(C(n+m)) merge, so the accuracy is free.
-    # `_ot_1d_coo_batched_cuda` does the same, for the same reason.
-    ca = torch.cumsum(a[ix].double(), dim=0).float()  # (n, C), sorted asc per col
-    cb = torch.cumsum(b[iy].double(), dim=0).float()  # (m, C), sorted asc per col
+    ca = torch.cumsum(a[ix], dim=0)                   # (n, C), sorted asc per col
+    cb = torch.cumsum(b[iy], dim=0)                   # (m, C), sorted asc per col
 
     # Merge ca and cb into sorted `bounds` (n+m, C) via rank-scatter. searchsorted
     # is batched over columns with the (C, len) layout, then transposed back.
