@@ -492,11 +492,16 @@ def _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
     Returns (phi, psi, iters_run, converged, final_viol). With `stop` None or
     stop.mode == "fixed" it runs exactly n_iters (converged/final_viol None).
     With stop.mode in {"marginal", "potential"} it runs up to stop.max_iter and
-    stops on the total-variation marginal violation: after the column half-step
+    stops on the max (L-infinity) marginal violation: after the column half-step
     the column marginals are exactly b, so only the row marginal deviates, and
     r = a * exp(phi - phi_next) where phi_next is the next row LSE -- one extra
     LSE, no O(nnz) work. (potential mode falls back to the marginal check here;
-    the u/v-change rule is Spar-Sink's and is applied there.)
+    the u/v-change rule is Spar-Sink's and is applied there.) This is max, not a
+    total-variation sum: matches the SLOT repo's actual working "marg_viol" rule
+    (bench/solvers/sinkslot.py's `_violation`/`_run_v5` there) -- a sum over n
+    terms against a fixed absolute tol is unreachable at n=10,000 regardless of
+    convergence, which is why an earlier version of this function (sum-based)
+    looked like marginal-violation stopping didn't work here either.
 
     stop.mode == "potential_linf" reproduces FlashSinkhorn's own native rule:
     stop once the dual potentials stop moving, max(|Δf|, |Δg|) < stop.tol since
@@ -551,9 +556,13 @@ def _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
         if it % stop.check_every == 0 or it == stop.max_iter:
             seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi_next)
             row_marg = a * (phi - phi_next).exp()          # col marginal is exactly b
-            viol = float((row_marg - a).abs().sum())
+            # max (L-infinity), matching SLOT's actual _run_v5 exactly:
+            # `if float((a * ((phi - phi_new).exp() - 1.0).abs()).max()) <= threshold`.
+            # Not gated on mass_tol either -- SLOT's own working rule doesn't
+            # check mass separately; still returned for the diagnostic column.
+            viol = float((row_marg - a).abs().max())
             mass = float(row_marg.sum())
-            if viol <= stop.tol and abs(mass - 1.0) <= stop.mass_tol:
+            if viol <= stop.tol:
                 converged = True
                 break
     return phi, psi, it, converged, viol

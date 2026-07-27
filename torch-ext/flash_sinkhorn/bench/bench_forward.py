@@ -173,7 +173,7 @@ class TimingResult:
     tf32: bool = False  # TF32 matmuls enabled (10-bit mantissa) vs strict FP32
     iters_run: Optional[int] = None    # iterations actually executed (= n_iters in fixed mode)
     converged: Optional[bool] = None   # reached the stop threshold before max_iter (None in fixed)
-    final_viol: Optional[float] = None # TV marginal violation at stop (diagnostic)
+    final_viol: Optional[float] = None # max marginal violation at stop (diagnostic)
     srot_slices: Optional[int] = None  # SROT only: number of random 1-D projections (L)
     setup_ms: Optional[float] = None  # per-method setup excluded from mean_ms (SROT plan, sparsink sampling)
     sample_size: Optional[int] = None  # Spar-Sink/Rand-Sink only: requested subsample size s
@@ -479,6 +479,18 @@ _EXACT_REF_CACHE_DIR = Path.home() / ".cache" / "flash_sinkhorn" / "exact_ot_ref
 # a stale cache would silently corrupt every cost_gap/barycentric_sym.
 _EXACT_REF_CACHE_VERSION = 1
 
+# compute_exact_ot_reference is inherently dense regardless of which method calls
+# it: ot.dist(x_np, y_np) builds a full (n, m) float64 cost matrix on CPU for
+# ot.emd's network simplex, even for methods (SinkSLOT/-CUDA) whose own solve is
+# sparse. At n=m=50,000 that's 20GB; at 100,000 it's 80GB -- confirmed on-cluster
+# to OOM-kill every method uniformly (flash_symmetric/alternating, sinkslot,
+# sinkslotcuda all failed identically at n>=50,000 in the config_nscale run,
+# all traced to this shared call, not to any one method's own solver). Every
+# rmae_check gate below also checks n <= this bound, so cost_gap_pct/
+# barycentric_sym/mass/marg_viol are simply not computed above it -- timing and
+# memory are still recorded normally.
+_EXACT_OT_MAX_N = 10000
+
 
 def _cached_exact_ot_reference(
     n: int, m: int, d: int, seed: int,
@@ -601,13 +613,25 @@ class StopCfg:
 
     mode="fixed" runs exactly n_iters. mode="marginal" runs up to max_iter,
     stopping when the total-variation marginal violation <= tol and |mass-1| <=
-    mass_tol. mode="potential" stops on ||du||_1+||dv||_1 <= tol (Spar-Sink's rule).
-    mode="potential_linf" stops once the dual potentials themselves stop moving,
-    max(|Δf|, |Δg|) < tol since the last check -- FlashSinkhorn's own native rule
-    (see sinkhorn_solvers.py), reproduced verbatim for srot/sinkslot/sinkslotcuda/
-    spar_sink/rand_sink so every method can share the identical stopping rule,
-    check frequency and threshold. Checked every `check_every` iterations.
-    `fixed(n)` is the no-stopping default.
+    mass_tol -- srot/sinkslot/sinkslotcuda/spar_sink/rand_sink's proven default
+    (see SLOT repo), and now also implemented natively in FlashSinkhorn's own
+    solvers (sinkhorn_solvers.py) for flash_symmetric/flash_alternating, so it's
+    directly comparable across every method. mode="potential" stops on
+    ||du||_1+||dv||_1 <= tol (Spar-Sink's rule; no FlashSinkhorn equivalent --
+    Flash falls back to potential_linf for this mode). mode="potential_linf" stops
+    once the dual potentials themselves stop moving, max(|Δf|, |Δg|) < tol since
+    the last check -- FlashSinkhorn's own native rule (see sinkhorn_solvers.py),
+    reproduced verbatim for srot/sinkslot/sinkslotcuda/spar_sink/rand_sink so every
+    method can share the identical stopping rule, check frequency and threshold.
+    Checked every `check_every` iterations. `fixed(n)` is the no-stopping default.
+
+    Known asymmetry: the two FlashSinkhorn backends aren't equally cheap to check
+    under mode="marginal". flash_alternating's Gauss-Seidel structure satisfies one
+    marginal exactly by construction after each update (only the other needs a
+    fresh check, one extra reduction call); flash_symmetric's damped Jacobi
+    averaging leaves both marginals inexact after every update, so both need a
+    fresh check. Both are still cheaper than a full extra Sinkhorn iteration, and
+    both are only paid at check_every intervals, not every iteration.
     """
     mode: str = "fixed"
     max_iter: int = 10000
@@ -789,8 +813,11 @@ def _srot_sinkhorn(
     which reduces to the standard updates when pi_SOT = a (x) b.
 
     Returns (f, g, iters_run, converged, final_viol). stop None / "fixed" runs
-    n_iters. "marginal"/"potential" run to stop.max_iter, stopping on the TV
-    marginal violation (row marginal = exp(f/eps + LSE_row(g)); col is exactly b).
+    n_iters. "marginal"/"potential" run to stop.max_iter, stopping on the max
+    (L-infinity) marginal violation (row marginal = exp(f/eps + LSE_row(g));
+    col is exactly b) -- matches the SLOT repo's actual working "marg_viol"
+    rule, not a total-variation sum (which is unreachable at n=10,000
+    regardless of convergence).
     "potential_linf" reproduces FlashSinkhorn's own native rule exactly: stop once
     the dual potentials themselves stop moving, max(|Δf|, |Δg|) < stop.tol, measured
     since the last check (not the last iteration) -- see the identical check in
@@ -842,9 +869,16 @@ def _srot_sinkhorn(
         it += 1
         if it % stop.check_every == 0 or it == stop.max_iter:
             row_marg = (f / eps + _row_lse(g)).exp()      # col marginal is exactly b
-            viol = float((row_marg - a).abs().sum())
+            # max (L-infinity), not sum: matches the SLOT repo's actual working
+            # "marg_viol" rule (bench/solvers/sinkslot.py's _violation/_run_v5).
+            # A sum over n terms against a fixed absolute tol is unreachable at
+            # n=10,000 regardless of convergence -- SLOT's own ConvergenceCfg
+            # documents max as the n-invariant criterion. Not gated on mass_tol
+            # either, matching SLOT exactly -- mass is still returned for the
+            # diagnostic column.
+            viol = float((row_marg - a).abs().max())
             mass = float(row_marg.sum())
-            if viol <= stop.tol and abs(mass - 1.0) <= stop.mass_tol:
+            if viol <= stop.tol:
                 converged = True
                 break
     return f, g, it, converged, viol
@@ -1022,7 +1056,20 @@ def bench_flashsinkhorn(
     b = b / b.sum()
 
     _stop = stop or StopCfg.fixed()
-    _fs_kwargs = {} if _stop.mode == "fixed" else {"threshold": _stop.tol, "inner_iterations": _stop.check_every}
+    if _stop.mode == "fixed":
+        _fs_kwargs = {}
+    else:
+        # FlashSinkhorn's own SamplesLoss only knows "potential_linf" (its native
+        # rule) and "marginal" (added to match SROT/SinkSLOT/Spar-Sink's proven
+        # convention). Spar-Sink's own "potential" mode (max change in the scaling
+        # variable, a different quantity) has no Flash equivalent -- fall back to
+        # potential_linf for it, preserving this function's pre-existing behavior
+        # for that mode (it never distinguished "potential" from "potential_linf").
+        _fs_stop_mode = "marginal" if _stop.mode == "marginal" else "potential_linf"
+        _fs_kwargs = {
+            "threshold": _stop.tol, "inner_iterations": _stop.check_every,
+            "stop_mode": _fs_stop_mode, "mass_tol": _stop.mass_tol,
+        }
     _fs_iters = n_iters if _stop.mode == "fixed" else _stop.max_iter
     loss_fn = SamplesLoss(
         "sinkhorn",
@@ -1056,22 +1103,43 @@ def bench_flashsinkhorn(
     cost_gap_pct = None
     bary = None
     feas: dict = {}
-    if rmae_check:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
-        # Flash never materializes a plan (the point of its streaming kernels), so
-        # cost_gap/barycentric_sym need one extra, UNTIMED potentials call for (f, g),
-        # then a dense O(n*m) plan materialized post-hoc, outside the timed region.
-        # NOTE: SamplesLoss's potentials=True path does not forward threshold/
-        # inner_iterations for backend="alternating" (only "symmetric" does -- a
-        # pre-existing library asymmetry, not introduced here) -- so flash_alternating's
-        # potentials always run the full n_iters/max_iter budget regardless of
-        # early-stopping mode, while flash_symmetric's potentials call does respect it.
+    iters_run = n_iters if _stop.mode == "fixed" else None
+    converged = None
+    hit_max_iters = None
+    f = g = None
+
+    # Iteration tracking is decoupled from the cost_gap machinery below: the
+    # timed run() above goes through _SinkhornCostFn.apply (an autograd.Function,
+    # tensors-only return), so return_n_iters has no side channel there -- but
+    # this untimed potentials call is O(n) (no dense n*m materialization), so
+    # it's safe to run even at N where the dense plan reconstruction below would
+    # OOM. Always get it when early stopping is in play, independent of rmae_check.
+    if _stop.mode != "fixed":
         potentials_fn = SamplesLoss(
             "sinkhorn", backend=backend, use_epsilon_scaling=False, eps=eps,
             n_iters=_fs_iters, debias=False, potentials=True, normalize=False,
             autotune=True, last_extrapolation=False, allow_tf32=allow_tf32,
+            return_n_iters=True,
             **_fs_kwargs,
         )
-        f, g = potentials_fn(a, x, b, y)
+        f, g, iters_run = potentials_fn(a, x, b, y)
+        converged = iters_run < _stop.max_iter
+        hit_max_iters = iters_run >= _stop.max_iter
+
+    if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
+        # Flash never materializes a plan (the point of its streaming kernels), so
+        # cost_gap/barycentric_sym need (f, g) from an UNTIMED potentials call, then
+        # a dense O(n*m) plan materialized post-hoc, outside the timed region.
+        # Reuse the potentials already computed above if we have them (deterministic
+        # solve, so identical to a fresh call); only fixed mode needs one here.
+        if f is None:
+            potentials_fn = SamplesLoss(
+                "sinkhorn", backend=backend, use_epsilon_scaling=False, eps=eps,
+                n_iters=_fs_iters, debias=False, potentials=True, normalize=False,
+                autotune=True, last_extrapolation=False, allow_tf32=allow_tf32,
+                **_fs_kwargs,
+            )
+            f, g = potentials_fn(a, x, b, y)
         cost = torch.cdist(x, y, p=2) ** 2
         T = a.unsqueeze(1) * b.unsqueeze(0) * ((f.unsqueeze(1) + g.unsqueeze(0) - cost) / eps).exp()
         plan_cost = float((T * cost).sum())
@@ -1096,8 +1164,7 @@ def bench_flashsinkhorn(
         return TimingResult(
             method_name, n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False,
             n_iters=n_iters, cost_gap_pct=cost_gap_pct, barycentric_sym=bary,
-            iters_run=(n_iters if _stop.mode == "fixed" else None),
-            converged=None, **feas,
+            iters_run=iters_run, converged=converged, hit_max_iters=hit_max_iters, **feas,
         )
     except torch.cuda.OutOfMemoryError:
         return TimingResult(method_name, n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
@@ -1164,7 +1231,7 @@ def bench_geomloss_online(
     cost_gap_pct = None
     bary = None
     feas: dict = {}
-    if rmae_check:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
+    if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
         # sinkhorn_loop already returned dual potentials (g_ab, f_ba) from the SAME solve
         # used for timing -- no separate untimed call needed, unlike Flash. f_ba is the
         # source-side potential (on a's points), g_ab the target-side (on b's) -- same
@@ -1388,7 +1455,7 @@ def bench_srot(
 
     cost_gap_pct = None
     bary = None
-    if rmae_check:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
+    if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
         # SROT's own (possibly entropic-biased) plan, vs. the exact (unregularized) OT
         # reference -- shared across every eps for this (dataset, n, d, seed), unlike the
         # old per-eps entropic reference this replaces.
@@ -1541,8 +1608,8 @@ def _sparsink_sinkhorn(
         # FlashSinkhorn's own rule, verbatim: max(|Δf|, |Δg|) < stop.tol since the
         # last check. f, g are already standard-scale here (f = eps*(...)), matching
         # Flash's unshifted potentials, so stop.tol needs no rescaling. Distinct from
-        # Spar-Sink's own "potential" mode below, which uses L1 change in the scaling
-        # vectors u=exp(f/eps) measured every single iteration, not every check.
+        # Spar-Sink's own "potential" mode below, which uses max change in the scaling
+        # vectors u=exp(f/eps), checked every stop.check_every iterations like everyone else.
         #
         # Caveat (found while verifying this against a deep-converged reference):
         # importance-sampled sparse supports can have weakly-connected components
@@ -1581,16 +1648,26 @@ def _sparsink_sinkhorn(
         it += 1
         if it % stop.check_every == 0 or it == stop.max_iter:
             row_marg = (f / eps + _row_lse(g)).exp()
-            viol = float((row_marg - a).abs().sum())
+            # max (L-infinity), not sum -- see _srot_sinkhorn's comment: a sum
+            # over n terms against a fixed absolute tol is unreachable at
+            # n=10,000 regardless of convergence. Matches SLOT's actual
+            # working "marg_viol" rule. Not gated on mass_tol either, matching
+            # SLOT exactly -- mass is still returned for the diagnostic column.
+            viol = float((row_marg - a).abs().max())
             mass = float(row_marg.sum())
             if stop.mode == "potential":
-                # Spar-Sink's rule: ||du||_1 + ||dv||_1 on the scaling vectors u=exp(f/eps).
-                du = float(((f / eps).exp() - (f_prev / eps).exp()).abs().sum())
-                dv = float(((g / eps).exp() - (g_prev / eps).exp()).abs().sum())
-                if du + dv <= stop.potential_tol:
+                # Spar-Sink's rule: max(||du||_inf, ||dv||_inf) on the scaling
+                # vectors u=exp(f/eps). Also switched from sum to max: same
+                # n-invariance reasoning as marg_viol above -- SLOT doesn't
+                # implement this mode at all (its own Spar-Sink never early-stops),
+                # so there's no reference to match, but a sum over n+m terms
+                # against a fixed tol has the identical unreachable-at-scale flaw.
+                du = float(((f / eps).exp() - (f_prev / eps).exp()).abs().max())
+                dv = float(((g / eps).exp() - (g_prev / eps).exp()).abs().max())
+                if max(du, dv) <= stop.potential_tol:
                     converged = True
                     break
-            elif viol <= stop.tol and abs(mass - 1.0) <= stop.mass_tol:
+            elif viol <= stop.tol:
                 converged = True
                 break
     return f, g, empty, it, converged, viol
@@ -1647,7 +1724,7 @@ def bench_sparsink(
 
 
     ref = None
-    if rmae_check:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
+    if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
         ref = _cached_exact_ot_reference(n, m, d, seed, x, y, a, b, dataset=dataset)
 
     # Warm up the sampling path: the first call in a process absorbs one-time CUDA
@@ -1858,7 +1935,7 @@ def bench_sinkslot(
         r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
     cost_gap_pct = None
     bary = None
-    if rmae_check:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
+    if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
         # T_ij = exp(phi_i + psi_j + lam_ij) on the sliced support -- SinkSLOT's own plan,
         # vs. the exact (unregularized) OT reference, shared across every eps for this
         # (dataset, n, d, seed).
@@ -1969,7 +2046,7 @@ def bench_sinkslotcuda(
         r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
     cost_gap_pct = None
     bary = None
-    if rmae_check:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
+    if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
         # lam is local to _setup() and never returned -- recompute from log_S/cost,
         # both of which ARE returned (fixes a NameError that crashed every unit).
         lam = log_S - cost / eps
@@ -2613,6 +2690,7 @@ def run_forward_benchmark(
     include_sparsink: bool = False,
     sparsink_s: Optional[List[int]] = None,
     sparsink_replicates: int = 10,
+    only_sparsink_method: Optional[str] = None,
     stop: "StopCfg" = None,
     seed: int = 0,
 ) -> List[TimingResult]:
@@ -2632,6 +2710,15 @@ def run_forward_benchmark(
 
     dataset: "gaussian" (default) or "8gaussians"; see sample_point_cloud(). Not
     applied to OTT-JAX, which draws its own point cloud via JAX's RNG.
+
+    only_sparsink_method: restrict the Spar-Sink/Rand-Sink block to just this one
+    method ("spar_sink" or "rand_sink"). Without this, include_sparsink=True always
+    runs BOTH SPARSINK_METHODS regardless of which single method was actually
+    requested (e.g. via --only spar_sink) -- meaning a job launched for "spar_sink"
+    silently produces a full set of "rand_sink" rows too. Not wrong data (each row
+    is correctly tagged by its own method), but doubles the row count and wastes
+    compute when the caller only wanted one. Pass the actual requested method name
+    here to get exactly the rows asked for.
 
     seed: data-generation seed only (x, y, a, b), passed through to every method.
     Method-internal randomness (SROT/SinkSLOT's slice projections, Spar-Sink's
@@ -2762,9 +2849,14 @@ def run_forward_benchmark(
                         print(f"  SinkSLOT-CUDA L={slices}: {status}{extra}")
 
             # Spar-Sink / Rand-Sink (dense probability build, so gated like the other
-            # O(n*m)-setup baselines). One row per (method, s).
+            # O(n*m)-setup baselines). One row per (method, s). only_sparsink_method
+            # restricts this to a single method instead of always running both.
             if include_sparsink and n <= max_dense_size:
-                for sparsink_method in SPARSINK_METHODS:
+                _sparsink_methods = (
+                    (only_sparsink_method,) if only_sparsink_method is not None
+                    else SPARSINK_METHODS
+                )
+                for sparsink_method in _sparsink_methods:
                     for s_size in (sparsink_s or [2000]):
                         res = bench_sparsink(
                             n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx,
@@ -3534,6 +3626,7 @@ def main() -> None:
             include_sparsink=include_sparsink,
             sparsink_s=sparsink_s,
             sparsink_replicates=args.sparsink_replicates,
+            only_sparsink_method=args.only if args.only in SPARSINK_METHODS else None,
             include_sinkslot=include_sinkslot,
             sinkslot_slices=sinkslot_slices,
             include_sinkslotcuda=include_sinkslotcuda,
@@ -3685,6 +3778,7 @@ def main() -> None:
             include_sparsink=include_sparsink,
             sparsink_s=sparsink_s,
             sparsink_replicates=args.sparsink_replicates,
+            only_sparsink_method=args.only if args.only in SPARSINK_METHODS else None,
             include_sinkslot=include_sinkslot,
             sinkslot_slices=sinkslot_slices,
             include_sinkslotcuda=include_sinkslotcuda,

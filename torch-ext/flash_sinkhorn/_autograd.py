@@ -77,6 +77,11 @@ class _SinkhornConfig:
     # Adaptive padding: original unpadded sizes for masked early stopping
     n_orig: Optional[int] = None
     m_orig: Optional[int] = None
+    # Stopping rule: "potential_linf" (default, max(|df|,|dg|) < threshold) or
+    # "marginal" (total-variation marginal violation <= threshold and
+    # |mass-1| <= mass_tol -- same convention as bench_forward.py's SROT/SinkSLOT).
+    stop_mode: str = "potential_linf"
+    mass_tol: float = 1e-6
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +344,13 @@ class _SinkhornCostFn(torch.autograd.Function):
                 use_exp2=config.use_exp2,
                 n_orig=config.n_orig,
                 m_orig=config.m_orig,
+                # BUG FIX: this branch never threaded early-stopping through, so
+                # backend="alternating" always ran its full fixed iteration budget
+                # regardless of stop_mode -- see PR discussion for how this was found.
+                threshold=config.threshold,
+                check_every=config.inner_iterations,
+                stop_mode=config.stop_mode,
+                mass_tol=config.mass_tol,
             )
             f_grad, g_grad = f_cost, g_cost
 
@@ -390,6 +402,8 @@ class _SinkhornCostFn(torch.autograd.Function):
                 lambda_y=config.lambda_y,
                 threshold=config.threshold,
                 check_every=config.inner_iterations,
+                stop_mode=config.stop_mode,
+                mass_tol=config.mass_tol,
                 n_orig=config.n_orig,
                 m_orig=config.m_orig,
             )
@@ -418,6 +432,8 @@ class _SinkhornCostFn(torch.autograd.Function):
                 lambda_y=config.lambda_y,
                 threshold=config.threshold,
                 check_every=config.inner_iterations,
+                stop_mode=config.stop_mode,
+                mass_tol=config.mass_tol,
                 n_orig=config.n_orig,
                 m_orig=config.m_orig,
             )
