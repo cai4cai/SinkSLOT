@@ -689,10 +689,15 @@ def gpu_memory_used_mb(device: torch.device) -> float:
     return (total - free) / 1e6
 
 
-DATASET_CHOICES = ("gaussian", "8gaussians")
+DATASET_CHOICES = ("gaussian", "8gaussians", "half_moon", "two_rings")
 
 _EIGHT_GAUSSIANS_RADIUS = 2.0
 _EIGHT_GAUSSIANS_STD = 0.18
+_HALF_MOON_NOISE = 0.06
+_TWO_RINGS_RADIUS_SOURCE = 1.0
+_TWO_RINGS_RADIUS_TARGET = 2.0
+_TWO_RINGS_NOISE = 0.04
+_EXTRA_DIM_NOISE = 0.03  # i.i.d. filler for dims beyond the 2D generative structure
 
 
 def sample_point_cloud(
@@ -707,22 +712,54 @@ def sample_point_cloud(
     source ring (target=False) starts at angle 0; the target ring (target=True)
     is offset by 22.5 degrees so the two rings don't trivially line up. Only
     the first 2 dims carry ring structure; any remaining dims are i.i.d. noise.
+
+    dataset="half_moon": two noisy interleaving half-moons. The source
+    (target=False) is the upper moon x=[cos(t), sin(t)] + noise, t~U(0, pi);
+    the target (target=True) is the lower, offset moon
+    y=[1-cos(t), 0.5-sin(t)] + noise. Only the first 2 dims carry moon
+    structure; any remaining dims are i.i.d. noise.
+
+    dataset="two_rings": concentric noisy rings sharing a center, source
+    radius 1.0 (target=False) vs target radius 2.0 (target=True). Only the
+    first 2 dims carry ring structure; any remaining dims are i.i.d. noise.
     """
     if dataset == "gaussian":
         return torch.randn(n, d, device=device, dtype=torch.float32)
 
-    if dataset != "8gaussians":
+    if dataset not in DATASET_CHOICES:
         raise ValueError(f"Unknown dataset: {dataset!r}. Choices: {DATASET_CHOICES}")
     if d < 2:
-        raise ValueError("dataset='8gaussians' requires d >= 2")
+        raise ValueError(f"dataset={dataset!r} requires d >= 2")
 
-    offset = math.pi / 8 if target else 0.0
-    angles = offset + torch.arange(8, device=device, dtype=torch.float32) * (math.pi / 4)
-    centers = _EIGHT_GAUSSIANS_RADIUS * torch.stack([angles.cos(), angles.sin()], dim=1)  # (8, 2)
+    if dataset == "8gaussians":
+        offset = math.pi / 8 if target else 0.0
+        angles = offset + torch.arange(8, device=device, dtype=torch.float32) * (math.pi / 4)
+        centers = _EIGHT_GAUSSIANS_RADIUS * torch.stack([angles.cos(), angles.sin()], dim=1)  # (8, 2)
 
-    cluster_idx = torch.randint(0, 8, (n,), device=device)
-    points = torch.randn(n, d, device=device, dtype=torch.float32) * _EIGHT_GAUSSIANS_STD
-    points[:, :2] = points[:, :2] + centers[cluster_idx]
+        cluster_idx = torch.randint(0, 8, (n,), device=device)
+        points = torch.randn(n, d, device=device, dtype=torch.float32) * _EIGHT_GAUSSIANS_STD
+        points[:, :2] = points[:, :2] + centers[cluster_idx]
+        return points
+
+    if dataset == "half_moon":
+        t = torch.rand(n, device=device, dtype=torch.float32) * math.pi
+        if not target:
+            xy = torch.stack([t.cos(), t.sin()], dim=1)
+        else:
+            xy = torch.stack([1.0 - t.cos(), 0.5 - t.sin()], dim=1)
+        xy = xy + _HALF_MOON_NOISE * torch.randn(n, 2, device=device, dtype=torch.float32)
+    else:  # "two_rings"
+        t = torch.rand(n, device=device, dtype=torch.float32) * (2 * math.pi)
+        radius = _TWO_RINGS_RADIUS_TARGET if target else _TWO_RINGS_RADIUS_SOURCE
+        xy = radius * torch.stack([t.cos(), t.sin()], dim=1)
+        xy = xy + _TWO_RINGS_NOISE * torch.randn(n, 2, device=device, dtype=torch.float32)
+
+    if d == 2:
+        return xy
+
+    points = torch.empty(n, d, device=device, dtype=torch.float32)
+    points[:, :2] = xy
+    points[:, 2:] = _EXTRA_DIM_NOISE * torch.randn(n, d - 2, device=device, dtype=torch.float32)
     return points
 
 
@@ -1037,7 +1074,7 @@ def bench_flashsinkhorn(
     Args:
         backend: "symmetric" (GeomLoss-style) or "alternating" (OTT-JAX-style)
         allow_tf32: Enable TF32 for ~2x speedup (default: False for strict fp32)
-        dataset: "gaussian" (default) or "8gaussians"; see sample_point_cloud().
+        dataset: "gaussian" (default), "8gaussians", "half_moon", or "two_rings"; see sample_point_cloud().
         seed: data-generation seed only (x, y, a, b). Does not affect any
             method-internal randomness (e.g. SROT/SinkSLOT's slice projections,
             Spar-Sink's kernel sampling), which stay independently seeded.
@@ -1189,7 +1226,7 @@ def bench_geomloss_online(
     `n_iters` iterations (matching FlashSinkhorn / OTT-JAX settings).
 
     Cost convention: SqDist(X,Y) = ||x-y||² (full squared Euclidean, matches FlashSinkhorn).
-    dataset: "gaussian" (default) or "8gaussians"; see sample_point_cloud().
+    dataset: "gaussian" (default), "8gaussians", "half_moon", or "two_rings"; see sample_point_cloud().
     seed: data-generation seed only (x, y, a, b).
     """
     try:
@@ -1292,7 +1329,7 @@ def bench_geomloss_tensorized(
 
     Materializes O(n²) cost matrix in GPU memory.
     Cost convention: ||x-y||² (full squared Euclidean, matches FlashSinkhorn).
-    dataset: "gaussian" (default) or "8gaussians"; see sample_point_cloud().
+    dataset: "gaussian" (default), "8gaussians", "half_moon", or "two_rings"; see sample_point_cloud().
     seed: data-generation seed only (x, y, a, b).
     """
     from geomloss._legacy.sinkhorn_divergence import log_weights, sinkhorn_cost, sinkhorn_loop
@@ -2708,7 +2745,7 @@ def run_forward_benchmark(
     against it -- the RMAE metric from the Spar-Sink paper. Not computed for OTT-JAX
     (different RNG; see bench_ott_jax_online).
 
-    dataset: "gaussian" (default) or "8gaussians"; see sample_point_cloud(). Not
+    dataset: "gaussian" (default), "8gaussians", "half_moon", or "two_rings"; see sample_point_cloud(). Not
     applied to OTT-JAX, which draws its own point cloud via JAX's RNG.
 
     only_sparsink_method: restrict the Spar-Sink/Rand-Sink block to just this one
