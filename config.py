@@ -71,6 +71,9 @@ class BenchConfig:
             sinkslot_slices so the two can be compared at matched L or swept apart.
 
         no_sparsink: Skip the Spar-Sink and Rand-Sink baselines.
+        no_randsink: Skip just Rand-Sink (the uniform-sampling variant), while
+            still running Spar-Sink (importance sampling). Independent of
+            no_sparsink, which skips both.
         sparsink_s: Expected kernel subsample sizes s to sweep. Their paper uses
             s = {2,4,8,16} * s0(n) with s0(n) = 1e-3 * n * log^4(n), i.e. s0(256) ~ 242
             and s0(512) ~ 775. Small s can leave a row or column unsampled, which makes
@@ -154,6 +157,7 @@ class BenchConfig:
     sinkslotcuda_slices: List[int] = field(default_factory=lambda: [10])
 
     no_sparsink: bool = False
+    no_randsink: bool = False
     sparsink_s: List[int] = field(default_factory=lambda: [8000])
     sparsink_replicates: int = 5
 

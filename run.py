@@ -159,7 +159,9 @@ def _methods(cfg: BenchConfig) -> List[str]:
     if not cfg.no_sinkslotcuda:
         names.append("sinkslotcuda")
     if not cfg.no_sparsink:
-        names += ["spar_sink", "rand_sink"]
+        names.append("spar_sink")
+        if not cfg.no_randsink:
+            names.append("rand_sink")
     return names
 
 
