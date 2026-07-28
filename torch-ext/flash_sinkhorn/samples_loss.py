@@ -304,7 +304,11 @@ class SamplesLoss(torch.nn.Module):
     -----
     - Gradients are computed analytically (no backprop through Sinkhorn iterations),
       matching GeomLoss's `last_extrapolation` convention.
-    - `potentials=True` returns (f, g) without autograd support.
+    - `potentials=True` returns (f, g) without autograd support. With
+      `return_n_iters=True` (requires `potentials=True`), returns
+      (f, g, n_iters_used) instead -- the actual iteration count used,
+      honoring early stopping (stop_mode/threshold) rather than always the
+      fixed budget.
     """
 
     def __init__(
@@ -351,6 +355,9 @@ class SamplesLoss(torch.nn.Module):
         # Early stopping parameters (like OTT-JAX)
         threshold: Optional[float] = None,
         inner_iterations: int = 10,
+        stop_mode: str = "potential_linf",
+        mass_tol: float = 1e-6,
+        return_n_iters: bool = False,
         # Deprecated: FlashSinkhorn is now the only backend
         use_flashstyle: Optional[bool] = None,
         # Adaptive padding for variable-size OT
@@ -397,6 +404,12 @@ class SamplesLoss(torch.nn.Module):
                     'backend="alternating" does not support OTDD label cost. '
                     'Use backend="symmetric" for label-augmented cost.'
                 )
+        if return_n_iters and not potentials:
+            raise ValueError(
+                "return_n_iters=True requires potentials=True: the timed cost path "
+                "(_SinkhornCostFn.apply) is an autograd.Function and can only return "
+                "tensors, so it has no side channel for a plain iteration count."
+            )
         if reach is not None and reach <= 0:
             raise ValueError("reach must be positive (or None for balanced OT).")
         if reach_x is not None and reach_x <= 0:
@@ -464,6 +477,16 @@ class SamplesLoss(torch.nn.Module):
 
         self.threshold = None if threshold is None else float(threshold)
         self.inner_iterations = int(inner_iterations)
+        if stop_mode not in ("potential_linf", "marginal"):
+            raise ValueError(f'stop_mode must be "potential_linf" or "marginal", got {stop_mode!r}')
+        self.stop_mode = stop_mode
+        self.mass_tol = float(mass_tol)
+        # Only meaningful with potentials=True: the timed cost path
+        # (_SinkhornCostFn.apply, an autograd.Function) can only return
+        # tensors, so it has no side channel for a plain iteration count.
+        # The untimed potentials path below calls the solver directly and can
+        # thread this straight through.
+        self.return_n_iters = bool(return_n_iters)
 
         # Adaptive padding
         self.pad_to_multiple = None if pad_to_multiple is None else int(pad_to_multiple)
@@ -507,6 +530,8 @@ class SamplesLoss(torch.nn.Module):
             lambda_y=self.lambda_y,
             threshold=self.threshold,
             inner_iterations=self.inner_iterations,
+            stop_mode=self.stop_mode,
+            mass_tol=self.mass_tol,
         )
 
     def _eps_list_for_inputs(self, x: torch.Tensor, y: torch.Tensor) -> Sequence[float]:
@@ -639,8 +664,9 @@ class SamplesLoss(torch.nn.Module):
             if self.potentials:
                 f_list = []
                 g_list = []
+                n_iters_list = []
                 for xb, yb, ab, bb in zip(x, y, a, b):
-                    fb, gb = sinkhorn_flashstyle_symmetric(
+                    result = sinkhorn_flashstyle_symmetric(
                         xb, yb, ab, bb,
                         blur=self.blur,
                         scaling=self.scaling,
@@ -661,15 +687,25 @@ class SamplesLoss(torch.nn.Module):
                         lambda_y=self.lambda_y,
                         threshold=self.threshold,
                         check_every=self.inner_iterations,
+                        stop_mode=self.stop_mode,
+                        mass_tol=self.mass_tol,
+                        return_n_iters=self.return_n_iters,
                         n_orig=n_orig if should_pad else None,
                         m_orig=m_orig if should_pad else None,
                     )
+                    if self.return_n_iters:
+                        fb, gb, n_iters_used = result
+                        n_iters_list.append(n_iters_used)
+                    else:
+                        fb, gb = result
                     if should_pad:
                         fb, gb = _trim_potentials(fb, gb, n_orig, m_orig)
                     f_list.append(fb)
                     g_list.append(gb)
                 f_b = torch.stack(f_list, dim=0).view(parsed.a_view_shape)
                 g_b = torch.stack(g_list, dim=0).view(parsed.b_view_shape)
+                if self.return_n_iters:
+                    return f_b, g_b, n_iters_list
                 return f_b, g_b
 
             costs = [
@@ -687,7 +723,7 @@ class SamplesLoss(torch.nn.Module):
             if self.backend == "alternating":
                 eps = float(eps_list[-1])
                 n_iters = len(eps_list)
-                f, g = sinkhorn_flashstyle_alternating(
+                result = sinkhorn_flashstyle_alternating(
                     x, y, a, b,
                     eps=eps,
                     n_iters=n_iters,
@@ -697,11 +733,19 @@ class SamplesLoss(torch.nn.Module):
                     autotune=self.autotune,
                     allow_tf32=self.allow_tf32,
                     use_exp2=self.use_exp2,
+                    # BUG FIX: this call never threaded early-stopping through for
+                    # backend="alternating" -- it always ran the full n_iters
+                    # regardless of stop_mode. Matches the fix in _autograd.py.
+                    threshold=self.threshold,
+                    check_every=self.inner_iterations,
+                    stop_mode=self.stop_mode,
+                    mass_tol=self.mass_tol,
+                    return_n_iters=self.return_n_iters,
                     n_orig=n_orig if should_pad else None,
                     m_orig=m_orig if should_pad else None,
                 )
             else:
-                f, g = sinkhorn_flashstyle_symmetric(
+                result = sinkhorn_flashstyle_symmetric(
                     x, y, a, b,
                     blur=self.blur,
                     scaling=self.scaling,
@@ -722,11 +766,20 @@ class SamplesLoss(torch.nn.Module):
                     lambda_y=self.lambda_y,
                     threshold=self.threshold,
                     check_every=self.inner_iterations,
+                    stop_mode=self.stop_mode,
+                    mass_tol=self.mass_tol,
+                    return_n_iters=self.return_n_iters,
                     n_orig=n_orig if should_pad else None,
                     m_orig=m_orig if should_pad else None,
                 )
+            if self.return_n_iters:
+                f, g, n_iters_used = result
+            else:
+                f, g = result
             if should_pad:
                 f, g = _trim_potentials(f, g, n_orig, m_orig)
+            if self.return_n_iters:
+                return f.view(parsed.a_view_shape), g.view(parsed.b_view_shape), n_iters_used
             return f.view(parsed.a_view_shape), g.view(parsed.b_view_shape)
 
         # --- Standard cost path ---

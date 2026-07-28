@@ -27,6 +27,32 @@ from .kernels.sinkhorn_flashstyle_sqeuclid import (
 )
 
 
+def _marg_viol(
+    row_marg: torch.Tensor, col_marg: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
+) -> Tuple[float, float]:
+    """Max (L-infinity) marginal violation + achieved mass.
+
+    max(max|row_marg-a|, max|col_marg-b|) -- matches the SLOT repo's actual
+    working "marg_viol" stopping rule exactly (bench/solvers/sinkslot.py's
+    `_violation`/`_run_v5`: ``max(float((r-a).abs().max()), float((c-b).abs().max()))``).
+    A sum (total-variation) was used here previously -- and still is in an
+    earlier, uncorrected copy of this same convention in bench_forward.py's
+    `_srot_sinkhorn`/`_sparsink_sinkhorn` and sinkslot.py's `_run_v5` -- but a
+    sum over n (or m) terms against a fixed absolute tolerance is essentially
+    unreachable at n=10,000 regardless of how converged the solve actually is,
+    which is why it looked like potential-change and marginal-violation modes
+    both failed to converge here: only potential-change genuinely doesn't fit
+    this regime; marginal-violation was just measured wrong. max is what SLOT
+    actually runs and is the n-invariant criterion its own ConvergenceCfg
+    documents. Mass is still returned for the `mass` diagnostic column, but is
+    not part of the convergence decision -- SLOT's own working rule doesn't
+    gate on it either.
+    """
+    viol = max(float((row_marg - a).abs().max()), float((col_marg - b).abs().max()))
+    mass = float(row_marg.sum())
+    return viol, mass
+
+
 def sinkhorn_flashstyle_alternating(
     x: torch.Tensor,
     y: torch.Tensor,
@@ -48,6 +74,8 @@ def sinkhorn_flashstyle_alternating(
     autotune: bool = True,
     threshold: Optional[float] = None,
     check_every: int = 5,
+    stop_mode: str = "potential_linf",
+    mass_tol: float = 1e-6,
     return_n_iters: bool = False,
     ott_convention: bool = False,
     # Adaptive padding: mask convergence check to unpadded slices
@@ -80,8 +108,20 @@ def sinkhorn_flashstyle_alternating(
         allow_tf32: Enable TF32 for matmul
         use_exp2: Use exp2/log2 optimization
         autotune: Enable kernel autotuning
-        threshold: Early stopping threshold (None = no early stopping)
+        threshold: Early stopping threshold (None = no early stopping). Interpreted
+            as the potential-change tolerance when stop_mode="potential_linf", or
+            the max (L-infinity) marginal-violation tolerance when stop_mode="marginal".
         check_every: Check convergence every N iterations
+        stop_mode: "potential_linf" (default, native rule: max(|Δf|,|Δg|) < threshold)
+            or "marginal" (stop when max marginal violation <= threshold -- the
+            SLOT repo's actual working "marg_viol" rule, also matching
+            bench_forward.py's SROT/SinkSLOT/Spar-Sink "marginal" mode). Only
+            implemented for ott_convention=False (the default); raises
+            NotImplementedError otherwise.
+        mass_tol: Unused -- kept for call-site symmetry with StopCfg/bench_forward.py.
+            SLOT's own working "marginal" rule doesn't gate on mass either; only
+            max marginal violation decides convergence. `mass` is still computed
+            and returned for the CSV's diagnostic column.
         return_n_iters: If True, also return number of iterations used
         ott_convention: If True, return potentials in OTT convention where
             log marginals are absorbed into potentials:
@@ -223,6 +263,11 @@ def sinkhorn_flashstyle_alternating(
 
             # Early stopping check
             if threshold is not None and (i + 1) % check_every == 0:
+                if stop_mode == "marginal":
+                    raise NotImplementedError(
+                        "stop_mode='marginal' is only implemented for the default "
+                        "GeomLoss convention (ott_convention=False)."
+                    )
                 _no = n_orig if n_orig is not None else len(f_hat)
                 _mo = m_orig if m_orig is not None else len(g_hat)
                 f_change = (f_hat[:_no] - prev_f_hat[:_no]).abs().max().item()
@@ -269,12 +314,34 @@ def sinkhorn_flashstyle_alternating(
             if threshold is not None and (i + 1) % check_every == 0:
                 _no = n_orig if n_orig is not None else len(f_hat)
                 _mo = m_orig if m_orig is not None else len(g_hat)
-                f_change = (f_hat[:_no] - prev_f_hat[:_no]).abs().max().item()
-                g_change = (g_hat[:_mo] - prev_g_hat[:_mo]).abs().max().item()
-                if max(f_change, g_change) < threshold:
-                    break
-                prev_f_hat.copy_(f_hat)
-                prev_g_hat.copy_(g_hat)
+                if stop_mode == "marginal":
+                    # g_hat was just computed FROM this f_hat, so the column
+                    # marginal is exactly b by construction (same shortcut
+                    # bench_forward.py's _srot_sinkhorn uses). f_hat is now one
+                    # half-step stale relative to the fresh g_hat, so the row
+                    # marginal needs a genuine recheck: recompute what f_hat WOULD
+                    # be given the current g_hat (the same update, just not applied),
+                    # without overwriting f_hat. This costs one extra reduction call
+                    # per check (not per iteration) -- pricier than potential_linf's
+                    # check here, since alternating's Gauss-Seidel structure doesn't
+                    # give this for free the way SROT's dense in-memory LSE does.
+                    f_hat_check = flashsinkhorn_lse_fused(
+                        x_f32, y_f32, g_hat, log_b, eps, cost_scale=cost_scale,
+                        damping=damp_f, allow_tf32=allow_tf32, use_exp2=use_exp2,
+                        autotune=autotune,
+                    )
+                    row_marg = a[:_no] * ((f_hat[:_no] - f_hat_check[:_no]) / eps).exp()
+                    col_marg = b[:_mo]  # exactly b by construction
+                    viol, mass = _marg_viol(row_marg, col_marg, a[:_no], b[:_mo])
+                    if viol <= threshold:
+                        break
+                else:
+                    f_change = (f_hat[:_no] - prev_f_hat[:_no]).abs().max().item()
+                    g_change = (g_hat[:_mo] - prev_g_hat[:_mo]).abs().max().item()
+                    if max(f_change, g_change) < threshold:
+                        break
+                    prev_f_hat.copy_(f_hat)
+                    prev_g_hat.copy_(g_hat)
 
     # Convert back to standard potentials
     if ott_convention:
@@ -322,6 +389,8 @@ def sinkhorn_flashstyle_symmetric(
     fused: Optional[bool] = None,
     threshold: Optional[float] = None,
     check_every: int = 5,
+    stop_mode: str = "potential_linf",
+    mass_tol: float = 1e-6,
     return_n_iters: bool = False,
     return_prelast: bool = False,
     # Warm-start parameters (standard potentials, not shifted)
@@ -368,8 +437,21 @@ def sinkhorn_flashstyle_symmetric(
         fused: None (default) = auto-select based on n (fused for n < 30000).
                True = always fused (1 kernel launch per iteration).
                False = always separate (2 launches per iteration).
-        threshold: Early stopping threshold
+        threshold: Early stopping threshold. Interpreted as the potential-change
+            tolerance when stop_mode="potential_linf", or the max (L-infinity)
+            marginal-violation tolerance when stop_mode="marginal".
         check_every: Check convergence every N iterations
+        stop_mode: "potential_linf" (default, native rule: max(|Δf|,|Δg|) < threshold)
+            or "marginal" (stop when max marginal violation <= threshold -- the
+            SLOT repo's actual working "marg_viol" rule, also matching
+            bench_forward.py's SROT/SinkSLOT/Spar-Sink "marginal" mode). Unlike
+            the alternating solver, NEITHER marginal is exact here after an
+            update (symmetric/Jacobi damped averaging means both sides drift),
+            so both need a fresh check.
+        mass_tol: Unused -- kept for call-site symmetry with StopCfg/bench_forward.py.
+            SLOT's own working "marginal" rule doesn't gate on mass either; only
+            max marginal violation decides convergence. `mass` is still computed
+            and returned for the CSV's diagnostic column.
         return_n_iters: If True, also return number of iterations used
         return_prelast: If True, also return pre-extrapolation potentials
         f_init: Initial f potential for warm-start (standard form, not shifted)
@@ -509,6 +591,7 @@ def sinkhorn_flashstyle_symmetric(
             damp_g = dampening(step_eps, rho_y)  # FIXED: rho_y → g
 
             # FUSED: both f and g updates in ONE kernel launch
+            f_before, g_before = f_hat, g_hat  # pre-blend snapshot, for marginal check
             f_hat, g_hat = flashsinkhorn_symmetric_step(
                 x_f32, y_f32, f_hat, g_hat, log_a, log_b, step_eps,
                 cost_scale=cost_scale, alpha=0.5, damping_f=damp_f, damping_g=damp_g,
@@ -529,7 +612,24 @@ def sinkhorn_flashstyle_symmetric(
 
             # Early stopping check (in shifted space)
             if threshold is not None and (iter_idx + 1) % check_every == 0:
-                if prev_f is None:
+                if stop_mode == "marginal":
+                    _no = n_orig if n_orig is not None else len(f_hat)
+                    _mo = m_orig if m_orig is not None else len(g_hat)
+                    # Symmetric/Jacobi updates blend new = 0.5*old + 0.5*candidate,
+                    # so NEITHER marginal is exact after blending (unlike the
+                    # alternating solver's Gauss-Seidel structure) -- both need a
+                    # fresh check. Recover the pre-blend softmin candidate
+                    # algebraically (cand = 2*new - old at alpha=0.5) rather than
+                    # calling the kernel again: it's the raw candidate, not the
+                    # blended value, that satisfies its own marginal exactly.
+                    f_cand = 2.0 * f_hat - f_before
+                    g_cand = 2.0 * g_hat - g_before
+                    row_marg = a[:_no] * ((f_before[:_no] - f_cand[:_no]) / step_eps).exp()
+                    col_marg = b[:_mo] * ((g_before[:_mo] - g_cand[:_mo]) / step_eps).exp()
+                    viol, mass = _marg_viol(row_marg, col_marg, a[:_no], b[:_mo])
+                    if viol <= threshold:
+                        break
+                elif prev_f is None:
                     prev_f = f_hat.clone()
                     prev_g = g_hat.clone()
                 else:
@@ -657,7 +757,19 @@ def sinkhorn_flashstyle_symmetric(
 
             # Early stopping check
             if threshold is not None and (iter_idx + 1) % check_every == 0:
-                if prev_f is None:
+                if stop_mode == "marginal":
+                    _no = n_orig if n_orig is not None else len(f_hat)
+                    _mo = m_orig if m_orig is not None else len(g_hat)
+                    # f_cand/g_cand are already the raw (pre-blend) softmin
+                    # candidates computed above -- no reconstruction needed, unlike
+                    # the fused path. Same rationale as there: the candidate, not
+                    # the blended value, satisfies its own marginal exactly.
+                    row_marg = a[:_no] * ((f_old[:_no] - f_cand[:_no]) / step_eps).exp()
+                    col_marg = b[:_mo] * ((g_old[:_mo] - g_cand[:_mo]) / step_eps).exp()
+                    viol, mass = _marg_viol(row_marg, col_marg, a[:_no], b[:_mo])
+                    if viol <= threshold:
+                        break
+                elif prev_f is None:
                     prev_f = f_hat.clone()
                     prev_g = g_hat.clone()
                 else:

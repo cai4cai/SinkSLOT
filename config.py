@@ -43,6 +43,10 @@ class BenchConfig:
         tf32: Allow TF32 matmuls (10-bit mantissa) rather than strict FP32. Tracked
             per row, so a TF32 run and an FP32 run of the same configuration are
             distinct rows rather than one overwriting the other.
+        seeds: Data-generation seeds (x, y, a, b only). The full grid is repeated
+            once per seed. Method-internal randomness (slice projections, sparse-
+            kernel sampling) is not affected -- it stays at its own independent
+            default so varying seeds only changes the underlying problem instance.
 
         datasets: Synthetic point-cloud distributions. ``"gaussian"`` is an isotropic
             normal; ``"8gaussians"`` is 8 clusters on a radius-2 ring.
@@ -67,6 +71,9 @@ class BenchConfig:
             sinkslot_slices so the two can be compared at matched L or swept apart.
 
         no_sparsink: Skip the Spar-Sink and Rand-Sink baselines.
+        no_randsink: Skip just Rand-Sink (the uniform-sampling variant), while
+            still running Spar-Sink (importance sampling). Independent of
+            no_sparsink, which skips both.
         sparsink_s: Expected kernel subsample sizes s to sweep. Their paper uses
             s = {2,4,8,16} * s0(n) with s0(n) = 1e-3 * n * log^4(n), i.e. s0(256) ~ 242
             and s0(512) ~ 775. Small s can leave a row or column unsampled, which makes
@@ -117,18 +124,25 @@ class BenchConfig:
     # comparison. "marginal" runs up to max_iter, stopping when the total-variation
     # marginal violation sum|P1-a|+|P^T1-b| <= stop_tol and |mass-1| <= mass_tol; the
     # TV (L1) norm is n-independent, unlike an absolute max threshold. "potential"
-    # reproduces Spar-Sink's rule, ||du||_1+||dv||_1 <= potential_tol. Matched stopping
-    # is implemented for srot/sinkslot/spar_sink/rand_sink; flash uses its native
-    # threshold; geomloss stays fixed.
-    stop_mode: str = "fixed"     # "fixed" | "marginal" | "potential"
+    # reproduces Spar-Sink's rule, ||du||_1+||dv||_1 <= potential_tol. "potential_linf"
+    # reproduces FlashSinkhorn's own native rule, max(|df|,|dg|) <= stop_tol since the
+    # last check -- implemented (in addition to marginal) for srot/sinkslot/
+    # sinkslotcuda/spar_sink/rand_sink, and flash already uses it natively under any
+    # non-"fixed" mode; geomloss has no early-stopping hook and stays fixed regardless.
+    stop_mode: str = "fixed"     # "fixed" | "marginal" | "potential" | "potential_linf"
     max_iter: int = 10000        # cap in non-fixed modes (n_iters is the count in "fixed")
-    stop_tol: float = 1e-4       # marginal (TV) threshold, n-independent
+    stop_tol: float = 1e-4       # marginal/potential_linf threshold, n-independent
     potential_tol: float = 1e-6  # Spar-Sink's ||du||+||dv|| threshold ("potential" mode)
     mass_tol: float = 1e-6       # |sum(P) - 1| threshold
     check_every: int = 10        # iterations between convergence checks
     warmup: int = 5
     rep: int = 15
     tf32: bool = True
+
+    # Data-generation seeds only (x, y, a, b) -- method-internal randomness (slice
+    # projections, sparse-kernel sampling) stays independently seeded regardless.
+    # One full sweep is repeated per seed, letting results be aggregated afterward.
+    seeds: List[int] = field(default_factory=lambda: [0])
 
     datasets: List[str] = field(default_factory=lambda: ["gaussian", "8gaussians"])
 
@@ -143,6 +157,7 @@ class BenchConfig:
     sinkslotcuda_slices: List[int] = field(default_factory=lambda: [10])
 
     no_sparsink: bool = False
+    no_randsink: bool = False
     sparsink_s: List[int] = field(default_factory=lambda: [8000])
     sparsink_replicates: int = 5
 
