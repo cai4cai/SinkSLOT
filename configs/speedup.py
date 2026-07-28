@@ -7,10 +7,10 @@ THIS FILE IS ONE OF THREE that together define the complete speedup
 benchmark -- each is a separate BenchConfig only because a single BenchConfig
 can't mix `dims` across datasets, not because the experiment itself is
 different. Read all three together for the full picture:
-  - config_speedup.py            (this file) -- half_moon, 8gaussians,
+  - configs/speedup.py            (this file) -- half_moon, 8gaussians,
     two_rings, all d=2.
-  - config_speedup_gaussian_d3.py -- Gaussian, d=3, same eps/L/S grid.
-  - config_speedup_gaussian_d64.py -- Gaussian, d=64, wider eps range [0.1, 1].
+  - configs/speedup_gaussian_d3.py -- Gaussian, d=3, same eps/L/S grid.
+  - configs/speedup_gaussian_d64.py -- Gaussian, d=64, wider eps range [0.1, 1].
 All three share the same solver policy (marginal, stop_tol=1e-6, same L/S
 grids) and the same 5 methods below. Execution was additionally split into
 many per-dataset/per-method SLURM jobs purely for cluster scheduling (2h dev
@@ -38,10 +38,10 @@ Methods, one SLURM job each (see table1_launch/gen_scripts.py):
 
 Run with:
 
-    python run.py --config config_speedup --execute
+    python run.py --config speedup --execute
 """
 
-from config import BenchConfig
+from configs.base import BenchConfig
 
 _NM = 10000 * 10000
 _s_densities = [0.001, 0.0017487, 0.0030579, 0.0053472, 0.0093506, 0.0163512, 0.028593, 0.05]

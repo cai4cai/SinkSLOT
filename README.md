@@ -36,8 +36,8 @@ GeomLoss / OTT-JAX.
 
 | File | What |
 |---|---|
-| `config.py` | `BenchConfig` + a quick-iteration sweep (tiny grid, runs in minutes; not used for any reported number) |
-| `config_speedup*.py`, `config_scalability.py` | the published sweeps — see [Which config produced which result](#which-config-produced-which-result) |
+| `configs/base.py` | `BenchConfig` + a quick-iteration sweep (tiny grid, runs in minutes; not used for any reported number) |
+| `configs/speedup*.py`, `configs/scalability.py` | the published sweeps — see [Which config produced which result](#which-config-produced-which-result) |
 | `run.py` | sweep driver: one subprocess per measurement, results appended to one CSV |
 | `view.py` | results viewer (textual TUI; `--print` for static tables) |
 | `analysis.md` | working notes on every methodological choice (local, untracked) |
@@ -45,9 +45,9 @@ GeomLoss / OTT-JAX.
 ## Run a sweep
 
 ```bash
-python run.py --dry-run                        # quick grid from config.py
+python run.py --dry-run                        # quick grid from configs/base.py
 python run.py --execute                        # run it -> output/quick
-python run.py --config config_speedup --execute  # a published sweep
+python run.py --config speedup --execute       # a published sweep
 python view.py --output-dir output/quick
 ```
 
@@ -55,16 +55,16 @@ python view.py --output-dir output/quick
 
 | Paper | Config | Grid |
 |---|---|---|
-| Table 1 (speedup at each cost-gap threshold), half-moons / 8-Gaussians / two-rings | `config_speedup.py` | N=M=10,000, d=2, ε 8-point log grid over [0.001, 0.1], L 32–4096 |
-| Table 1, Gaussian d=3 | `config_speedup_gaussian_d3.py` | same policy, d=3 |
-| Table 1, Gaussian d=64 | `config_speedup_gaussian_d64.py` | same policy, d=64, wider ε range [0.1, 1] |
-| Figure 2 (scalability in N and d) | `config_scalability.py` | N ∈ {5k,10k,20k,30k,50k}; d ∈ {4…1024} at N=10,000 |
+| Table 1 (speedup at each cost-gap threshold), half-moons / 8-Gaussians / two-rings | `configs/speedup.py` | N=M=10,000, d=2, ε 8-point log grid over [0.001, 0.1], L 32–4096 |
+| Table 1, Gaussian d=3 | `configs/speedup_gaussian_d3.py` | same policy, d=3 |
+| Table 1, Gaussian d=64 | `configs/speedup_gaussian_d64.py` | same policy, d=64, wider ε range [0.1, 1] |
+| Figure 2 (scalability in N and d) | `configs/scalability.py` | N ∈ {5k,10k,20k,30k,50k}; d ∈ {4…1024} at N=10,000 |
 
 All four share one solver policy: marginal stopping on
 `max(‖P1−a‖∞, ‖Pᵀ1−b‖∞) < 1e-6`, `max_iter=10000`, float32, TF32 off, and the
 exact LP reference plan from POT's network simplex (`ot.emd`, CPU, float64).
 
-`config_scalability.py` holds the constants only; its per-unit commands are built
+`configs/scalability.py` holds the constants only; its per-unit commands are built
 by a cluster launcher that is not part of this artifact. Spar-Sink's sample budget
 there is density-based, so the absolute value is recomputed per N.
 

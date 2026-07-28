@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Tuple
 
 import importlib
 
-from config import BenchConfig
+from configs.base import BenchConfig
 
 
 def build_command(
@@ -308,10 +308,10 @@ def run_tf32_comparison(base_cfg: BenchConfig, *, dry_run: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run a flash_sinkhorn benchmark using settings from config.py"
+        description="Run a flash_sinkhorn benchmark using settings from a configs/ module"
     )
-    parser.add_argument("--config", default="config",
-                        help="Config module to load CONFIG from (default: config; e.g. config_speedup).")
+    parser.add_argument("--config", default="base",
+                        help="Module in configs/ to load CONFIG from (default: base; e.g. speedup).")
     parser.add_argument("--dry-run", action="store_true", help="Print the command without running it.")
     parser.add_argument("--execute", action="store_true", help="Force execution even if CONFIG.dry_run is True.")
     parser.add_argument(
@@ -319,7 +319,10 @@ def main() -> None:
         help="Run the benchmark once with TF32 on and once off, then print a timing diff.",
     )
     args = parser.parse_args()
-    CONFIG = importlib.import_module(args.config).CONFIG
+    # Accept either the bare module name ("speedup") or a dotted path
+    # ("configs.speedup"); the bare form is what the docs and --help use.
+    _name = args.config if "." in args.config else f"configs.{args.config}"
+    CONFIG = importlib.import_module(_name).CONFIG
 
     dry_run = CONFIG.dry_run
     if args.dry_run:

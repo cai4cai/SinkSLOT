@@ -1,21 +1,21 @@
 """Speedup benchmark, part 2 of 3 -- Gaussian dataset at d=3, same grid/stop
-policy as config_speedup.py (eps/L/S all 8-point, max_iter=10000, marginal,
-stop_tol=1e-6). See config_speedup.py's docstring for how the 3 speedup files
+policy as configs/speedup.py (eps/L/S all 8-point, max_iter=10000, marginal,
+stop_tol=1e-6). See configs/speedup.py's docstring for how the 3 speedup files
 relate -- this one exists only because a single BenchConfig can't mix dims
 across datasets (dims applies uniformly to every dataset in cfg.datasets), so
 this Gaussian-at-d=3 slice has to be its own config.
 
 Its commands are appended into the SAME per-method output directories as
-config_speedup.py's 3 non-Gaussian datasets (table1_launch/gen_scripts.py
+configs/speedup.py's 3 non-Gaussian datasets (table1_launch/gen_scripts.py
 routes both configs' --output-dir to the identical path per method), so each
 method's forward_all.csv ends up covering all 4 dataset slices together.
 
 Run with:
 
-    python run.py --config config_speedup_gaussian_d3 --execute
+    python run.py --config speedup_gaussian_d3 --execute
 """
 
-from config import BenchConfig
+from configs.base import BenchConfig
 
 _NM = 10000 * 10000
 _s_densities = [0.001, 0.0017487, 0.0030579, 0.0053472, 0.0093506, 0.0163512, 0.028593, 0.05]

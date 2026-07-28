@@ -1,8 +1,8 @@
 """Speedup benchmark, part 3 of 3 -- Gaussian only, d=64 only, "easy" high-eps
 regime. N=M=10,000, marginal stopping, stop_tol=1e-6, max_iter=20000 (up from
-config_speedup.py's 10000 -- this sweep sits entirely in the eps range the
+configs/speedup.py's 10000 -- this sweep sits entirely in the eps range the
 earlier convcheck_d64 probe showed reliably converges, so the higher budget
-is just headroom, not expected to be needed). See config_speedup.py's
+is just headroom, not expected to be needed). See configs/speedup.py's
 docstring for how the 3 speedup files relate.
 
 eps: 8-point log grid spanning exactly one decade, [0.1, 1] (both endpoints
@@ -19,14 +19,14 @@ change only concerns the SinkSLOT-CUDA vs Flash-alternating comparison), so
 srot_slices below is left at its original value, documenting what SROT's
 completed run actually used.
 
-Same S (Spar-Sink density) grid as config_speedup.py.
+Same S (Spar-Sink density) grid as configs/speedup.py.
 
 Run with:
 
-    python run.py --config config_speedup_gaussian_d64 --execute
+    python run.py --config speedup_gaussian_d64 --execute
 """
 
-from config import BenchConfig
+from configs.base import BenchConfig
 
 _NM = 10000 * 10000
 _s_densities = [0.001, 0.0017487, 0.0030579, 0.0053472, 0.0093506, 0.0163512, 0.028593, 0.05]

@@ -1,6 +1,6 @@
 """Figure2: 3 N-scaling/d-scaling experiments, all methods except SROT and
 Rand-Sink (SinkSLOT-CUDA, Flash-alternating, Spar-Sink). Rand-Sink was dropped
--- no longer of interest. Same marginal stopping policy as config_speedup.py:
+-- no longer of interest. Same marginal stopping policy as configs/speedup.py:
 stop_tol=1e-6, max_iter=20000.
 
 Not expressed as a plain BenchConfig / run.py sweep: Spar-Sink's S here is
@@ -23,7 +23,7 @@ Experiment 3 -- d-scaling, Gaussian, N=10,000 fixed, eps=0.1 fixed, d in the
 
 Every experiment uses the same L_VALUES for SinkSLOT-CUDA and the same
 S_DENSITIES for Spar-Sink (3 points each, not the 8-point grids used in
-config_speedup.py -- these are smaller, exploratory sweeps).
+configs/speedup.py -- these are smaller, exploratory sweeps).
 
 Known cost risk: at N=50,000 (the top of the N sweep in experiments 1 and 2),
 the largest density (5%) gives S=125,000,000 -- over 10x the largest S value
@@ -50,7 +50,7 @@ EPS_EXP3 = 0.1
 
 METHODS = ["sinkslotcuda", "flash_alternating", "spar_sink"]
 
-# shared solver policy, same as config_speedup.py
+# shared solver policy, same as configs/speedup.py
 STOP_MODE = "marginal"
 MAX_ITER = 20000
 STOP_TOL = 1e-6
