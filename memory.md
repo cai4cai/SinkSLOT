@@ -55,21 +55,54 @@ So Flash's `TENSORS` of 3.2 against a `TOTAL` of 381.0 is not a contradiction. T
 
 **1. Report `TENSORS` and `TOTAL`, not `device`.** `device` is a post-hoc residual: it misses transients entirely and is otherwise dominated by a fixed floor unrelated to the transport problem. `TENSORS` is the algorithmic quantity; `TOTAL` is the deployment one. Flash's 112.5 MB `TOTAL` reproduces FlashSinkhorn Figure 3's "barely above 100 MB" at (10k, 1024).
 
-**2. The current table has the ordering backwards.** exp1 reports Flash at 1,786.8 MiB against SinkSLOT's 782.3. On `TENSORS` it is Flash 3.2 against SinkSLOT 490–2,935, and on `TOTAL` 381.0 against 666–3,428. **We do not have a memory advantage over Flash and should not claim one.** Our advantage is O(L(N+M)) support vs dense O(NM) — a different axis.
+**2. The current table has the ordering backwards.** exp1 reports Flash at 1,786.8 MiB against SinkSLOT's 782.3. On `TENSORS` it is Flash 3.2 against SinkSLOT-CUDA's 490.9, and on `TOTAL` 381.0 against 666.2. **We do not have a memory advantage over Flash and should not claim one.** Our advantage is O(L(N+M)) support vs dense O(NM) — a different axis, and one that only holds against SROT, not against Flash. See below.
 
 **3. Triton autotuning is the prime suspect for the H100 spread.** With autotune on, Flash's `TOTAL` is 381.0 MB against a 112.5 MB `warm`; with `--no-autotune` the nvidia-smi peak collapses from 364 MiB to 106 MiB. So 258 MiB of the A1000 figure is compilation transient, and an H100 admits more autotune configs across far more SMs. This supersedes an earlier reading of mine that dismissed autotune because `--no-autotune` only moved `modules` from 2.1 to 0.0 — that is the residual, which is not where autotuning shows up. Run `scripts/memory.py` on Jean Zay and compare `warm` against `TOTAL` to confirm.
 
-## Open bug
+## Why SinkSLOT-CUDA is heavier than Flash
 
-`bench_sinkslot` builds the sparse cost by gathering (`bench_forward.py:1512`):
+Not the naive-path gather — this is the optimised path, and it is fundamental. SinkSLOT stores an explicit sparse kernel; Flash stores none, recomputing cost from coordinates inside the kernel. Persistent solve state at n=m=4096, d=64, L=512:
 
-```python
-cost = (x[rows] - y[cols]).square().sum(1)   # 2807 MB = 3 x nnz*d*4B
+```
+SinkSLOT-CUDA (CSR + CSC)          FlashSinkhorn
+  r_idx  int16      7.3 MB           x  fp32   1.0 MB
+  r_lam  fp32      14.6 MB           y  fp32   1.0 MB
+  c_idx  int16      7.3 MB           a,b       0.0 MB
+  c_lam  fp32      14.6 MB
+  TOTAL           43.9 MB           TOTAL      2.1 MB     -> 21x
 ```
 
-`bench_sinkslotcuda` already uses the blocked `sparse_sqeuclidean_cost` — **14.7 MB**, 190x less. Scales as nnz*d, so it is what OOMs at N=1e5 / L~9k, and it will read as SinkSLOT failing to scale. Not yet fixed.
+nnz = 3,655,051 (87% of L(N+M) after coalescing) at 12 bytes/nnz — indices and values kept twice, row-major for the CSR half-step and column-major for the CSC one. **SinkSLOT is O(L(N+M)) and independent of d; Flash is O(Nd) and independent of L.** Measured persistent MB: L=64 -> 6.2, L=512 -> 43.9, L=2048 -> 122.3; and d=3 -> 40.8 against d=64 -> 43.9 at fixed L. The ratio is roughly 2.6·L/d, so SinkSLOT is heavier whenever L/d is above ~0.4 — nearly the whole grid. Accuracy needs L to grow and Flash's memory does not grow with L at all.
 
-`scripts/memory_profile.py` confirms this operator by operator. Top of the SETUP phase, n=4096, d=64, L=512:
+The 12 bytes/nnz is not reducible by engineering: storing values once plus a `perm` is byte-neutral, and `lam` cannot be narrowed (`to_csr` explains why — fp16 puts ~5e-3 absolute error on a log-domain value of order 10, against a 1e-6 marginal threshold).
+
+**It worsens at N=1e5.** `to_csr` picks int16 only when `idx.max() < 2**15`, so above 32,768 points the indices silently widen to int32 and 12 -> 16 bytes/nnz. At N=1e5, L=9k that puts persistent state near 25 GB before any transient, against ~51 MB for Flash. Chunking (below) controls the transient but cannot touch that floor; the levers there are capping L or pruning the support, both method changes.
+
+## Open levers on the CUDA path
+
+The build transient is 10–14x the persistent state — `sot_plan_coo` materialises all L(N+M) raw entries before coalescing. `chunk` (already a parameter, defaulted to one-shot) caps it. Measured on the full setup path, prototyped and then reverted since the campaign ran without it:
+
+```
+   L    chunk   narrow_idx   setup ms   peak MB
+ 512     None        False       80.2      447.0
+ 512     None         True       64.6      447.0
+ 512      256         True       62.6      279.2     1.6x
+2048     None        False      273.0     1756.0
+2048     None         True      247.8     1756.0
+2048      256         True      253.3      565.5     3.1x
+```
+
+Verified safe: identical support set, identical mass, `max |dS| = 0`. The gain scales with L — 1.6x at L=512 against 3.1x at L=2048 — and it is roughly time-neutral, not the ~8% penalty a narrower measurement suggested.
+
+Narrowing the returned `rows`/`cols` from int64 to int32 (both fit whenever n, m < 2^31; the flat key `row*m+col` must stay int64) buys **no peak memory at all** — 447.0 and 1756.0 are unchanged with and without. The 8 bytes/nnz is real but those intermediates are not live at the high-water mark, which sits inside the build before they exist. What it does buy is speed: 80.2 -> 64.6 ms at L=512, since `to_csr` then sorts and gathers half-width arrays.
+
+Neither is applied. End to end on the table, both together moved SinkSLOT-CUDA's `tens:setup` 490.9 -> 324.1 and `TOTAL` 666.2 -> 536.2 at L=512, leaving `tens:solve` and every other method untouched. Neither touches the 12 bytes/nnz persistent floor or the O(L(N+M)) vs O(Nd) gap against Flash.
+
+## What the naive-vs-CUDA gap is made of
+
+`sinkslot`'s 2,935 MB against `sinkslot_cuda`'s 491 MB is not a defect — the non-CUDA path is the untouched naive baseline (483aa68), and this gap is what the CUDA setup path exists to close. Recording it because it is the memory half of the same speedup, which the sweep only ever reported as time.
+
+`scripts/memory_profile.py` attributes it operator by operator. Top of the SETUP phase, n=4096, d=64, L=512:
 
 ```
 sinkslot                            sinkslot_cuda
@@ -78,7 +111,7 @@ aten::sub       967.09 MB   (x3)    aten::sub        31.40 MB   (x2)
 aten::pow       935.69 MB   (x1)    aten::pow          --
 ```
 
-Those are exactly the three intermediates of `(x[rows] - y[cols]).square()` — the gather, the subtraction, the squaring — live simultaneously. The CUDA path's blocked kernel never materialises them, and its `aten::pow` disappears entirely.
+Those are the three intermediates of the baseline's `cost = (x[rows] - y[cols]).square().sum(1)` — gather, subtract, square — live at once, O(nnz*d) each. The CUDA path's blocked `sparse_sqeuclidean_cost` never materialises them and its `aten::pow` disappears entirely: 2,807 MB of transient becomes 14.7 MB.
 
 ## Reproduce
 
