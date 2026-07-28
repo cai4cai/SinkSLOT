@@ -40,7 +40,6 @@ GeomLoss / OTT-JAX.
 | `configs/speedup*.py`, `configs/scalability.py` | the published sweeps — see [Which config produced which result](#which-config-produced-which-result) |
 | `run.py` | sweep driver: one subprocess per measurement, results appended to one CSV |
 | `view.py` | results viewer (textual TUI; `--print` for static tables) |
-| `analysis.md` | working notes on every methodological choice (local, untracked) |
 
 ## Run a sweep
 
@@ -68,6 +67,10 @@ exact LP reference plan from POT's network simplex (`ot.emd`, CPU, float64).
 by a cluster launcher that is not part of this artifact. Spar-Sink's sample budget
 there is density-based, so the absolute value is recomputed per N.
 
-Baselines ported from other repos (SROT, Spar-Sink, SinkSLOT) are written from
-their papers/code and validated against upstream; provenance and every
-convention choice are documented in `analysis.md`.
+SROT and Spar-Sink are adapted from the authors' released implementations
+([SROT](https://github.com/khainb/SROT),
+[Spar-Sink](https://github.com/Mengyu8042/Spar-Sink)) and validated against
+them. The changes are confined to this harness — GPU, precision, stopping rule
+and timing instrumentation are held fixed across every method, so the algorithm
+is the only difference. The update equations, reference coupling and sampling
+scheme are the authors' own.

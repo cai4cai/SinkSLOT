@@ -783,6 +783,9 @@ def build_sot_plan(
 ) -> torch.Tensor:
     """Uniform-average sliced-OT reference plan from `slices` random 1-D projections.
 
+    Adapted from the authors' released SROT code (github.com/khainb/SROT) onto
+    this harness; the reference coupling below is theirs.
+
     Returns (1 - delta) * pi_SOT + delta * (a (x) b). The delta mix keeps every entry
     strictly positive when a, b > 0, so the Sinkhorn kernel has full support.
 
@@ -1556,7 +1559,9 @@ def build_sparse_kernel(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Poisson-sample the Sinkhorn kernel; return (rows, cols, log_values).
 
-    Following their eq. (7) and (9): with inclusion probability q_ij = min(1, s*p_ij),
+    Adapted from the authors' released Spar-Sink code (github.com/Mengyu8042/
+    Spar-Sink) onto this harness; the sampling scheme below is theirs.
+    Their eq. (7) and (9): with inclusion probability q_ij = min(1, s*p_ij),
     keep entry (i, j) with probability q_ij and rescale it to K_ij / q_ij, which is
     unbiased for K. s bounds the *expected* nnz, so the realised count varies.
 
