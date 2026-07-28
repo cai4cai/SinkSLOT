@@ -19,8 +19,7 @@ Experiment 2 -- N-scaling, Gaussian d=64, eps=0.1 fixed, same N sweep as
 experiment 1.
 
 Experiment 3 -- d-scaling, Gaussian, N=10,000 fixed, eps=0.1 fixed, d in the
-9-point grid {4,8,16,32,64,128,256,512,1024} (matches config_expB_dscale_marginal.py's
-d grid).
+9-point grid {4,8,16,32,64,128,256,512,1024}.
 
 Every experiment uses the same L_VALUES for SinkSLOT-CUDA and the same
 S_DENSITIES for Spar-Sink (3 points each, not the 8-point grids used in

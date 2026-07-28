@@ -30,35 +30,15 @@ def sot_directions(d: int, L: int, seed: int) -> np.ndarray:
     return thetas / norms
 
 
-def _ot_1d_coo(px: torch.Tensor, py: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
-    """1-D optimal plan as (rows, cols, vals); at most n+m-1 nonzeros.
+def _ot_1d_coo_batched(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
+    """1-D optimal plans as (rows, cols, vals), C slices at once.
 
     North-west corner on the sorted order: the two cumulative-weight vectors cut
     [0,1] into segments, and each segment is a single (i, j) pair carrying its
-    own length as mass.
-    """
-    ix = torch.argsort(px)
-    iy = torch.argsort(py)
-    ca = torch.cumsum(a[ix], 0)
-    cb = torch.cumsum(b[iy], 0)
-
-    bounds = torch.cat([ca, cb]).sort().values
-    prev = torch.cat([bounds.new_zeros(1), bounds[:-1]])
-    mass = bounds - prev
-    keep = mass > 0
-    mass, mid = mass[keep], (0.5 * (prev + bounds))[keep]
-
-    i = torch.searchsorted(ca.contiguous(), mid).clamp_(max=ca.numel() - 1)
-    j = torch.searchsorted(cb.contiguous(), mid).clamp_(max=cb.numel() - 1)
-    return ix[i], iy[j], mass
-
-
-def _ot_1d_coo_batched(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
-    """Vectorised `_ot_1d_coo` over C slices at once.
+    own length as mass. At most n+m-1 nonzeros per slice.
 
     PX: (n, C), PY: (m, C). Returns flat COO for all columns concatenated:
-    (rows, cols, vals), each 1-D. Identical result to C sequential `_ot_1d_coo`
-    calls; the Python loop over slices is removed.
+    (rows, cols, vals), each 1-D.
 
     The breakpoints are the union of the two cumulative-weight vectors ca and cb.
     Both are already sorted (cumsums of positive weights), so the union is a MERGE
@@ -229,7 +209,7 @@ def sot_plan_coo(
     run_f, run_v = coalesce(run_f, run_v)
 
     # Divided once at the end rather than per slice: same value, one pass, and
-    # it keeps the running accumulator on the same scale as `_ot_1d_coo` returns.
+    # it keeps the running accumulator on the per-slice mass scale throughout.
     return (run_f // m).long(), (run_f % m).long(), run_v / L
 
 
@@ -311,79 +291,6 @@ def sparse_sqeuclidean_cost(x, y, rows, cols, block: int = 1024):
         x.contiguous(), y.contiguous(), rows, cols, out, nnz,
         D=d, BLOCK=block, num_warps=4,
     )
-    return out
-
-
-@triton.jit
-def _seg_lse_kernel(
-    indptr, colidx, lam, phi, psi, shift, out,
-    USE_SHIFT: tl.constexpr, BLOCK: tl.constexpr,
-):
-    """out[i] = LSE_{k in row i} ( lam[k] + phi[i] + psi[col[k]] ).
-
-    With USE_SHIFT the caller supplies the per-row shift (the v2/v3 propagated
-    bound); otherwise the row max is computed in a first pass, which is what
-    makes this also serve as the v1 stable-LSE path.
-    """
-    i = tl.program_id(0)
-    start = tl.load(indptr + i)
-    end = tl.load(indptr + i + 1)
-    p = tl.load(phi + i)
-
-    if USE_SHIFT:
-        s = tl.load(shift + i)
-    else:
-        s = -float("inf")
-        for off in range(start, end, BLOCK):
-            k = off + tl.arange(0, BLOCK)
-            m = k < end
-            c = tl.load(colidx + k, mask=m, other=0).to(tl.int32)
-            v = tl.load(lam + k, mask=m, other=-float("inf"))
-            q = tl.load(psi + c, mask=m, other=0.0)
-            s = tl.maximum(s, tl.max(tl.where(m, v + p + q, -float("inf"))))
-
-    acc = 0.0
-    for off in range(start, end, BLOCK):
-        k = off + tl.arange(0, BLOCK)
-        m = k < end
-        c = tl.load(colidx + k, mask=m, other=0).to(tl.int32)
-        v = tl.load(lam + k, mask=m, other=0.0)
-        q = tl.load(psi + c, mask=m, other=0.0)
-        acc += tl.sum(tl.where(m, tl.exp(v + p + q - s), 0.0))
-
-    tl.store(out + i, tl.where(acc > 0.0, s + tl.log(acc), -float("inf")))
-
-
-def seg_lse(indptr, colidx, lam, phi, psi, n, shift=None, block=128):
-    """Fused segmented LSE over M = lam + phi[row] + psi[col], never forming M."""
-    out = torch.empty(n, dtype=lam.dtype, device=lam.device)
-    dummy = shift if shift is not None else out
-    _seg_lse_kernel[(n,)](
-        indptr, colidx, lam, phi, psi, dummy, out,
-        USE_SHIFT=shift is not None, BLOCK=block, num_warps=4,
-    )
-    return out
-
-
-@triton.jit
-def _plan_kernel(indptr, colidx, lam, phi, psi, out, BLOCK: tl.constexpr):
-    """out[k] = exp(lam[k] + phi[i] + psi[col[k]]) -- the final plan values."""
-    i = tl.program_id(0)
-    start = tl.load(indptr + i)
-    end = tl.load(indptr + i + 1)
-    p = tl.load(phi + i)
-    for off in range(start, end, BLOCK):
-        k = off + tl.arange(0, BLOCK)
-        m = k < end
-        c = tl.load(colidx + k, mask=m, other=0).to(tl.int32)
-        v = tl.load(lam + k, mask=m, other=0.0)
-        q = tl.load(psi + c, mask=m, other=0.0)
-        tl.store(out + k, tl.exp(v + p + q), mask=m)
-
-
-def plan_values(indptr, colidx, lam, phi, psi, nnz, n, block=128):
-    out = torch.empty(nnz, dtype=lam.dtype, device=lam.device)
-    _plan_kernel[(n,)](indptr, colidx, lam, phi, psi, out, BLOCK=block, num_warps=4)
     return out
 
 
@@ -566,29 +473,3 @@ def _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
                 converged = True
                 break
     return phi, psi, it, converged, viol
-
-
-def build_support(x, y, a, b, eps, L, seed=0):
-    """(rows, cols, lam) for the sinkslot kernel: lam = log P^SOT - C/eps.
-
-    Built on the sparse SOT support only, so this is O(L(N+M)), not O(NM).
-    """
-    rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=seed)
-    cost = (x[rows] - y[cols]).square().sum(1)
-    lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
-    return rows, cols, lam
-
-
-def run_sinkslot(x, y, a, b, eps, L, n_iters, seed=0):
-    """Fixed-iteration SinkSLOT (v5). Returns (phi, psi, rows, cols, lam).
-
-    phi, psi are the ABSORBED potentials (f/eps, g/eps); the dual objective is
-    eps * (a . phi + b . psi).
-    """
-    n, m = a.numel(), b.numel()
-    rows, cols, lam = build_support(x, y, a, b, eps, L, seed=seed)
-    r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n)
-    c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m)
-    phi, psi, _, _, _ = _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
-                                a.log(), b.log(), n, m, n_iters)
-    return phi, psi, rows, cols, lam

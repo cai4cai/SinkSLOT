@@ -311,7 +311,7 @@ def main() -> None:
         description="Run a flash_sinkhorn benchmark using settings from config.py"
     )
     parser.add_argument("--config", default="config",
-                        help="Config module to load CONFIG from (default: config; e.g. config_paper).")
+                        help="Config module to load CONFIG from (default: config; e.g. config_speedup).")
     parser.add_argument("--dry-run", action="store_true", help="Print the command without running it.")
     parser.add_argument("--execute", action="store_true", help="Force execution even if CONFIG.dry_run is True.")
     parser.add_argument(

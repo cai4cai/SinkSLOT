@@ -180,12 +180,12 @@ class BenchConfig:
     dry_run: bool = True
 
 
-# Quick-iteration sweep. Structurally identical ("ditto") to config_paper.py --
-# same fields, same methods (including both SinkSLOT and SinkSLOT-CUDA), same
-# early-stopping/convergence block -- but a deliberately tiny grid so the whole
-# thing runs in minutes while wiring is being changed. config_paper.py is the same
-# shape with the full publication values. Flip stop_mode here and in config_paper
-# together to keep the two protocols matched.
+# Quick-iteration sweep. Structurally identical ("ditto") to the published
+# configs (config_speedup*.py, config_scalability.py) -- same fields, same
+# methods (including both SinkSLOT and SinkSLOT-CUDA), same early-stopping/
+# convergence block -- but a deliberately tiny grid so the whole thing runs in
+# minutes while wiring is being changed. The published configs are the same shape
+# with the paper's values; this one is not used for any reported number.
 CONFIG = BenchConfig(
     which="forward",
 
@@ -195,10 +195,10 @@ CONFIG = BenchConfig(
     eps_values=[0.1, 0.01],
     n_iters=50,
 
-    # Convergence / early stopping (see the class docstring). "fixed" is the
-    # published protocol -- exactly n_iters for every method, for a fair
-    # per-iteration throughput comparison. Set stop_mode="marginal" here AND in
-    # config_paper.py to switch both to time-to-accuracy.
+    # Convergence / early stopping (see the class docstring). The published
+    # protocol is stop_mode="marginal" (time-to-accuracy, stop_tol=1e-6); see
+    # config_speedup.py. "fixed" here runs exactly n_iters for every method, for
+    # a quick per-iteration throughput check while wiring is being changed.
     stop_mode="fixed",
     max_iter=10000,
     stop_tol=1e-4,

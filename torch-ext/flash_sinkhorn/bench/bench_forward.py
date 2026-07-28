@@ -484,7 +484,7 @@ _EXACT_REF_CACHE_VERSION = 1
 # ot.emd's network simplex, even for methods (SinkSLOT/-CUDA) whose own solve is
 # sparse. At n=m=50,000 that's 20GB; at 100,000 it's 80GB -- confirmed on-cluster
 # to OOM-kill every method uniformly (flash_symmetric/alternating, sinkslot,
-# sinkslotcuda all failed identically at n>=50,000 in the config_nscale run,
+# sinkslotcuda all failed identically at n>=50,000 in the N-scaling run,
 # all traced to this shared call, not to any one method's own solver). Every
 # rmae_check gate below also checks n <= this bound, so cost_gap_pct/
 # barycentric_sym/mass/marg_viol are simply not computed above it -- timing and
@@ -1928,7 +1928,7 @@ def bench_sinkslot(
     RNG stays at its independent default seed=0, unaffected by this.
     """
     from flash_sinkhorn.bench.sinkslot import (
-        sot_plan_coo, to_csr, launch_cfg, seg_lse_online, _run_v5,
+        sot_plan_coo, to_csr, _run_v5,
     )
     _set_tf32(allow_tf32)
 
