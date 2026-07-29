@@ -103,7 +103,7 @@ def _cosine(u, v):
 
 
 def trajectory(X, Y, a, n, steps, iters, eps, n_proj, regularized=False, on_step=None,
-               seed=SEED):
+               seed=SEED, lr=LR):
     """Walk the envelope-driven flow, measuring both gradients at every step.
 
     Returns dict of per-step lists: norm_env, norm_full, cos, cos_reg, nnz, viol.
@@ -136,7 +136,7 @@ def trajectory(X, Y, a, n, steps, iters, eps, n_proj, regularized=False, on_step
 
         if step == steps:
             break
-        X = (X - LR * n * g_env).detach().clone()
+        X = (X - lr * n * g_env).detach().clone()
         del g_env, g_full, rows, cols, S, log_S
         torch.cuda.empty_cache()
     return out
