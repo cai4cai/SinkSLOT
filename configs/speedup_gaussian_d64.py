@@ -19,18 +19,21 @@ change only concerns the SinkSLOT-CUDA vs Flash-alternating comparison), so
 srot_slices below is left at its original value, documenting what SROT's
 completed run actually used.
 
-Same S (Spar-Sink density) grid as configs/speedup.py.
+Same S (Spar-Sink sample size) grid as configs/speedup.py -- the paper's own
+recipe, s = k * s0(n), k in {2, 4, 8, 16}.
 
 Run with:
 
     python run.py --config speedup_gaussian_d64 --execute
 """
 
+import math
+
 from configs.base import BenchConfig
 
-_NM = 10000 * 10000
-_s_densities = [0.001, 0.0017487, 0.0030579, 0.0053472, 0.0093506, 0.0163512, 0.028593, 0.05]
-_sparsink_s = [int(round(d * _NM)) for d in _s_densities]
+_n = 10000
+_s0 = 1e-3 * _n * (math.log(_n) ** 4)
+_sparsink_s = [int(round(k * _s0)) for k in [2, 4, 8, 16]]
 
 CONFIG = BenchConfig(
     which="forward",
