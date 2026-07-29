@@ -98,6 +98,47 @@ def regularized_unrolled(k, X, Y, a, rows, cols, log_S, n):
     return g
 
 
+def _plot(steps, norm_env, norm_full, cos, cos_reg, iters):
+    """Two stacked panels sharing the step axis: norms above, cosine below."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from gradient_flow.run import OUT_DIR
+
+    fig, (ax0, ax1) = plt.subplots(
+        2, 1, figsize=(6.2, 5.6), sharex=True,
+        gridspec_kw=dict(height_ratios=[1.35, 1], hspace=0.08))
+
+    ax0.plot(steps, norm_env, "o-", ms=4, color="#1f77b4",
+             label=r"analytical (envelope), $\|g_{\rm env}\|$")
+    ax0.plot(steps, norm_full, "^-.", ms=4, color="#d62728",
+             label=r"complete (unrolled), $\|g_{\rm full}\|$")
+    ax0.set_yscale("log")
+    ax0.set_ylabel("gradient norm")
+    ax0.legend(frameon=False, fontsize=9)
+    ax0.grid(alpha=0.3, which="both")
+    ax0.set_title(f"Envelope vs complete gradient along the flow\n"
+                  f"$N={N}$, $L={L}$, $\\epsilon={EPS}$, {iters} inner iterations")
+
+    ax1.plot(steps, cos, "s-", ms=4, color="#2ca02c",
+             label="cos$(g_{\\rm env},\\,g_{\\rm full})$")
+    if cos_reg is not None:
+        ax1.plot(steps, cos_reg, "d--", ms=4, color="#9467bd",
+                 label="cos$(g_{\\rm env},\\,g_{\\rm reg})$")
+    ax1.axhline(1.0, color="0.6", lw=0.8, ls=":")
+    ax1.set_ylim(top=1.02)
+    ax1.set_xlabel("gradient step")
+    ax1.set_ylabel("cosine similarity")
+    ax1.legend(frameon=False, fontsize=9, loc="lower left")
+    ax1.grid(alpha=0.3)
+
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out = OUT_DIR / f"gradient_along_flow_eps_{EPS:g}.pdf"
+    fig.savefig(out, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"\nwrote {out}")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--steps", type=int, default=N_STEPS)
@@ -122,6 +163,7 @@ def main():
     print(f"\n{'step':>5} {'|g_env|':>12} {'|g_full|':>12} {'cos':>10} "
           f"{'|g_full|/|g_env|':>17}{extra} {'nnz':>8}")
 
+    series = {"norm_env": [], "norm_full": [], "cos": [], "cos_reg": []}
     for step in range(args.steps + 1):
         # Support is rebuilt from the current X, as the flow itself does; both
         # estimators then share it, so the step's comparison is like-for-like.
@@ -133,13 +175,18 @@ def main():
 
         cosine = lambda u, v: float(torch.nn.functional.cosine_similarity(
             u.flatten(), v.flatten(), dim=0))
-        ne, nf = float(g_env.norm()), float(g_full.norm())
+        ne, nf, c = float(g_env.norm()), float(g_full.norm()), cosine(g_env, g_full)
+        series["norm_env"].append(ne)
+        series["norm_full"].append(nf)
+        series["cos"].append(c)
         extra = ""
         if args.regularized:
             g_reg = regularized_unrolled(args.iters, X, Y, a, rows, cols, log_S, n)
-            extra = f" {cosine(g_env, g_reg):>13.6f}"
+            c_reg = cosine(g_env, g_reg)
+            series["cos_reg"].append(c_reg)
+            extra = f" {c_reg:>13.6f}"
             del g_reg
-        print(f"{step:>5} {ne:>12.4e} {nf:>12.4e} {cosine(g_env, g_full):>10.6f} "
+        print(f"{step:>5} {ne:>12.4e} {nf:>12.4e} {c:>10.6f} "
               f"{nf / ne:>17.4f}{extra} {rows.numel():>8}")
 
         if step == args.steps:
@@ -147,6 +194,9 @@ def main():
         X = (X - LR * n * g_env).detach().clone()
         del g_env, g_full, rows, cols, S, log_S
         torch.cuda.empty_cache()
+
+    _plot(list(range(args.steps + 1)), series["norm_env"], series["norm_full"],
+          series["cos"], series["cos_reg"] if args.regularized else None, args.iters)
 
 
 if __name__ == "__main__":
