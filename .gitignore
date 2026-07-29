@@ -29,3 +29,9 @@ analysis.md
 papers/
 uv.lock
 dist/
+
+# Generated figures
+gradient_flow/outputs/
+
+# Paper sources (separate git clone)
+paper/
