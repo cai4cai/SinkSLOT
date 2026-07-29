@@ -251,10 +251,10 @@ def _probe_srot(args) -> Dict[str, Callable]:
 
 def _probe_sinkslot(cuda_path: bool, args) -> Dict[str, Callable]:
     def imports():
-        from flash_sinkhorn.bench import sinkslot  # noqa: F401
+        from sinkslot import solver as sinkslot  # noqa: F401
 
     def setup(state):
-        from flash_sinkhorn.bench.sinkslot import (
+        from sinkslot.solver import (
             _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo,
             sparse_sqeuclidean_cost, to_csr,
         )
@@ -277,7 +277,7 @@ def _probe_sinkslot(cuda_path: bool, args) -> Dict[str, Callable]:
 
     def solve(state):
         from flash_sinkhorn.bench.bench_forward import StopCfg
-        from flash_sinkhorn.bench.sinkslot import _run_v5
+        from sinkslot.solver import _run_v5
 
         n, m = state["nm"]
         log_a, log_b = state["log_ab"]

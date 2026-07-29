@@ -24,13 +24,31 @@ GeomLoss / OTT-JAX.
 | `hvp.py`, `cg.py` | Hessian-vector products via streaming CG |
 | `c_transform.py` | streaming hard-argmin c-transform / semi-dual OT |
 
+### SinkSLOT itself — `torch-ext/sinkslot/`
+
+The paper's own contribution, in its own package rather than nested inside
+`flash_sinkhorn/`: it's a different algorithm (sparse Sinkhorn over a
+sliced-OT reference plan, not FlashSinkhorn's dense fused kernel), and it's a
+real solver used outside benchmarking too (see `gradient_flow/solver.py`),
+not benchmark-only code.
+
+| File | What |
+|---|---|
+| `solver.py` | SinkSLOT (fused-Triton γ=0 sparse SROT): sliced-plan builder + Triton kernels + v5 loop. Also the SinkSLOT-CUDA setup path: `_ot_1d_coo_batched_cuda` (fp64/transposed plan build), `sparse_sqeuclidean_cost` (fused cost kernel), int32-key `to_csr` |
+
 ### The benchmark — `torch-ext/flash_sinkhorn/bench/`
 
 | File | What |
 |---|---|
 | `bench_forward.py` | forward sweep + every baseline adapter and its RMAE reference: FlashSinkhorn, GeomLoss/KeOps, OTT-JAX, SROT, Spar-Sink, Rand-Sink, SinkSLOT, SinkSLOT-CUDA |
 | `bench_backward.py` | gradient-evaluation sweep |
-| `sinkslot.py` | SinkSLOT (fused-Triton γ=0 sparse SROT): sliced-plan builder + Triton kernels + v5 loop. Also the SinkSLOT-CUDA setup path: `_ot_1d_coo_batched_cuda` (fp64/transposed plan build), `sparse_sqeuclidean_cost` (fused cost kernel), int32-key `to_csr` |
+
+This compares every method (FlashSinkhorn, SinkSLOT, SROT, Spar-Sink,
+GeomLoss, OTT-JAX), not just FlashSinkhorn, so nothing about it is really
+FlashSinkhorn-specific -- it stays nested here for now rather than moving to
+the repo root alongside `sinkslot/`, since that's a separate, larger change
+(bench_forward.py/bench_backward.py are large files with several import
+sites) than pulling SinkSLOT's own solver out of it.
 
 ### The harness — repo root
 
@@ -48,7 +66,7 @@ GeomLoss / OTT-JAX.
 |---|---|
 | `config.py` | fixed experiment constants (N, steps, learning rate, ε, L — no sweep, so a plain module rather than a `BenchConfig`) |
 | `vendor/sinkhorn_methods.py` | dense, differentiable SOT/EOT/SROT baselines (autograd through a plain-torch Sinkhorn loop), ported from a sibling repo since this one has no such loss of its own — `torch-ext/flash_sinkhorn/bench` is benchmark-timing code only |
-| `solver.py` | the SinkSLOT arm's gradient, built from the native v5 solver (`torch-ext/flash_sinkhorn/bench/sinkslot.py`) plus the envelope-theorem projection `grad_X SLOT_eps(X,Y) = 2*diag(a)*(X - T_eps(X))` |
+| `solver.py` | the SinkSLOT arm's gradient, built from the native v5 solver (`torch-ext/sinkslot/solver.py`) plus the envelope-theorem projection `grad_X SLOT_eps(X,Y) = 2*diag(a)*(X - T_eps(X))` |
 | `run.py` | runs all 4 methods and writes the compiled figure |
 | `data/` | the two density images (blob → crescent) sampled into point clouds |
 

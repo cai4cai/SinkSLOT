@@ -1951,12 +1951,12 @@ def bench_sinkslot(
     Sparse O(L(N+M)): the sliced support and its CSR/CSC layouts are built once in
     setup_ms; the timed loop is the fused-Triton alternating half-steps. fp32 (no
     matmul, so TF32 does not apply). Reference is the converged gamma=0 optimum on
-    the same support. See torch-ext/flash_sinkhorn/bench/sinkslot.py.
+    the same support. See torch-ext/sinkslot/solver.py.
 
     seed: data-generation seed only (x, y, a, b). sot_plan_coo's own projection
     RNG stays at its independent default seed=0, unaffected by this.
     """
-    from flash_sinkhorn.bench.sinkslot import (
+    from sinkslot.solver import (
         sot_plan_coo, to_csr, _run_v5,
     )
     _set_tf32(allow_tf32)
@@ -2062,12 +2062,12 @@ def bench_sinkslotcuda(
     Because the fp64 scan yields a *different* (more accurate) sliced support than
     the baseline's fp32 scan, SinkSLOT-CUDA carries its own converged-reference
     cache. Its RMAE is therefore measured against its own plan's optimum, exactly
-    as SinkSLOT is against the baseline plan. See sinkslot.py.
+    as SinkSLOT is against the baseline plan. See sinkslot/solver.py.
 
     seed: data-generation seed only (x, y, a, b). sot_plan_coo's own projection
     RNG stays at its independent default seed=0, unaffected by this.
     """
-    from flash_sinkhorn.bench.sinkslot import (
+    from sinkslot.solver import (
         sot_plan_coo, to_csr, sparse_sqeuclidean_cost, _ot_1d_coo_batched_cuda, _run_v5,
     )
     _set_tf32(allow_tf32)
