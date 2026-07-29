@@ -1,7 +1,7 @@
 """Dense SOT/EOT/SROT baselines for the gradient-flow experiment.
 
-Vendored (trimmed to just what gradient_flow/run.py needs) from
-mva-internship-2026/SROT's lib/sinkhorn_methods.py -- this repo has no
+Vendored (trimmed to just what gradient_flow/run.py needs) from a sibling
+research repository's own lib/sinkhorn_methods.py -- this repo has no
 differentiable EOT/SROT loss of its own (torch-ext/flash_sinkhorn/bench is
 benchmark-timing code only), so the dense autograd-through-Sinkhorn baselines
 live here instead of being re-derived.
@@ -138,7 +138,7 @@ def sr_sinkhorn_divergence_torch_autograd(
 
     if use_softmax:
         raise NotImplementedError("softmax SOT weighting not vendored here; see the full "
-                                   "sinkhorn_methods.py in mva-internship-2026/SROT if needed.")
+                                   "sinkhorn_methods.py in the sibling repo if needed.")
     pi_sot_xy = build_sot_plan(X_np, Y_np, a, b, L=L, delta=delta)
 
     # For self terms, the SOT reference is diagonal (identity coupling) for identical supports.

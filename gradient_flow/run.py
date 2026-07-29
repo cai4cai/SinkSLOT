@@ -17,14 +17,14 @@ Four methods, one figure:
     plus the closed-form envelope-theorem gradient
     grad_X SLOT_eps(X,Y) = 2*diag(a)*(X - T_eps(X)) (see solver.py).
 
-    SOT/EOT/SROT run in float64 (vendor/sinkhorn_methods.py, ported from
-    mva-internship-2026/SROT's lib/sinkhorn_methods.py, which has no CUDA/
-    Triton dependency). SinkSLOT runs in float32: its Triton cost kernel
-    accumulates in fp32 regardless of input dtype, so there is no float64 path
-    for it in this codebase. A companion script in mva-internship-2026/SROT
-    instead used a plain-torch (non-Triton) port of the same solver to keep
-    every method at float64 -- not available here, since this repo's SinkSLOT
-    implementation is Triton-only. In practice this float32-vs-float64
+    SOT/EOT/SROT run in float64 (vendor/sinkhorn_methods.py, ported from a
+    sibling research repository's own copy, which has no CUDA/Triton
+    dependency). SinkSLOT runs in float32: its Triton cost kernel accumulates
+    in fp32 regardless of input dtype, so there is no float64 path for it in
+    this codebase. A companion script in that sibling repo instead used a
+    plain-torch (non-Triton) port of the same solver to keep every method at
+    float64 -- not available here, since this repo's SinkSLOT implementation
+    is Triton-only. In practice this float32-vs-float64
     difference is invisible at 4-decimal reporting precision: this script's
     output (W2^2 per step, per method) matches the companion float64 run
     exactly, digit for digit.
