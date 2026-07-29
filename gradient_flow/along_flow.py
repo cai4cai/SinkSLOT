@@ -81,7 +81,7 @@ from gradient_flow.estimators import EPS, SEED, solve, three_gradients
 from gradient_flow.run import DATA_DIR, draw_samples
 
 
-def regularized_unrolled(k, X, Y, a, rows, cols, log_S, n):
+def regularized_unrolled(k, X, Y, a, rows, cols, log_S, n, eps=EPS):
     """Unrolled gradient of the objective the envelope identity actually applies to.
 
     F = <P,C> + eps*KL(P||S), which for P = exp(phi_r + psi_c + lam) with
@@ -90,12 +90,54 @@ def regularized_unrolled(k, X, Y, a, rows, cols, log_S, n):
     """
     Xu = X.clone().requires_grad_(True)
     cost = ((Xu[rows] - Y[cols]) ** 2).sum(1)
-    lam = log_S - cost / EPS
+    lam = log_S - cost / eps
     phi, psi = solve(lam, rows, cols, a.log(), n, n, k)
     P = (phi[rows] + psi[cols] + lam).exp()
-    F = EPS * ((P * (phi[rows] + psi[cols])).sum() - P.sum())
+    F = eps * ((P * (phi[rows] + psi[cols])).sum() - P.sum())
     (g,) = torch.autograd.grad(F, [Xu])
     return g
+
+
+def _cosine(u, v):
+    return float(torch.nn.functional.cosine_similarity(u.flatten(), v.flatten(), dim=0))
+
+
+def trajectory(X, Y, a, n, steps, iters, eps, n_proj, regularized=False, on_step=None):
+    """Walk the envelope-driven flow, measuring both gradients at every step.
+
+    Returns dict of per-step lists: norm_env, norm_full, cos, cos_reg, nnz.
+    X is not modified. `on_step(step, record)` is called after each step.
+    """
+    X = X.clone()
+    out = {k: [] for k in ("norm_env", "norm_full", "cos", "cos_reg", "nnz", "viol")}
+    for step in range(steps + 1):
+        # Support is rebuilt from the current X, as the flow itself does; both
+        # estimators then share it, so the step's comparison is like-for-like.
+        rows, cols, S = sot_plan_coo(X, Y, a, a, L=n_proj, seed=SEED,
+                                     ot1d=_ot_1d_coo_batched_cuda)
+        log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
+
+        g_env, _, g_full, viol = three_gradients(
+            iters, X, Y, a, rows, cols, log_S, n, n, eps=eps)
+
+        rec = {"norm_env": float(g_env.norm()), "norm_full": float(g_full.norm()),
+               "cos": _cosine(g_env, g_full), "nnz": int(rows.numel()),
+               "viol": viol, "cos_reg": float("nan")}
+        if regularized:
+            g_reg = regularized_unrolled(iters, X, Y, a, rows, cols, log_S, n, eps=eps)
+            rec["cos_reg"] = _cosine(g_env, g_reg)
+            del g_reg
+        for k, v in rec.items():
+            out[k].append(v)
+        if on_step is not None:
+            on_step(step, rec)
+
+        if step == steps:
+            break
+        X = (X - LR * n * g_env).detach().clone()
+        del g_env, g_full, rows, cols, S, log_S
+        torch.cuda.empty_cache()
+    return out
 
 
 def _plot(steps, norm_env, norm_full, cos, cos_reg, iters):
@@ -163,40 +205,16 @@ def main():
     print(f"\n{'step':>5} {'|g_env|':>12} {'|g_full|':>12} {'cos':>10} "
           f"{'|g_full|/|g_env|':>17}{extra} {'nnz':>8}")
 
-    series = {"norm_env": [], "norm_full": [], "cos": [], "cos_reg": []}
-    for step in range(args.steps + 1):
-        # Support is rebuilt from the current X, as the flow itself does; both
-        # estimators then share it, so the step's comparison is like-for-like.
-        rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=SEED, ot1d=_ot_1d_coo_batched_cuda)
-        log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
+    def report(step, r):
+        extra = f" {r['cos_reg']:>13.6f}" if args.regularized else ""
+        print(f"{step:>5} {r['norm_env']:>12.4e} {r['norm_full']:>12.4e} {r['cos']:>10.6f} "
+              f"{r['norm_full'] / r['norm_env']:>17.4f}{extra} {r['nnz']:>8}")
 
-        g_env, _, g_full, _ = three_gradients(
-            args.iters, X, Y, a, rows, cols, log_S, n, n)
+    s = trajectory(X, Y, a, n, args.steps, args.iters, EPS, L,
+                   regularized=args.regularized, on_step=report)
 
-        cosine = lambda u, v: float(torch.nn.functional.cosine_similarity(
-            u.flatten(), v.flatten(), dim=0))
-        ne, nf, c = float(g_env.norm()), float(g_full.norm()), cosine(g_env, g_full)
-        series["norm_env"].append(ne)
-        series["norm_full"].append(nf)
-        series["cos"].append(c)
-        extra = ""
-        if args.regularized:
-            g_reg = regularized_unrolled(args.iters, X, Y, a, rows, cols, log_S, n)
-            c_reg = cosine(g_env, g_reg)
-            series["cos_reg"].append(c_reg)
-            extra = f" {c_reg:>13.6f}"
-            del g_reg
-        print(f"{step:>5} {ne:>12.4e} {nf:>12.4e} {c:>10.6f} "
-              f"{nf / ne:>17.4f}{extra} {rows.numel():>8}")
-
-        if step == args.steps:
-            break
-        X = (X - LR * n * g_env).detach().clone()
-        del g_env, g_full, rows, cols, S, log_S
-        torch.cuda.empty_cache()
-
-    _plot(list(range(args.steps + 1)), series["norm_env"], series["norm_full"],
-          series["cos"], series["cos_reg"] if args.regularized else None, args.iters)
+    _plot(list(range(args.steps + 1)), s["norm_env"], s["norm_full"],
+          s["cos"], s["cos_reg"] if args.regularized else None, args.iters)
 
 
 if __name__ == "__main__":

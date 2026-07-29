@@ -69,12 +69,12 @@ def solve(lam, rows, cols, log_a, n, m, k):
     return phi, psi
 
 
-def three_gradients(k, X, Y, a, rows, cols, log_S, n, m, unroll=True):
+def three_gradients(k, X, Y, a, rows, cols, log_S, n, m, unroll=True, eps=EPS):
     log_a = a.log()
 
     def build(Xv):
         cost = ((Xv[rows] - Y[cols]) ** 2).sum(1)
-        return cost, log_S - cost / EPS
+        return cost, log_S - cost / eps
 
     # ---- unrolled: differentiate through everything -------------------------
     g_unrolled = None
