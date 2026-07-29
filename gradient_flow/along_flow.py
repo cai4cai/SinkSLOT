@@ -102,18 +102,20 @@ def _cosine(u, v):
     return float(torch.nn.functional.cosine_similarity(u.flatten(), v.flatten(), dim=0))
 
 
-def trajectory(X, Y, a, n, steps, iters, eps, n_proj, regularized=False, on_step=None):
+def trajectory(X, Y, a, n, steps, iters, eps, n_proj, regularized=False, on_step=None,
+               seed=SEED):
     """Walk the envelope-driven flow, measuring both gradients at every step.
 
-    Returns dict of per-step lists: norm_env, norm_full, cos, cos_reg, nnz.
+    Returns dict of per-step lists: norm_env, norm_full, cos, cos_reg, nnz, viol.
     X is not modified. `on_step(step, record)` is called after each step.
+    `seed` picks the projection directions sot_plan_coo draws the support from.
     """
     X = X.clone()
     out = {k: [] for k in ("norm_env", "norm_full", "cos", "cos_reg", "nnz", "viol")}
     for step in range(steps + 1):
         # Support is rebuilt from the current X, as the flow itself does; both
         # estimators then share it, so the step's comparison is like-for-like.
-        rows, cols, S = sot_plan_coo(X, Y, a, a, L=n_proj, seed=SEED,
+        rows, cols, S = sot_plan_coo(X, Y, a, a, L=n_proj, seed=seed,
                                      ot1d=_ot_1d_coo_batched_cuda)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
 
