@@ -35,6 +35,10 @@ Exact W2^2 at N=1000, eps=0.01, L=100, 600 inner iterations:
     unr    1.0122   0.3533   0.1234   0.0152   0.0020   0.0003
     reg    1.0122   0.3540   0.1238   0.0154   0.0022   0.0005
 
+The support builder is not bitwise deterministic across runs, so the last quoted
+digit moves (step-30 unrolled comes out 0.0020 or 0.0021). The row ordering below
+is stable; do not read the fourth decimal as exact.
+
 Two things worth stating plainly. The control works exactly: the regularized row
 reproduces the envelope row to four decimals at every checkpoint, which is the
 entropic-term explanation confirmed on the flow itself rather than on gradient
@@ -154,7 +158,9 @@ def _plot(results, checkpoints, X0n, Yn, colors, steps):
     data_w, data_h = xlim[1] - xlim[0], ylim[1] - ylim[0]
     panel_w = 1.9
     panel_h = panel_w * data_h / data_w
-    label_h, title_h = 0.12, 0.40
+    # title_h reserves figure-inches for the two-line suptitle *and* the "step N"
+    # column headers; too small and the second title line lands on the headers.
+    label_h, title_h = 0.12, 1.05
     fig, axes = plt.subplots(
         nr, nc, squeeze=False,
         figsize=(panel_w * nc, (panel_h + label_h) * nr + title_h),
@@ -182,10 +188,11 @@ def _plot(results, checkpoints, X0n, Yn, colors, steps):
                 ax.set_ylabel(ROW_LABELS[mode], fontsize=9)
 
     fig.suptitle(
-        "Same flow, three gradients: a 0.61 cosine gap between rows 1 and 2 by "
-        "step 50 leaves the transport visually indistinguishable\n"
-        r"(unrolled ends marginally lower in $W_2^2$; the $\epsilon$KL control row "
-        "reproduces the envelope row to 4 decimals)", fontsize=11)
+        "Same flow, three gradients: a 0.61 cosine gap between rows 1 and 2 "
+        "leaves the transport visually indistinguishable\n"
+        r"unrolled ends marginally lower in $W_2^2$; the $\epsilon\mathrm{KL}$ "
+        "control row reproduces the envelope row to 4 decimals",
+        fontsize=11.5, y=0.995, va="top")
     out = OUT_DIR / f"flow_qualitative_eps_{EPS:g}.pdf"
     fig.savefig(out, bbox_inches="tight", facecolor="white")
     fig.savefig(out.with_suffix(".png"), bbox_inches="tight", facecolor="white", dpi=200)
