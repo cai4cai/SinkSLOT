@@ -52,7 +52,7 @@ def truncation_check(steps, iters, n_):
     sweep scripts.
     """
     import numpy as np
-    from flash_sinkhorn.bench.sinkslot import _ot_1d_coo_batched_cuda, sot_plan_coo
+    from sinkslot.solver import _ot_1d_coo_batched_cuda, sot_plan_coo
     from gradient_flow.along_flow import _cosine
     from gradient_flow.estimators import SEED, three_gradients
     from gradient_flow.run import DATA_DIR, draw_samples

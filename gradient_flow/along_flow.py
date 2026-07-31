@@ -75,7 +75,7 @@ import argparse
 import numpy as np
 import torch
 
-from flash_sinkhorn.bench.sinkslot import _ot_1d_coo_batched_cuda, sot_plan_coo
+from sinkslot.solver import _ot_1d_coo_batched_cuda, sot_plan_coo
 from gradient_flow.config import L, LR, N, N_STEPS
 from gradient_flow.estimators import EPS, SEED, solve, three_gradients
 from gradient_flow.run import DATA_DIR, draw_samples

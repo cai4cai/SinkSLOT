@@ -35,10 +35,21 @@ import pathlib, re
 # The provenance line naming the source lab. Matched loosely (any line mentioning
 # the org, plus the sentence that follows it) so a reflow of the docstring cannot
 # silently turn this into a no-op -- the earlier exact-text regex could.
-p = pathlib.Path("torch-ext/flash_sinkhorn/bench/sinkslot.py")
-s = p.read_text()
-s = re.sub(r"Ported from [^\n]*cai4cai[^\n]*\n(?:[^\n]*accompanying the SLOT paper\. )?", "", s)
-p.write_text(s)
+# The solver moved from flash_sinkhorn/bench/sinkslot.py into its own package;
+# both spellings are tried so this keeps working either side of that change,
+# and it is an error for neither to exist rather than a silent no-op -- an
+# unguarded read_text() here would abort the build with a bare traceback, and
+# a bare exists() check would skip the scrub and leave the gate to catch it.
+for cand in ("torch-ext/sinkslot/solver.py",
+             "torch-ext/flash_sinkhorn/bench/sinkslot.py"):
+    p = pathlib.Path(cand)
+    if p.exists():
+        s = p.read_text()
+        s = re.sub(r"Ported from [^\n]*cai4cai[^\n]*\n(?:[^\n]*accompanying the SLOT paper\. )?", "", s)
+        p.write_text(s)
+        break
+else:
+    raise SystemExit("!! solver source not found at any known path -- scrub cannot run")
 
 # Internal engineering notes: not part of the artifact, and they name the cluster
 # and carry candid claims that belong in the paper's own words if anywhere.

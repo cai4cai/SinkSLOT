@@ -12,8 +12,8 @@ vendored here (rather than importing bench_forward.py, which pulls in the
 whole benchmark harness) since both are a few self-contained lines.
 
 Runs in fp32: sparse_sqeuclidean_cost's Triton kernel accumulates in fp32
-regardless of input dtype (see sinkslot.py), so X/Y must be fp32 here even
-though the other three methods (SOT/EOT/SROT, in run.py) run in float64.
+regardless of input dtype (see sinkslot/solver.py), so X/Y must be fp32 here
+even though the other three methods (SOT/EOT/SROT, in run.py) run in float64.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 import torch
 
-from flash_sinkhorn.bench.sinkslot import (
+from sinkslot.solver import (
     sot_plan_coo, to_csr, sparse_sqeuclidean_cost, _ot_1d_coo_batched_cuda, _run_v5,
 )
 

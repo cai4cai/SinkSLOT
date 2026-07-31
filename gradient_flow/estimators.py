@@ -42,7 +42,7 @@ magnitude and is unaffected.
 import numpy as np
 import torch
 
-from flash_sinkhorn.bench.sinkslot import (
+from sinkslot.solver import (
     _ot_1d_coo_batched_cuda, sot_plan_coo, sparse_sqeuclidean_cost,
 )
 from gradient_flow.config import L, N
