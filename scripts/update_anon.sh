@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# Regenerate the anonymous artifact from a source branch.
+#
+#   ./scripts/update_anon.sh [SOURCE_BRANCH]
+#
+# Rebuilds the `anon` branch as a single orphan commit (no author history),
+# scrubs identifying strings, and force-pushes it to the anonymous repo.
+# Anonymous GitHub tracks the branch tip with Auto-update on, so the public
+# share link picks the change up within the hour. Nothing else to do.
+#
+# SRC_REPO and ANON_REPO are overridable so the artifact can be built from a
+# local checkout that has not been pushed yet:
+#
+#   SRC_REPO=. ANON_REPO=git@github.com:cai4cai/SinkSLOT.git ./scripts/update_anon.sh main
+#
+# Without that, the clone below silently sources from whatever the REMOTE branch
+# holds, which is not necessarily what you just built and reviewed locally.
+set -euo pipefail
+
+SRC_BRANCH="${1:-main}"
+SRC_REPO="${SRC_REPO:-git@github.com:cai4cai/SinkSLOT.git}"
+ANON_REPO="${ANON_REPO:-git@github.com:aymuos15/sinkslot.git}"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+echo "==> cloning $SRC_BRANCH"
+git clone -q --branch "$SRC_BRANCH" --depth 1 "$SRC_REPO" "$WORK/src"
+cd "$WORK/src"
+SRC_SHA="$(git rev-parse --short HEAD)"
+
+echo "==> scrubbing"
+python3 - <<'PY'
+import pathlib, re
+
+# The provenance line naming the source lab. Matched loosely (any line mentioning
+# the org, plus the sentence that follows it) so a reflow of the docstring cannot
+# silently turn this into a no-op -- the earlier exact-text regex could.
+p = pathlib.Path("torch-ext/flash_sinkhorn/bench/sinkslot.py")
+s = p.read_text()
+s = re.sub(r"Ported from [^\n]*cai4cai[^\n]*\n(?:[^\n]*accompanying the SLOT paper\. )?", "", s)
+p.write_text(s)
+
+# Internal engineering notes: not part of the artifact, and they name the cluster
+# and carry candid claims that belong in the paper's own words if anywhere.
+for f in ("memory.md", "megakernel-findings.md", "cleanup.md", "handoff.md", "analysis.md",
+          "kernelreport.md"):
+    pathlib.Path(f).unlink(missing_ok=True)
+
+# This script itself. It is build tooling rather than artifact content, and it
+# carries the very list of names and institutions it exists to scrub -- shipping
+# it would hand a reviewer the deanonymisation key. It also means the grep gate
+# below would otherwise always match itself and abort.
+pathlib.Path("scripts/update_anon.sh").unlink(missing_ok=True)
+
+# Upstream HF-kernel packaging. Removed from the source repo itself, so these are
+# belt-and-braces for an older checkout: the workflow published to the upstream
+# author's Hub namespace and could not run anonymously, and CARD.md was upstream's
+# model card describing FlashSinkhorn rather than this artifact. Prose attribution
+# in README stays.
+import shutil
+shutil.rmtree(".github", ignore_errors=True)
+pathlib.Path("CARD.md").unlink(missing_ok=True)
+
+ANON = "https://anonymous.4open.science/r/sinkslot"
+p = pathlib.Path("pyproject.toml")
+if p.exists():
+    s = p.read_text()
+    s = s.replace('  {name = "OT Triton Contributors"}\n', '  {name = "Anonymous Authors"}\n')
+    s = re.sub(r'(Homepage|Repository) = "https://github\.com/ot-triton-lab/[^"]*"',
+               lambda m: f'{m.group(1)} = "{ANON}"', s)
+    p.write_text(s)
+p = pathlib.Path("build.toml")
+if p.exists():
+    s = p.read_text()
+    s = re.sub(r'upstream = "https://github\.com/ot-triton-lab/[^"]*"\n', "", s)
+    s = re.sub(r'source = "https://github\.com/ot-triton-lab/[^"]*"', f'source = "{ANON}"', s)
+    s = re.sub(r'\n\[general\.hub\]\nrepo-id = "[^"]*"\n', "\n", s)
+    p.write_text(s)
+
+# Cluster QoS names are site-specific and identify the facility. Swept over the
+# whole configs/ tree rather than one named file: the earlier version pointed at
+# a config that has since been renamed, so it silently did nothing. The grep gate
+# below is what actually catches a miss, but this keeps it from firing.
+for p in pathlib.Path("configs").glob("*.py"):
+    s = p.read_text()
+    t = s.replace("qos_gpu_h100-dev 2-hour cap.", "2-hour dev-queue cap.")
+    if t != s:
+        p.write_text(t)
+PY
+
+# Fail loudly if anything identifying survives, rather than pushing a leak.
+# Added after a near-miss: "Jean Zay" reached the public artifact because the
+# pattern below listed only people and orgs, not facilities.
+PATTERN='cai4cai|kcl\.ac\.uk|King.?s College|KCL|Soumya|Snigdha|Kundu|aymuos|albany\.edu'
+PATTERN="$PATTERN"'|yurikifer|ihsieh|reuben|dorent|inria|localssk23|soumyawork15'
+PATTERN="$PATTERN"'|sie236|jean.?zay|idris|qos_gpu|overleaf|olp_[A-Za-z0-9]{20,}'
+PATTERN="$PATTERN"'|/home/[a-z0-9_]+|/Users/[a-z0-9_]+|@gmail|@[a-z0-9.-]+\.(ac\.uk|edu|fr)'
+# Internal sibling repositories, named by path in docstrings. Added after
+# mva-internship-2026/SROT reached the published artifact: the branch feeding
+# the build had forked before the commit that scrubbed it, and every pattern
+# above lists people, orgs or facilities -- none would ever match a repo name.
+PATTERN="$PATTERN"'|mva-internship|/SROT\b'
+if grep -rniE "$PATTERN" . --exclude-dir=.git --binary-files=without-match; then
+  echo "!! identifying strings found above -- aborting, nothing pushed" >&2
+  exit 1
+fi
+# Text greps skip binaries, so check document metadata separately rather than
+# silently passing every PDF in the tree.
+if command -v pdfinfo >/dev/null 2>&1; then
+  while IFS= read -r pdf; do
+    if pdfinfo "$pdf" 2>/dev/null | grep -iE '^(Author|Creator|Producer|Title)' | grep -qiE "$PATTERN"; then
+      echo "!! identifying metadata in $pdf -- aborting, nothing pushed" >&2
+      exit 1
+    fi
+  done < <(find . -name '*.pdf' -not -path './.git/*')
+fi
+echo "    clean"
+
+echo "==> building orphan commit"
+git config user.name  "Anonymous Authors"
+git config user.email "anonymous@example.com"
+git checkout -q --orphan anon
+git add -A
+git commit -q -m "SinkSLOT: anonymous artifact for double-blind review"
+
+echo "==> pushing to anonymous repo"
+git push -q --force "$ANON_REPO" anon
+
+echo "OK: anon updated from $SRC_BRANCH@$SRC_SHA -> $(git rev-parse --short HEAD)"
+echo "    history depth: $(git rev-list --count HEAD) commit"
