@@ -35,3 +35,6 @@ gradient_flow/outputs/
 
 # Paper sources (separate git clone)
 paper/
+
+# Local build tooling: carries the anonymisation pattern list, must not ship.
+scripts/update_anon.sh
