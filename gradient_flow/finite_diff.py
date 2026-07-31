@@ -28,17 +28,43 @@ rank orders are free to move. Along a random unit direction v,
   FD rebuilt   central difference with sot_plan_coo re-run at X +- h v, so any
                rank flip between the two evaluations enters the difference
 
-The gap between the two FD columns is term (II) projected on v: same value,
-same eps, same projection directions (the seed is fixed, so the *directions*
-never change -- only the orders they induce).
-
 SLOT_eps is evaluated from the converged potentials as eps*(<phi,a> + <psi,b>),
 which equals <C,P> + eps*KL(P||S) at the optimum, in float64.
 
-At N=1000, L=100, eps=0.01, 600 inner iterations, h=1e-4, over 8 directions:
+The result is that term (II) is not a small derivative -- it is not a derivative
+at all. The frozen arm reproduces the analytic value, confirming the identity:
 
-    step   analytic     FD frozen    FD rebuilt   (frozen-an)/|an|  (rebuilt-an)/|an|
-    (filled in from the run below)
+    step      analytic     FD frozen   rel. err.   |dF|/F
+       0   4.431e-04     4.431e-04     1.1e-09   1.6e-06
+      10  -2.906e-04    -2.906e-04     8.7e-05   1.3e-05
+      25  -6.904e-05    -6.903e-05     6.6e-04   8.6e-05
+      40  -7.862e-06    -7.853e-06     2.3e-03   3.2e-04
+      50  -6.683e-06    -6.696e-06     3.8e-03   1.8e-04
+
+(N=1000, L=100, eps=0.01, 600 inner iterations, h=1e-4, 6 directions per point,
+float64.) The rel. err. growing along the flow is the derivative itself decaying
+to ~7e-06 against a fixed FD noise floor, not the identity degrading.
+
+The rebuilt arm, by contrast, does not converge as h -> 0. At step 0 it takes
+4.7e-03, 1.5e-02, 5.8e-02, 2.4e-01 for h=1e-3..1e-6, against an analytic
+1.76e-03 -- O(1/h) growth, the signature of a jump discontinuity rather than of
+a missing gradient term. At h=1e-7, where no rank flip falls between the two
+evaluations, it returns to the analytic value. So dP^SOT/dx is zero wherever it
+exists, and at the rank-flip boundaries SLOT_eps is discontinuous, not
+differentiable. There is no column for "FD rebuilt" below because a divided
+difference that scales as 1/h has no limit worth tabulating; what is reported
+instead is |dF|/F, the size of the jump itself.
+
+Those jumps are small: rebuilding P^SOT moves ~0.3% of the support entries and
+changes the value by a relative 1.6e-06 at step 0, rising to at most 3.2e-04 by
+step 50, where the value has itself fallen two orders of magnitude. The jump
+shrinks with h (4.8e-04 at h=1e-3 to 3.3e-05 at h=1e-6, at step 50) and is
+systematically negative, since the rebuilt plan is optimal at the perturbed
+point -- which is what the `jump sign` column measures.
+
+Stop-gradient on P^SOT is therefore justified, but the justification is
+piecewise-constancy plus small jumps, not differentiability with a vanishing
+derivative.
 """
 from __future__ import annotations
 
