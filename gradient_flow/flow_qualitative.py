@@ -64,7 +64,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from flash_sinkhorn.bench.sinkslot import _ot_1d_coo_batched_cuda, sot_plan_coo
+from sinkslot.solver import _ot_1d_coo_batched_cuda, sot_plan_coo
 from gradient_flow.along_flow import regularized_unrolled
 from gradient_flow.config import L, LR, N, N_STEPS, STEPS
 from gradient_flow.estimators import SEED, three_gradients

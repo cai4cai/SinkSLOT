@@ -40,7 +40,7 @@ import torch
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-from flash_sinkhorn.bench.sinkslot import (  # noqa: E402
+from sinkslot.solver import (  # noqa: E402
     _ot_1d_coo_batched_cuda,
     _run_v5,
     sot_plan_coo,
