@@ -7,8 +7,5 @@ backends = ["cuda"]
 upstream = "https://github.com/ot-triton-lab/flash-sinkhorn"
 source = "https://github.com/ot-triton-lab/flash-sinkhorn"
 
-[general.hub]
-repo-id = "yexf308/flash-sinkhorn"
-
 # FlashSinkhorn is implemented in Triton and compiles JIT code at runtime.
 [torch-noarch]
