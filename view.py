@@ -31,7 +31,7 @@ from rich.text import Text
 
 console = Console()
 
-RAW_NAMES = ("forward_all.csv", "backward_all.csv")
+RAW_NAMES = ("forward_all.csv",)
 
 
 def _read_csv(path: Path) -> List[Dict[str, str]]:
@@ -361,7 +361,7 @@ def build_app(output_dir: Path, raw_only: bool, speedup_only: bool):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Browse benchmark CSVs in output/ as a TUI.")
     parser.add_argument("--output-dir", default="output", help="Root directory to scan for CSVs (default: output)")
-    parser.add_argument("--raw-only", action="store_true", help="Only show forward_all.csv / backward_all.csv tables.")
+    parser.add_argument("--raw-only", action="store_true", help="Only show the forward_all.csv table.")
     parser.add_argument("--speedup-only", action="store_true", help="Only show *_speedup.csv tables.")
     parser.add_argument("--print", dest="print_only", action="store_true",
                         help="Dump static rich tables to stdout instead of launching the TUI.")

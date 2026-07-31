@@ -27,7 +27,7 @@ split one job per dataset:
   - L (SROT, SinkSLOT-CUDA): 8-point log2 grid 32..4096 (was 16..8192).
   - S (Spar-Sink sample size): the Spar-Sink paper's own recipe (see
     configs/base.py's sparsink_s docstring): s = k * s0(n),
-    s0(n) = 1e-3 * n * log(n)^4, k in {2, 4, 8, 16} -- 4 points, not 8.
+    s0(n) = 1e-3 * n * log(n)^4, k in {5, 10, 15, 20} -- 4 points, not 8.
 
 Methods, one SLURM job each (job-splitting is cluster-scheduling bookkeeping,
 not part of this artifact -- run.py itself runs the whole sweep in one process
@@ -48,10 +48,9 @@ from configs.base import BenchConfig
 
 _n = 10000
 _s0 = 1e-3 * _n * (math.log(_n) ** 4)
-_sparsink_s = [int(round(k * _s0)) for k in [2, 4, 8, 16]]
+_sparsink_s = [int(round(k * _s0)) for k in [5, 10, 15, 20]]
 
 CONFIG = BenchConfig(
-    which="forward",
 
     sizes=[10000],
     dims=[2],

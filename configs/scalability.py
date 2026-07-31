@@ -72,10 +72,10 @@ MAX_DENSE_SIZE_DSCALE = 10000
 
 def s_for(n: int) -> list[int]:
     """Spar-Sink sample sizes for a given N, matching configs/speedup.py's
-    formula: s = k * s0(n), s0(n) = 1e-3 * n * log(n)^4, k in {2, 4, 8, 16}.
+    formula: s = k * s0(n), s0(n) = 1e-3 * n * log(n)^4, k in {5, 10, 15, 20}.
     Kept here (unused by METHODS above) only so anyone re-adding Spar-Sink
     to this experiment starts from the same recipe as configs/speedup.py,
     not the retired density-based grid this file used to carry.
     """
     s0 = 1e-3 * n * (math.log(n) ** 4)
-    return [int(round(k * s0)) for k in [2, 4, 8, 16]]
+    return [int(round(k * s0)) for k in [5, 10, 15, 20]]

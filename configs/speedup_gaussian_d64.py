@@ -20,7 +20,7 @@ srot_slices below is left at its original value, documenting what SROT's
 completed run actually used.
 
 Same S (Spar-Sink sample size) grid as configs/speedup.py -- the paper's own
-recipe, s = k * s0(n), k in {2, 4, 8, 16}.
+recipe, s = k * s0(n), k in {5, 10, 15, 20}.
 
 Run with:
 
@@ -33,10 +33,9 @@ from configs.base import BenchConfig
 
 _n = 10000
 _s0 = 1e-3 * _n * (math.log(_n) ** 4)
-_sparsink_s = [int(round(k * _s0)) for k in [2, 4, 8, 16]]
+_sparsink_s = [int(round(k * _s0)) for k in [5, 10, 15, 20]]
 
 CONFIG = BenchConfig(
-    which="forward",
 
     sizes=[10000],
     dims=[64],

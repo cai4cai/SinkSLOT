@@ -1,7 +1,7 @@
 """Build and (optionally) execute a flash_sinkhorn benchmark from config.py.
 
 Sweeps every (dataset, eps) combination from CONFIG. All runs append into a single
-`<output_dir>/forward_all.csv` (or backward_all.csv) plus one speedup table, with
+`<output_dir>/forward_all.csv` plus one speedup table, with
 dataset, eps, d and n as ordinary columns. Existing CSVs are deleted at the start
 of a sweep, so each invocation produces a clean table.
 
@@ -42,10 +42,7 @@ def build_command(
     seed: data-generation seed for this unit (defaults to cfg.seeds[0] if not given).
     Only affects (x, y, a, b); method-internal randomness stays independently seeded.
     """
-    if cfg.which not in ("forward", "backward"):
-        raise ValueError(f"Unknown benchmark kind: {cfg.which!r}")
-
-    module = f"flash_sinkhorn.bench.bench_{cfg.which}"
+    module = "flash_sinkhorn.bench.bench_forward"
     cmd = [
         sys.executable, "-m", module,
         "--sizes", str(size) if size is not None else ",".join(str(s) for s in cfg.sizes),
@@ -121,13 +118,11 @@ def build_command(
 
 
 def _results_csv(cfg: BenchConfig, output_dir: str) -> Path:
-    name = "forward_all.csv" if cfg.which == "forward" else "backward_all.csv"
-    return Path(output_dir) / name
+    return Path(output_dir) / "forward_all.csv"
 
 
 def _speedup_csv(cfg: BenchConfig, output_dir: str) -> Path:
-    name = "forward_speedup.csv" if cfg.which == "forward" else "backward_speedup.csv"
-    return Path(output_dir) / name
+    return Path(output_dir) / "forward_speedup.csv"
 
 
 def _clear_csvs(cfg: BenchConfig, output_dir: str) -> None:
@@ -246,7 +241,7 @@ def run_sweep(cfg: BenchConfig, base_dir: str, *, dry_run: bool, label: str = ""
 
 
 def _timing_column(cfg: BenchConfig) -> str:
-    return "mean_ms" if cfg.which == "forward" else "total_ms"
+    return "mean_ms"
 
 
 SweepKey = Tuple[str, float, str, int, int]  # (dataset, eps, method, n, d)

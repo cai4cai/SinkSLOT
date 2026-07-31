@@ -20,12 +20,10 @@ class BenchConfig:
     grid (one size, one dim, one value of each per-method parameter) that comes to
     36 runs -- enough to exercise every method at every eps, quickly.
 
-    Every run appends into a single ``forward_all.csv`` (or ``backward_all.csv``) plus
+    Every run appends into a single ``forward_all.csv`` plus
     one speedup table, with dataset, tf32, eps, d and n as ordinary columns.
 
     Attributes:
-        which: Which benchmark to run, ``"forward"`` or ``"backward"``.
-
         sizes: Point-cloud sizes n to benchmark. Deliberately small here, for
             quick turnaround. Note the memory column cannot show anything at this
             scale: ``gpu_memory_mb`` is whole-device usage, ~640MB of which is fixed
@@ -75,7 +73,7 @@ class BenchConfig:
             still running Spar-Sink (importance sampling). Independent of
             no_sparsink, which skips both.
         sparsink_s: Expected kernel subsample sizes s to sweep. Their paper uses
-            s = {2,4,8,16} * s0(n) with s0(n) = 1e-3 * n * log^4(n), i.e. s0(256) ~ 242
+            s = {5,10,15,20} * s0(n) with s0(n) = 1e-3 * n * log^4(n), i.e. s0(256) ~ 242
             and s0(512) ~ 775. Small s can leave a row or column unsampled, which makes
             the problem infeasible for that row; such draws are dropped and counted in
             the ``empty_lines`` column.
@@ -110,8 +108,6 @@ class BenchConfig:
         output_dir: Where the CSVs are written. Cleared at the start of each sweep.
         dry_run: Print the constructed commands instead of running them.
     """
-
-    which: str = "forward"
 
     sizes: List[int] = field(default_factory=lambda: [256, 512])
     dims: List[int] = field(default_factory=lambda: [8, 16])
@@ -187,8 +183,6 @@ class BenchConfig:
 # minutes while wiring is being changed. The published configs are the same shape
 # with the paper's values; this one is not used for any reported number.
 CONFIG = BenchConfig(
-    which="forward",
-
     sizes=[512, 2048],
     dims=[8],
 

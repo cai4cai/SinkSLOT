@@ -22,7 +22,7 @@ python -m gradient_flow.run                # the gradient-flow figure
 |---|---|---|
 | Table 1, half-moons / 8-Gaussians / two-rings | `configs/speedup.py` | N=M=10,000, d=2, 8-point log grid for ε in [0.001, 0.1], L 32 to 4096 |
 | Table 1, Gaussian d=3 | `configs/speedup_gaussian_d3.py` | same policy, d=3 |
-| Table 1, Gaussian d=64 | `configs/speedup_gaussian_d64.py` | same policy, d=64, ε in [0.1, 1] |
+| Table 1, Gaussian d=64 | `configs/speedup_gaussian_d64.py` | same policy, d=64, ε in [0.1, 1], L 64 to 8192 |
 | Figure 2, scalability | `configs/scalability.py` via `scripts/scalability.py` | N in {5k,10k,20k,30k,50k} at d in {3,64}; d in {4..1024} at N=10,000; 5 seeds |
 | Figure 3, gradient flow | `gradient_flow/config.py` via `gradient_flow/run.py` | N=1000, ε=0.01, L=100, 50 steps; SOT/EOT/SROT/SinkSLOT |
 | Gradient accuracy under early stopping | `gradient_flow/stopping.py` | same problem, inner iterations 1 to 1000 against a 5000-iteration reference |
@@ -45,7 +45,7 @@ says why.
 from that experiment: it cannot reach N=50,000 without an int32 index overflow
 in `torch.nonzero()` during sampling. In `configs/speedup*.py` its sample budget
 follows the authors' formula, `s = k·s₀(n)` with `s₀(n) = 1e-3·n·log⁴(n)` and
-`k` in {2,4,8,16}.
+`k` in {5,10,15,20}.
 
 ## Layout
 
@@ -74,7 +74,7 @@ and `data/` the two densities (blob to crescent) sampled into point clouds.
 Triton kernels), `_autograd.py` and `implicit_grad.py` (analytic gradients, no
 backprop through iterations), `hvp.py` and `cg.py` (Hessian-vector products via
 streaming CG), `c_transform.py`. Its `bench/` holds `bench_forward.py` (forward
-sweep, every baseline adapter and its RMAE reference) and `bench_backward.py`.
+sweep, every baseline adapter and its RMAE reference).
 
 At the repo root: `configs/base.py` (`BenchConfig` plus a quick grid, not used
 for any reported number), `run.py` (sweep driver, one subprocess per
@@ -84,8 +84,7 @@ measurement, appended to one CSV), `scripts/scalability.py`, `view.py`.
 
 Built on [FlashSinkhorn](https://github.com/ot-triton-lab/flash-sinkhorn), and
 compared against [SROT](https://github.com/khainb/SROT) (Nguyen),
-[Spar-Sink](https://github.com/Mengyu8042/Spar-Sink) (Li, Yu, Li, Meng),
-GeomLoss and OTT-JAX.
+[Spar-Sink](https://github.com/Mengyu8042/Spar-Sink) (Li, Yu, Li, Meng).
 
 SROT and Spar-Sink are adapted from the authors' released implementations and
 validated against them. Changes are confined to this harness: GPU, precision,

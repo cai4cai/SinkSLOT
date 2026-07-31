@@ -25,10 +25,9 @@ from configs.base import BenchConfig
 # comfortably inside the max_dense_size=10000 dense-kernel budget below.
 _n = 10000
 _s0 = 1e-3 * _n * (math.log(_n) ** 4)
-_sparsink_s = [int(round(k * _s0)) for k in [2, 4, 8, 16]]
+_sparsink_s = [int(round(k * _s0)) for k in [5, 10, 15, 20]]
 
 CONFIG = BenchConfig(
-    which="forward",
 
     sizes=[10000],
     dims=[3],
