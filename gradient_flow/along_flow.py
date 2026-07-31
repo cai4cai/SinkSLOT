@@ -102,16 +102,36 @@ def _cosine(u, v):
     return float(torch.nn.functional.cosine_similarity(u.flatten(), v.flatten(), dim=0))
 
 
+def exact_w2sq(X, Y, a):
+    """Exact squared W2 between the two point clouds, by dense EMD (POT).
+
+    The sparse plan's <P,C> is the regularized objective on a projection-sampled
+    support; this is the unregularized reference, so the flow's convergence can
+    be read off something that does not depend on eps or L. N=1000 dense, which
+    is well within EMD's reach.
+    """
+    import ot
+
+    M = torch.cdist(X, Y) ** 2
+    w = a.detach().cpu().numpy().astype("float64")
+    return float(ot.emd2(w, w, M.detach().cpu().numpy().astype("float64")))
+
+
 def trajectory(X, Y, a, n, steps, iters, eps, n_proj, regularized=False, on_step=None,
-               seed=SEED, lr=LR):
+               seed=SEED, lr=LR, exact_w2=False):
     """Walk the envelope-driven flow, measuring both gradients at every step.
 
-    Returns dict of per-step lists: norm_env, norm_full, cos, cos_reg, nnz, viol.
+    Returns dict of per-step lists: norm_env, norm_full, norm_resid, w2, cos,
+    cos_reg, nnz, viol.  norm_resid is |g_full - g_env|, the term the envelope
+    theorem drops, and w2 is the plan's transport cost <P,C> from the same solve.
     X is not modified. `on_step(step, record)` is called after each step.
     `seed` picks the projection directions sot_plan_coo draws the support from.
     """
     X = X.clone()
-    out = {k: [] for k in ("norm_env", "norm_full", "cos", "cos_reg", "nnz", "viol")}
+    out = {k: [] for k in ("norm_env", "norm_full", "norm_resid", "w2", "cos",
+                           "cos_reg", "nnz", "viol",
+                           "norm_det", "cos_det", "rel_det", "norm_resid_det",
+                           "w2_exact")}
     for step in range(steps + 1):
         # Support is rebuilt from the current X, as the flow itself does; both
         # estimators then share it, so the step's comparison is like-for-like.
@@ -119,12 +139,20 @@ def trajectory(X, Y, a, n, steps, iters, eps, n_proj, regularized=False, on_step
                                      ot1d=_ot_1d_coo_batched_cuda)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
 
-        g_env, _, g_full, viol = three_gradients(
+        g_env, g_det, g_full, viol, w2 = three_gradients(
             iters, X, Y, a, rows, cols, log_S, n, n, eps=eps)
 
         rec = {"norm_env": float(g_env.norm()), "norm_full": float(g_full.norm()),
+               "norm_resid": float((g_full - g_env).norm()), "w2": w2,
                "cos": _cosine(g_env, g_full), "nnz": int(rows.numel()),
-               "viol": viol, "cos_reg": float("nan")}
+               "viol": viol, "cos_reg": float("nan"),
+               # Control on the closed form: g_det is the same gradient obtained by
+               # autograd through the cost with the plan stop-gradiented, so it
+               # never touches the barycentric formula.
+               "norm_det": float(g_det.norm()), "cos_det": _cosine(g_env, g_det),
+               "rel_det": float((g_env - g_det).norm()) / float(g_env.norm()),
+               "norm_resid_det": float((g_full - g_det).norm()),
+               "w2_exact": exact_w2sq(X, Y, a) if exact_w2 else float("nan")}
         if regularized:
             g_reg = regularized_unrolled(iters, X, Y, a, rows, cols, log_S, n, eps=eps)
             rec["cos_reg"] = _cosine(g_env, g_reg)
@@ -137,7 +165,7 @@ def trajectory(X, Y, a, n, steps, iters, eps, n_proj, regularized=False, on_step
         if step == steps:
             break
         X = (X - lr * n * g_env).detach().clone()
-        del g_env, g_full, rows, cols, S, log_S
+        del g_env, g_det, g_full, rows, cols, S, log_S
         torch.cuda.empty_cache()
     return out
 

@@ -67,7 +67,7 @@ def truncation_check(steps, iters, n_):
         rows, cols, S = sot_plan_coo(X, Y, a, a, L=CELL_L, seed=SEED,
                                      ot1d=_ot_1d_coo_batched_cuda)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
-        g, _, _, _ = three_gradients(iters, X, Y, a, rows, cols, log_S, n_, n_,
+        g, _, _, _, _ = three_gradients(iters, X, Y, a, rows, cols, log_S, n_, n_,
                                      unroll=False, eps=CELL_EPS)
         X = (X - LR * n_ * g).detach().clone()
 
@@ -76,7 +76,7 @@ def truncation_check(steps, iters, n_):
     log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
     out = {"k": K_GRID, "cos": [], "viol": []}
     for k in K_GRID:
-        ge, _, gf, viol = three_gradients(k, X, Y, a, rows, cols, log_S, n_, n_,
+        ge, _, gf, viol, _ = three_gradients(k, X, Y, a, rows, cols, log_S, n_, n_,
                                           eps=CELL_EPS)
         out["cos"].append(_cosine(ge, gf))
         out["viol"].append(viol)

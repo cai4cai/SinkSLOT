@@ -90,7 +90,7 @@ def run_flow(mode, X0, Y, a, n, steps, iters, eps, checkpoints):
         if mode == "regularized":
             g = regularized_unrolled(iters, X, Y, a, rows, cols, log_S, n, eps=eps)
         else:
-            g_env, _, g_full, _ = three_gradients(
+            g_env, _, g_full, _, _ = three_gradients(
                 iters, X, Y, a, rows, cols, log_S, n, n,
                 unroll=(mode == "unrolled"), eps=eps)
             g = g_full if mode == "unrolled" else g_env

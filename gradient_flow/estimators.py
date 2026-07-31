@@ -95,12 +95,13 @@ def three_gradients(k, X, Y, a, rows, cols, log_S, n, m, unroll=True, eps=EPS):
             0, rows, T.unsqueeze(1) * Y[cols])
         Tx = Tx / r.clamp_min(torch.finfo(T.dtype).tiny).unsqueeze(1)
         g_env = 2.0 * a[:, None] * (X - Tx)
+        transport = float((T * cost).sum())
 
     Xd = X.clone().requires_grad_(True)
     cost_d, _ = build(Xd)
     (g_det,) = torch.autograd.grad((T.detach() * cost_d).sum(), [Xd])
 
-    return g_env, g_det, g_unrolled, float((a / r - 1).abs().max())
+    return g_env, g_det, g_unrolled, float((a / r - 1).abs().max()), transport
 
 
 def main():
@@ -114,7 +115,7 @@ def main():
     print(f"support nnz={rows.numel()}  N={N}  L={L}  eps={EPS}")
 
     # Reference: envelope at deep convergence (all three agree there).
-    g_ref, _, _, viol_ref = three_gradients(3000, X, Y, a, rows, cols, log_S, N, N, unroll=False)
+    g_ref, _, _, viol_ref, _ = three_gradients(3000, X, Y, a, rows, cols, log_S, N, N, unroll=False)
     ref = float(g_ref.norm())
     print(f"reference @3000 iters: |a/r-1|max={viol_ref:.2e}\n")
 
@@ -122,7 +123,7 @@ def main():
     curves = {"envelope": [], "detach": [], "unrolled": []}
     print(f"{'k':>5} {'envelope':>11} {'detach':>11} {'unrolled':>11}   {'best':>9}")
     for k in grid:
-        ge, gd, gu, _ = three_gradients(k, X, Y, a, rows, cols, log_S, N, N)
+        ge, gd, gu, _, _ = three_gradients(k, X, Y, a, rows, cols, log_S, N, N)
         e = [float((g - g_ref).norm()) / ref for g in (ge, gd, gu)]
         for name, v in zip(curves, e):
             curves[name].append(v)
