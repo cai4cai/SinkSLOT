@@ -71,8 +71,16 @@ sites) than pulling SinkSLOT's own solver out of it.
 | `data/` | the two density images (blob → crescent) sampled into point clouds |
 
 ```bash
-python -m gradient_flow.run    # needs a CUDA GPU: the SinkSLOT arm's kernels are Triton
+python -m gradient_flow.run       # the figure: needs a CUDA GPU (Triton kernels)
+python -m gradient_flow.stopping  # how early the inner solve can stop
 ```
+
+`stopping.py` asks what the fixed `MAX_ITER=1000` inner iterations buy. The
+envelope-theorem gradient is exact only *at* the optimum, so stopping early
+biases it in a way the formula cannot see. It plots the gradient norm — the
+quantity you can measure at run time — against the relative error versus a
+converged reference, which is the one you actually care about. The norm settles
+first, so it reads as converged while the direction is still turning.
 
 ## Run a sweep
 
@@ -95,6 +103,7 @@ python scripts/scalability.py --execute         # actually run them
 | Table 1, Gaussian d=64 | `configs/speedup_gaussian_d64.py` | same policy, d=64, wider ε range [0.1, 1] |
 | Figure 2 (scalability in N and d) | `configs/scalability.py` + `scripts/scalability.py` | N ∈ {5k,10k,20k,30k,50k} at d∈{3,64}; d ∈ {4…1024} at N=10,000; 5 seeds; SinkSLOT-CUDA/SROT/FlashSinkhorn-alternating |
 | Figure 3 (gradient flow, blob → crescent) | `gradient_flow/config.py` + `gradient_flow/run.py` | N=1000, ε=0.01, L=100, 50 gradient steps; SOT/EOT/SROT/SinkSLOT |
+| Gradient accuracy under early stopping | `gradient_flow/stopping.py` | same problem, inner iterations swept 1–1000 against a 5000-iteration reference |
 
 The three benchmark configs share one solver policy: marginal stopping on
 `max(‖P1−a‖∞, ‖Pᵀ1−b‖∞) < 1e-6`, float32, TF32 off, and the exact LP reference
