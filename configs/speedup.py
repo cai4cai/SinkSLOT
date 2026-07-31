@@ -20,17 +20,18 @@ experiment IS, which is exactly what these three CONFIGs specify.
 Datasets in this file: half_moon, 8gaussians, two_rings (all natively 2D; see
 sample_point_cloud() in bench_forward.py).
 
-Grids cut from 10 to 8 points on every axis (eps, L, S) vs the first pass, to
+Grids cut from 10 to 8 points on the eps/L axes vs the first pass, to
 reduce per-job unit count now that the slow methods (SROT/Spar-Sink) are
 split one job per dataset:
   - eps: 8-point log grid over [0.001, 0.1] (was 10-point).
   - L (SROT, SinkSLOT-CUDA): 8-point log2 grid 32..4096 (was 16..8192).
-  - S (Spar-Sink density): 8-point log grid over 0.1%..5% of N*M (was
-    0.1%..80% -- capped lower because real timing showed density-driven
-    kernel-construction cost, not iteration count, dominates runtime here,
-    and grows steeply enough that higher densities risked hours per unit).
+  - S (Spar-Sink sample size): the Spar-Sink paper's own recipe (see
+    configs/base.py's sparsink_s docstring): s = k * s0(n),
+    s0(n) = 1e-3 * n * log(n)^4, k in {2, 4, 8, 16} -- 4 points, not 8.
 
-Methods, one SLURM job each (see table1_launch/gen_scripts.py):
+Methods, one SLURM job each (job-splitting is cluster-scheduling bookkeeping,
+not part of this artifact -- run.py itself runs the whole sweep in one process
+if invoked directly):
   - SinkSLOT-CUDA only (no plain SinkSLOT) and SROT: eps x L grid.
   - FlashSinkhorn-alternating only (no symmetric): eps sweep only.
   - Spar-Sink: eps x S grid, sparsink_replicates=50. Rand-Sink dropped
@@ -41,11 +42,13 @@ Run with:
     python run.py --config speedup --execute
 """
 
+import math
+
 from configs.base import BenchConfig
 
-_NM = 10000 * 10000
-_s_densities = [0.001, 0.0017487, 0.0030579, 0.0053472, 0.0093506, 0.0163512, 0.028593, 0.05]
-_sparsink_s = [int(round(d * _NM)) for d in _s_densities]
+_n = 10000
+_s0 = 1e-3 * _n * (math.log(_n) ** 4)
+_sparsink_s = [int(round(k * _s0)) for k in [2, 4, 8, 16]]
 
 CONFIG = BenchConfig(
     which="forward",

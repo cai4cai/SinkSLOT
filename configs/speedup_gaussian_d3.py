@@ -6,20 +6,26 @@ across datasets (dims applies uniformly to every dataset in cfg.datasets), so
 this Gaussian-at-d=3 slice has to be its own config.
 
 Its commands are appended into the SAME per-method output directories as
-configs/speedup.py's 3 non-Gaussian datasets (table1_launch/gen_scripts.py
-routes both configs' --output-dir to the identical path per method), so each
-method's forward_all.csv ends up covering all 4 dataset slices together.
+configs/speedup.py's 3 non-Gaussian datasets (both configs point --output-dir
+at the same path per method), so each method's forward_all.csv ends up
+covering all 4 dataset slices together.
 
 Run with:
 
     python run.py --config speedup_gaussian_d3 --execute
 """
 
+import math
+
 from configs.base import BenchConfig
 
-_NM = 10000 * 10000
-_s_densities = [0.001, 0.0017487, 0.0030579, 0.0053472, 0.0093506, 0.0163512, 0.028593, 0.05]
-_sparsink_s = [int(round(d * _NM)) for d in _s_densities]
+# Spar-Sink's own recipe (Li, Yu, Li, Meng, "Importance Sparsification for
+# Sinkhorn Algorithm", JMLR): s = k * s0(n), s0(n) = 1e-3 * n * log(n)^4.
+# At n=10,000, s0(n)~=71,962, giving s = [143924, 287848, 575695, 1151391] --
+# comfortably inside the max_dense_size=10000 dense-kernel budget below.
+_n = 10000
+_s0 = 1e-3 * _n * (math.log(_n) ** 4)
+_sparsink_s = [int(round(k * _s0)) for k in [2, 4, 8, 16]]
 
 CONFIG = BenchConfig(
     which="forward",

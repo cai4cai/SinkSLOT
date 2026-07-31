@@ -1593,8 +1593,32 @@ def build_sparse_kernel(
     q = (sample_size * probs).clamp_max(1.0)
 
     generator = torch.Generator(device=cost.device).manual_seed(seed)
-    keep = torch.rand(n, m, generator=generator, device=cost.device, dtype=cost.dtype) < q
-    rows, cols = keep.nonzero(as_tuple=True)
+
+    # torch.nonzero() rejects any tensor with more than INT_MAX elements, regardless
+    # of how many are actually nonzero -- at n=m=50000, n*m=2.5e9 already exceeds that
+    # bound before sample_size even enters the picture, so this hits unconditionally
+    # at that scale (not a real memory ceiling: weights/probs/q above are already the
+    # same n x m footprint and fit fine). Chunk over rows so each torch.rand/nonzero
+    # call stays under the limit; RNG order is unaffected since a given generator
+    # advances the same way whether one n x m call or several row-chunked calls
+    # consume it, so this reproduces the same sample as the unchunked path exactly.
+    int32_max = 2**31 - 1
+    if n * m <= int32_max:
+        keep = torch.rand(n, m, generator=generator, device=cost.device, dtype=cost.dtype) < q
+        rows, cols = keep.nonzero(as_tuple=True)
+    else:
+        chunk_rows = max(1, int32_max // m)
+        row_chunks, col_chunks = [], []
+        for start in range(0, n, chunk_rows):
+            end = min(start + chunk_rows, n)
+            keep_chunk = torch.rand(end - start, m, generator=generator, device=cost.device,
+                                     dtype=cost.dtype) < q[start:end]
+            r, c = keep_chunk.nonzero(as_tuple=True)
+            row_chunks.append(r + start)
+            col_chunks.append(c)
+        rows = torch.cat(row_chunks)
+        cols = torch.cat(col_chunks)
+
     log_values = -cost[rows, cols] / eps - q[rows, cols].log()
     return rows, cols, log_values
 
