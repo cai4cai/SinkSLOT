@@ -139,6 +139,18 @@ git commit -q -m "SinkSLOT: anonymous artifact for double-blind review"
 
 echo "==> pushing to anonymous repo"
 git push -q --force "$ANON_REPO" anon
+echo "    $ANON_REPO"
+
+# Mirrors get the identical orphan commit in the same run. Keeping a copy on the
+# source repo is convenient -- you can see what was published without cloning the
+# anonymous one -- but a mirror updated by hand is a mirror that goes stale, and
+# a stale copy of this branch is exactly what leaked mva-internship-2026/SROT.
+# So it is pushed here or not at all. Set ANON_MIRRORS="" to skip.
+for mirror in ${ANON_MIRRORS-git@github.com:cai4cai/SinkSLOT.git}; do
+  [ "$mirror" = "$ANON_REPO" ] && continue
+  git push -q --force "$mirror" anon
+  echo "    $mirror (mirror)"
+done
 
 echo "OK: anon updated from $SRC_BRANCH@$SRC_SHA -> $(git rev-parse --short HEAD)"
 echo "    history depth: $(git rev-list --count HEAD) commit"
