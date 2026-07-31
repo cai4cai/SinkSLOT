@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/
+
+# Repo outputs
+output/
+docs/
+
+# Third-party (kept locally, not vendored)
+3rd-party/OTT-Hessian/
+
+# Local agent notes
+AGENTS.md
+CLAUDE.md
+analysis.md
+
+# Local reference material / lockfile (not vendored)
+papers/
+uv.lock
+dist/
+
+# Generated figures
+gradient_flow/outputs/
+
+# Paper sources (separate git clone)
+paper/
+
+# Local build tooling: carries the anonymisation pattern list, must not ship.
+scripts/update_anon.sh
