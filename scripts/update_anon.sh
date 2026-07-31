@@ -63,30 +63,30 @@ for f in ("memory.md", "megakernel-findings.md", "cleanup.md", "handoff.md", "an
 # below would otherwise always match itself and abort.
 pathlib.Path("scripts/update_anon.sh").unlink(missing_ok=True)
 
-# Upstream HF-kernel packaging. Removed from the source repo itself, so these are
-# belt-and-braces for an older checkout: the workflow published to the upstream
-# author's Hub namespace and could not run anonymously, and CARD.md was upstream's
-# model card describing FlashSinkhorn rather than this artifact. Prose attribution
-# in README stays.
+# Upstream HF-kernel packaging. Removed from the source repo itself (build.toml
+# and flake.nix along with them), so these are belt-and-braces for an older
+# checkout: the workflow published to the upstream author's Hub namespace and
+# could not run anonymously, and CARD.md was upstream's model card describing
+# FlashSinkhorn rather than this artifact.
 import shutil
 shutil.rmtree(".github", ignore_errors=True)
-pathlib.Path("CARD.md").unlink(missing_ok=True)
+for f in ("CARD.md", "build.toml", "flake.nix"):
+    pathlib.Path(f).unlink(missing_ok=True)
 
-ANON = "https://anonymous.4open.science/r/sinkslot"
-p = pathlib.Path("pyproject.toml")
-if p.exists():
-    s = p.read_text()
-    s = s.replace('  {name = "OT Triton Contributors"}\n', '  {name = "Anonymous Authors"}\n')
-    s = re.sub(r'(Homepage|Repository) = "https://github\.com/ot-triton-lab/[^"]*"',
-               lambda m: f'{m.group(1)} = "{ANON}"', s)
-    p.write_text(s)
-p = pathlib.Path("build.toml")
-if p.exists():
-    s = p.read_text()
-    s = re.sub(r'upstream = "https://github\.com/ot-triton-lab/[^"]*"\n', "", s)
-    s = re.sub(r'source = "https://github\.com/ot-triton-lab/[^"]*"', f'source = "{ANON}"', s)
-    s = re.sub(r'\n\[general\.hub\]\nrepo-id = "[^"]*"\n', "\n", s)
-    p.write_text(s)
+# NOTE: ot-triton-lab is NOT us. FlashSinkhorn is third-party prior work (Ye et
+# al., ICML 2026, cited as ye2026flashsinkhorn), forked here on 2026-07-20; every
+# commit touching sinkslot/, configs/ or gradient_flow/ postdates that. So its
+# name and URLs are not identifying and must NOT be scrubbed:
+#   - LICENSE keeps "Copyright (c) 2025 OT Triton Contributors". MIT requires
+#     retaining it on code we redistribute.
+#   - pyproject.toml keeps {name = "OT Triton Contributors"} and its ot-triton-lab
+#     Homepage/Repository. An earlier version rewrote these to "Anonymous Authors"
+#     and our anon URL, which relabelled upstream's package as ours -- passing off,
+#     not anonymisation. Anonymise our identity, never someone else's.
+#   - README's FlashSinkhorn attribution stays; the paper cites it as the primary
+#     baseline, so a reviewer already knows we build on it.
+# pyproject.toml is also what installs the sinkslot package (packages.find over
+# torch-ext/), so it cannot simply be dropped the way build.toml was.
 
 # Cluster QoS names are site-specific and identify the facility. Swept over the
 # whole configs/ tree rather than one named file: the earlier version pointed at
