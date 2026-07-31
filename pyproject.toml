@@ -3,7 +3,13 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "flash-sinkhorn"
+# Distribution name for this repo (SinkSLOT). It packages two things: the
+# vendored flash_sinkhorn library below (third-party prior work, MIT-licensed,
+# kept under its own name/attribution per the license) and this paper's own
+# contribution (torch-ext/sinkslot/, gradient_flow/, configs/), which is
+# anonymous for review. `authors` below names only the former -- it is not a
+# claim about who wrote the latter.
+name = "sinkslot"
 dynamic = ["version"]
 description = "Sinkhorn optimal transport kernels in PyTorch + Triton (squared Euclidean, no cost matrix materialization)."
 readme = "README.md"
