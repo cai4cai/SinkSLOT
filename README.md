@@ -12,7 +12,6 @@ Needs a CUDA GPU. The solver is Triton-only, with no CPU fallback.
 ```bash
 python run.py --dry-run                    # tiny grid from configs/base.py
 python run.py --execute                    # run it -> output/quick
-python view.py --output-dir output/quick   # viewer (TUI; --print for tables)
 python -m gradient_flow.run                # the gradient-flow figure
 ```
 
@@ -78,7 +77,7 @@ sweep, every baseline adapter and its RMAE reference).
 
 At the repo root: `configs/base.py` (`BenchConfig` plus a quick grid, not used
 for any reported number), `run.py` (sweep driver, one subprocess per
-measurement, appended to one CSV), `scripts/scalability.py`, `view.py`.
+measurement, appended to one CSV), `scripts/scalability.py`.
 
 ## Baselines
 

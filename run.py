@@ -1,7 +1,8 @@
-"""Build and (optionally) execute a flash_sinkhorn benchmark from config.py.
+"""Build and (optionally) execute a SinkSLOT-vs-baselines benchmark from config.py.
 
-Sweeps every (dataset, eps) combination from CONFIG. All runs append into a single
-`<output_dir>/forward_all.csv` plus one speedup table, with
+Sweeps every (dataset, eps) combination from CONFIG across every enabled method --
+SinkSLOT/SinkSLOT-CUDA, SROT, Spar-Sink/Rand-Sink, and FlashSinkhorn. All runs
+append into a single `<output_dir>/forward_all.csv` plus one speedup table, with
 dataset, eps, d and n as ordinary columns. Existing CSVs are deleted at the start
 of a sweep, so each invocation produces a clean table.
 
@@ -303,7 +304,7 @@ def run_tf32_comparison(base_cfg: BenchConfig, *, dry_run: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run a flash_sinkhorn benchmark using settings from a configs/ module"
+        description="Run a SinkSLOT-vs-baselines benchmark using settings from a configs/ module"
     )
     parser.add_argument("--config", default="base",
                         help="Module in configs/ to load CONFIG from (default: base; e.g. speedup).")
