@@ -99,7 +99,10 @@ PATTERN="$PATTERN"'|/home/[a-z0-9_]+|/Users/[a-z0-9_]+|@gmail|@[a-z0-9.-]+\.(ac\
 # mva-internship-2026/SROT reached the published artifact: the branch feeding
 # the build had forked before the commit that scrubbed it, and every pattern
 # above lists people, orgs or facilities -- none would ever match a repo name.
-PATTERN="$PATTERN"'|mva-internship|/SROT\b'
+# Note: match the internship repo's own name only. A bare /SROT would also hit
+# khainb/SROT, the public paper repo this work cites legitimately, and the
+# SinkSLOT/-CUDA/SROT method labels throughout configs/ -- all fine to ship.
+PATTERN="$PATTERN"'|mva-internship'
 if grep -rniE "$PATTERN" . --exclude-dir=.git --binary-files=without-match; then
   echo "!! identifying strings found above -- aborting, nothing pushed" >&2
   exit 1
