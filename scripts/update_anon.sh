@@ -53,9 +53,14 @@ else:
 
 # Internal engineering notes: not part of the artifact, and they name the cluster
 # and carry candid claims that belong in the paper's own words if anywhere.
-for f in ("memory.md", "megakernel-findings.md", "cleanup.md", "handoff.md", "analysis.md",
-          "kernelreport.md"):
-    pathlib.Path(f).unlink(missing_ok=True)
+# Matched by basename anywhere in the tree, not just at the root: memory.md moved
+# to scripts/ and the root-only unlink silently stopped finding it, so the notes
+# were only kept out of the artifact by the grep gate below tripping.
+for name in ("memory.md", "megakernel-findings.md", "cleanup.md", "handoff.md", "analysis.md",
+             "kernelreport.md"):
+    for p in pathlib.Path(".").rglob(name):
+        if ".git" not in p.parts:
+            p.unlink()
 
 # This script itself. It is build tooling rather than artifact content, and it
 # carries the very list of names and institutions it exists to scrub -- shipping
