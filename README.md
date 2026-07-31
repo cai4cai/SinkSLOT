@@ -3,7 +3,7 @@
 Fused-Triton sparse Sinkhorn on the unsmoothed sliced-OT plan. Entropic OT is
 restricted to the support of a sliced-OT reference plan and solved with fused
 Triton kernels. SinkSLOT-CUDA is the same method with a CUDA-optimised setup
-path (2.1 to 3.1x faster plan build), benchmarked as a peer method.
+path (2.1 to 3.1× faster plan build), benchmarked as a peer method.
 
 Needs a CUDA GPU. The solver is Triton-only, with no CPU fallback.
 
@@ -20,11 +20,11 @@ python -m gradient_flow.run                # the gradient-flow figure
 
 | Result | Config | Grid |
 |---|---|---|
-| Table 1, half-moons / 8-Gaussians / two-rings | `configs/speedup.py` | N=M=10,000, d=2, 8-point log grid for eps in [0.001, 0.1], L 32 to 4096 |
+| Table 1, half-moons / 8-Gaussians / two-rings | `configs/speedup.py` | N=M=10,000, d=2, 8-point log grid for ε in [0.001, 0.1], L 32 to 4096 |
 | Table 1, Gaussian d=3 | `configs/speedup_gaussian_d3.py` | same policy, d=3 |
-| Table 1, Gaussian d=64 | `configs/speedup_gaussian_d64.py` | same policy, d=64, eps in [0.1, 1] |
+| Table 1, Gaussian d=64 | `configs/speedup_gaussian_d64.py` | same policy, d=64, ε in [0.1, 1] |
 | Figure 2, scalability | `configs/scalability.py` via `scripts/scalability.py` | N in {5k,10k,20k,30k,50k} at d in {3,64}; d in {4..1024} at N=10,000; 5 seeds |
-| Figure 3, gradient flow | `gradient_flow/config.py` via `gradient_flow/run.py` | N=1000, eps=0.01, L=100, 50 steps; SOT/EOT/SROT/SinkSLOT |
+| Figure 3, gradient flow | `gradient_flow/config.py` via `gradient_flow/run.py` | N=1000, ε=0.01, L=100, 50 steps; SOT/EOT/SROT/SinkSLOT |
 | Gradient accuracy under early stopping | `gradient_flow/stopping.py` | same problem, inner iterations 1 to 1000 against a 5000-iteration reference |
 
 ```bash
@@ -34,7 +34,7 @@ python scripts/scalability.py --execute    # run them
 ```
 
 All three benchmark configs share one solver policy: marginal stopping on
-`max(||P1-a||inf, ||P^T 1-b||inf) < 1e-6`, float32, TF32 off, and the exact LP
+`max(‖P1 - a‖∞, ‖Pᵀ1 - b‖∞) < 1e-6`, float32, TF32 off, and the exact LP
 reference plan from POT's network simplex (`ot.emd`, CPU, float64). `max_iter`
 is 10,000 for `speedup.py` and 20,000 for the other two; each file's docstring
 says why.
@@ -44,7 +44,7 @@ says why.
 `scripts/scalability.py` generates its commands directly. Spar-Sink is absent
 from that experiment: it cannot reach N=50,000 without an int32 index overflow
 in `torch.nonzero()` during sampling. In `configs/speedup*.py` its sample budget
-follows the authors' formula, `s = k*s0(n)` with `s0(n) = 1e-3*n*log(n)^4` and
+follows the authors' formula, `s = k·s₀(n)` with `s₀(n) = 1e-3·n·log⁴(n)` and
 `k` in {2,4,8,16}.
 
 ## Layout
@@ -65,7 +65,7 @@ python -m gradient_flow.closed_form_check  # is the closed form an artefact?
 ```
 
 Each module's docstring carries its own results table. `solver.py` holds the
-envelope projection `grad_X SLOT_eps(X,Y) = 2*diag(a)*(X - T_eps(X))`,
+envelope projection `∇_X SLOT_ε(X,Y) = 2 diag(a)(X - T_ε(X))`,
 `vendor/sinkhorn_methods.py` the dense differentiable SOT/EOT/SROT baselines,
 and `data/` the two densities (blob to crescent) sampled into point clouds.
 
