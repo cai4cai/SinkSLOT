@@ -38,7 +38,6 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import numpy as np
 import ot
 import torch
 from PIL import Image
@@ -51,7 +50,7 @@ from gradient_flow.config import (
     METHOD_NAMES, ROW_LABELS,
 )
 from gradient_flow.vendor.sinkhorn_methods import (
-    build_cost, exact_ot, sinkhorn_divergence_torch_autograd, sr_sinkhorn_divergence_torch_autograd,
+    sinkhorn_divergence_torch_autograd, sr_sinkhorn_divergence_torch_autograd,
 )
 from gradient_flow.solver import slot_grad
 
@@ -93,16 +92,15 @@ def draw_samples(fname, n, rng, dtype=DTYPE, device="cpu"):
 def exact_ot_cost(X, Y):
     """Raw squared-W2 exact OT cost (not sqrt'd). X, Y: torch tensors, any device.
 
-    vendor/sinkhorn_methods.py (third-party, untouched) is numpy-typed, so this
-    is the one place the torch -> numpy conversion has to happen.
+    Calls POT directly (ot.dist, ot.emd2) rather than through vendor's
+    exact_ot/build_cost -- POT's own backend accepts torch tensors natively
+    (verified against 0.9.7), so no numpy round-trip is needed here at all.
     """
     n, m = X.shape[0], Y.shape[0]
-    a = np.ones(n) / n
-    b = np.ones(m) / m
-    X_np = X.detach().cpu().double().numpy()
-    Y_np = Y.detach().cpu().double().numpy()
-    cost, _ = exact_ot(a, b, build_cost(X_np, Y_np))
-    return cost
+    Xc, Yc = X.detach().cpu().double(), Y.detach().cpu().double()
+    a = torch.full((n,), 1.0 / n, dtype=torch.float64)
+    b = torch.full((m,), 1.0 / m, dtype=torch.float64)
+    return float(ot.emd2(a, b, ot.dist(Xc, Yc, metric="sqeuclidean")))
 
 
 def run_flow(method, X0, Y, a_t, eps):
