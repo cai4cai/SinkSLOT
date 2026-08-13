@@ -106,6 +106,13 @@ def _ot_1d_coo_batched_cuda(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor,
     Net: 49.5x on the dominant stage AND a strictly more accurate plan. Because
     the support differs from the naive fp32 scan, SinkSLOT-CUDA keeps its own
     reference-cache namespace (see bench_forward.py).
+
+    Dtype: the `.double()` upcast below is internal and fixed, not driven by
+    the caller's dtype -- `a`, `b`, `PX`, `PY` can be float32 or float64 on the
+    way in, the cumsum always runs in float64, and `ca`/`cb` (and everything
+    returned) are always float32 on the way out. Passing float64 inputs does
+    not get you a float64 plan; it only feeds float64 values into a scan that
+    was going to run in float64 either way.
     """
     n, C = PX.shape
     m = PY.shape[0]
@@ -259,7 +266,13 @@ def to_csr(rows: torch.Tensor, cols: torch.Tensor, vals: torch.Tensor, n: int,
 
 @triton.jit
 def _cost_kernel(X, Y, ROWS, COLS, OUT, NNZ, D: tl.constexpr, BLOCK: tl.constexpr):
-    """out[k] = ||x[rows[k]] - y[cols[k]]||^2, one pass, no (nnz, d) temporaries."""
+    """out[k] = ||x[rows[k]] - y[cols[k]]||^2, one pass, no (nnz, d) temporaries.
+
+    Dtype: `acc` is a fixed float32 accumulator, independent of whatever dtype
+    X/Y actually are -- this kernel is written for, and only tested against,
+    float32 input. See `sparse_sqeuclidean_cost`'s dtype assertion, which is
+    the enforcement point (this kernel itself has no way to check or error).
+    """
     k = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = k < NNZ
     r = tl.load(ROWS + k, mask=mask, other=0).to(tl.int64)
@@ -284,7 +297,22 @@ def sparse_sqeuclidean_cost(x, y, rows, cols, block: int = 1024):
 
     Agrees with the torch expression to ~3e-7 relative (fp32 reassociation of the
     d-term sum); the resulting shift in the dual objective is below 2e-7.
+
+    Dtype: always returns float32, matching `_cost_kernel`'s fixed float32
+    accumulator above -- not inferred from `x`/`y`. Every caller in this repo
+    already passes float32 (see gradient_flow/solver.py's own docstring on why
+    SinkSLOT stays fp32 throughout), so this has never silently produced a
+    wrong answer here, but a future caller passing float64 would (Triton has no
+    way to promote the accumulator, only to read whatever bytes are at the
+    pointer). Asserted rather than left implicit, so that call is a clear error
+    instead of quietly-wrong numbers.
     """
+    if x.dtype != torch.float32 or y.dtype != torch.float32:
+        raise ValueError(
+            f"sparse_sqeuclidean_cost is float32-only (the Triton kernel's "
+            f"accumulator is a fixed float32); got x.dtype={x.dtype}, "
+            f"y.dtype={y.dtype}. Cast to float32 first."
+        )
     nnz, d = rows.numel(), x.shape[1]
     out = torch.empty(nnz, device=x.device, dtype=torch.float32)
     _cost_kernel[(triton.cdiv(nnz, block),)](
@@ -314,6 +342,13 @@ def _seg_lse_online_kernel(
     caller always wants `log_a - LSE`, and at small n the loop is bound by kernel
     launches rather than bandwidth (67 GB/s at n=1000 against 443 at n=10000), so
     folding that subtraction in removes two of the four launches per iteration.
+
+    Dtype: `m`/`s` (the running max/sum) take their dtype from `lam`/`phi`/`psi`
+    at the call site, not from a hardcoded declaration here -- unlike
+    `_cost_kernel`'s accumulator above, there's no `tl.zeros(..., dtype=...)`
+    pinning them. In practice every caller in this repo passes fp32 tensors
+    (see `seg_lse_online`), so this always runs fp32, but that's a property of
+    the callers, not a guarantee this kernel enforces.
     """
     i = tl.program_id(0)
     start = tl.load(indptr + i)
