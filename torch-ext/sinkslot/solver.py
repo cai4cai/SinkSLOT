@@ -451,6 +451,12 @@ def _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
                 prev_psi.copy_(psi)
         return phi, psi, it, converged, change
 
+    if mode not in ("marginal", "potential"):
+        raise ValueError(
+            f"unknown stop.mode {mode!r}; expected one of "
+            f"'fixed', 'marginal', 'potential', 'potential_linf'"
+        )
+
     a = log_a.exp()
     phi_next = torch.empty_like(log_a)
     it = 0
@@ -461,6 +467,14 @@ def _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
         seg_lse_online(c_ptr, c_idx, c_lam, z_m, phi, m, c_blk, c_w, base=log_b, out=psi)
         it += 1
         if it % stop.check_every == 0 or it == stop.max_iter:
+            # phi_next is NOT a redundant recompute of phi: phi used the psi from
+            # the previous iteration, phi_next uses the psi just updated two lines
+            # up, so it's what phi would be after one more row half-step -- the
+            # one-step-ahead value the row-marginal-violation formula below needs.
+            # Storing the previous phi instead would answer a different question
+            # (how much phi itself moved), not the row marginal's actual deviation
+            # from a. See the docstring above for the r = a*exp(phi - phi_next)
+            # identity this relies on.
             seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi_next)
             row_marg = a * (phi - phi_next).exp()          # col marginal is exactly b
             # max (L-infinity), matching SLOT's actual _run_v5 exactly:
