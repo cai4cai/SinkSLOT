@@ -39,7 +39,6 @@ within about an order of magnitude of the reference's own accuracy and should be
 read as an upper bound. The separation between the three curves is 2-3 orders of
 magnitude and is unaffected.
 """
-import numpy as np
 import torch
 
 from sinkslot.solver import (
@@ -105,7 +104,7 @@ def three_gradients(k, X, Y, a, rows, cols, log_S, n, m, unroll=True, eps=EPS):
 
 
 def main():
-    rng = np.random.default_rng(1)
+    rng = torch.Generator(device="cpu").manual_seed(1)
     X = draw_samples(DATA_DIR / "density_a.png", N, rng, device="cuda").float()
     Y = draw_samples(DATA_DIR / "density_b.png", N, rng, device="cuda").float()
     a = torch.full((N,), 1.0 / N, dtype=torch.float32, device="cuda")
@@ -127,7 +126,7 @@ def main():
         e = [float((g - g_ref).norm()) / ref for g in (ge, gd, gu)]
         for name, v in zip(curves, e):
             curves[name].append(v)
-        best = ["envelope", "detach", "unrolled"][int(np.argmin(e))]
+        best = ["envelope", "detach", "unrolled"][int(torch.tensor(e).argmin())]
         print(f"{k:>5} {e[0]:>11.3e} {e[1]:>11.3e} {e[2]:>11.3e}   {best:>9}")
         del ge, gd, gu
         torch.cuda.empty_cache()

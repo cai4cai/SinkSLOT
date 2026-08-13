@@ -56,7 +56,6 @@ from __future__ import annotations
 import argparse
 import json
 
-import numpy as np
 import torch
 
 from gradient_flow.along_flow import trajectory
@@ -70,7 +69,7 @@ EPS = 0.01
 
 def roughness(c):
     """Mean |second difference| -- wiggle that is not a smooth trend."""
-    return float(np.abs(np.diff(np.asarray(c), n=2)).mean())
+    return float(torch.tensor(c).diff(n=2).abs().mean())
 
 
 def main():
@@ -84,7 +83,7 @@ def main():
         raise RuntimeError("needs a CUDA GPU: the support builder is Triton-only")
 
     n = args.n
-    rng = np.random.default_rng(1)
+    rng = torch.Generator(device="cpu").manual_seed(1)
     X = draw_samples(DATA_DIR / "density_a.png", n, rng, device="cuda").float()
     Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device="cuda").float()
     a = torch.full((n,), 1.0 / n, dtype=torch.float32, device="cuda")
@@ -101,8 +100,11 @@ def main():
             finals.append(s["cos"][-1])
             roughs.append(roughness(s["cos"]))
             nnz = s["nnz"][-1]
-        print(f"{n_proj:>7} {np.mean(finals):>14.4f} {np.std(finals):>11.2e} "
-              f"{np.mean(roughs):>11.2e} {nnz:>10}", flush=True)
+        finals_t, roughs_t = torch.tensor(finals), torch.tensor(roughs)
+        # unbiased=False to match numpy's std() default (ddof=0) -- matters at n=5 seeds.
+        print(f"{n_proj:>7} {float(finals_t.mean()):>14.4f} "
+              f"{float(finals_t.std(unbiased=False)):>11.2e} "
+              f"{float(roughs_t.mean()):>11.2e} {nnz:>10}", flush=True)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     raw = OUT_DIR / "projection_noise.json"

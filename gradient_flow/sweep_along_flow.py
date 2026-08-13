@@ -60,7 +60,6 @@ import argparse
 import json
 import time
 
-import numpy as np
 import torch
 
 from gradient_flow.along_flow import trajectory
@@ -86,7 +85,7 @@ def main():
     reg = not args.no_regularized
 
     n = args.n
-    rng = np.random.default_rng(1)
+    rng = torch.Generator(device="cpu").manual_seed(1)
     X = draw_samples(DATA_DIR / "density_a.png", n, rng, device="cuda").float()
     Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device="cuda").float()
     a = torch.full((n,), 1.0 / n, dtype=torch.float32, device="cuda")
@@ -151,9 +150,9 @@ def _plot(cells, steps):
     axes[1].set_title(f"varying $L$ at $\\epsilon={EPS_FIX}$")
 
     # final-step cosine over the grid
-    M = np.array([[cells[f"{e}/{l}"]["cos"][-1] for l in L_GRID] for e in EPS_GRID])
+    M = torch.tensor([[cells[f"{e}/{l}"]["cos"][-1] for l in L_GRID] for e in EPS_GRID])
     ax = axes[2]
-    im = ax.imshow(M, cmap="magma", vmin=min(0.0, M.min()), vmax=1.0, aspect="auto")
+    im = ax.imshow(M, cmap="magma", vmin=min(0.0, float(M.min())), vmax=1.0, aspect="auto")
     ax.set_xticks(range(len(L_GRID)), [str(v) for v in L_GRID])
     ax.set_yticks(range(len(EPS_GRID)), [f"{v:g}" for v in EPS_GRID])
     ax.set_xlabel("$L$ (projections)")
@@ -161,8 +160,9 @@ def _plot(cells, steps):
     ax.set_title(f"cosine at step {steps}")
     for i in range(M.shape[0]):
         for j in range(M.shape[1]):
-            ax.text(j, i, f"{M[i, j]:.3f}", ha="center", va="center", fontsize=8,
-                    color="white" if M[i, j] < 0.6 else "black")
+            val = float(M[i, j])
+            ax.text(j, i, f"{val:.3f}", ha="center", va="center", fontsize=8,
+                    color="white" if val < 0.6 else "black")
     fig.colorbar(im, ax=ax, fraction=0.046)
 
     out = OUT_DIR / "sweep_along_flow.pdf"

@@ -62,32 +62,45 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def load_density(fname):
-    """Grayscale density in [0,1]; row-flipped and inverted, matching Feydy et al. (2019)."""
+    """Grayscale density in [0,1]; row-flipped and inverted, matching Feydy et al. (2019).
+
+    Reads PIL's raw bytes straight into a torch tensor (torch.frombuffer), no numpy.
+    """
     img = Image.open(fname).convert("L")
-    arr = np.asarray(img, dtype=np.float64) / 255.0
-    arr = arr[::-1, :]
+    w, h = img.size
+    buf = torch.frombuffer(bytearray(img.tobytes()), dtype=torch.uint8).reshape(h, w)
+    arr = buf.double() / 255.0
+    arr = arr.flip(0)
     return 1.0 - arr
 
 
 def draw_samples(fname, n, rng, dtype=DTYPE, device="cpu"):
+    """`rng` is a torch.Generator (CPU); sampling happens on CPU, moved to `device` last."""
     A = load_density(fname)
     h, w = A.shape
-    xg, yg = np.meshgrid(np.linspace(0, 1, h), np.linspace(0, 1, w), indexing="xy")
-    grid = np.stack([xg.ravel(), yg.ravel()], axis=1)
-    dens = A.ravel()
+    xg, yg = torch.meshgrid(torch.linspace(0, 1, h, dtype=torch.float64),
+                             torch.linspace(0, 1, w, dtype=torch.float64), indexing="xy")
+    grid = torch.stack([xg.reshape(-1), yg.reshape(-1)], dim=1)
+    dens = A.reshape(-1)
     dens = dens / dens.sum()
-    idx = rng.choice(len(grid), size=n, p=dens)
-    dots = grid[idx].copy()
-    dots += (0.5 / h) * rng.standard_normal(dots.shape)
+    idx = torch.multinomial(dens, n, replacement=True, generator=rng)
+    dots = grid[idx].clone()
+    dots += (0.5 / h) * torch.randn(dots.shape, generator=rng, dtype=dots.dtype)
     dots *= DATA_SCALE
-    return torch.as_tensor(dots, dtype=dtype, device=device)
+    return dots.to(dtype=dtype, device=device)
 
 
-def exact_ot_cost(X_np, Y_np):
-    """Raw squared-W2 exact OT cost (not sqrt'd)."""
-    n, m = X_np.shape[0], Y_np.shape[0]
+def exact_ot_cost(X, Y):
+    """Raw squared-W2 exact OT cost (not sqrt'd). X, Y: torch tensors, any device.
+
+    vendor/sinkhorn_methods.py (third-party, untouched) is numpy-typed, so this
+    is the one place the torch -> numpy conversion has to happen.
+    """
+    n, m = X.shape[0], Y.shape[0]
     a = np.ones(n) / n
     b = np.ones(m) / m
+    X_np = X.detach().cpu().double().numpy()
+    Y_np = Y.detach().cpu().double().numpy()
     cost, _ = exact_ot(a, b, build_cost(X_np, Y_np))
     return cost
 
@@ -113,8 +126,9 @@ def run_flow(method, X0, Y, a_t, eps):
             x_i_d = x_i.detach()
 
         if step in STEPS:
-            w2 = exact_ot_cost(x_i_d.cpu().numpy(), Y.cpu().numpy())
-            rows[step] = (x_i_d.cpu().numpy().copy(), w2)
+            Xn = x_i_d.cpu().clone()
+            w2 = exact_ot_cost(Xn, Y.cpu())
+            rows[step] = (Xn, w2)
         if step == N_STEPS:
             break
         x_i = (x_i_d - LR * N * g).clone()
@@ -126,19 +140,19 @@ def main():
         raise RuntimeError("gradient_flow/run.py needs a CUDA GPU: the SinkSLOT arm's "
                             "cost/LSE kernels are Triton, which has no CPU backend.")
 
-    rng = np.random.default_rng(1)
+    rng = torch.Generator(device="cpu").manual_seed(1)
     X0 = draw_samples(DATA_DIR / "density_a.png", N, rng, device=DEVICE)
     Y = draw_samples(DATA_DIR / "density_b.png", N, rng, device=DEVICE)
     a_t = torch.full((N,), 1.0 / N, dtype=DTYPE, device=DEVICE)
     colors = (10 * X0[:, 0]).cos() * (10 * X0[:, 1]).cos()
-    colors = colors.detach().cpu().numpy()
+    colors = colors.detach().cpu()
 
-    X0n, Yn = X0.cpu().numpy(), Y.cpu().numpy()
-    pts = np.vstack([X0n, Yn])
-    lo, hi = pts.min(0), pts.max(0)
+    X0n, Yn = X0.cpu(), Y.cpu()
+    pts = torch.cat([X0n, Yn], dim=0)
+    lo, hi = pts.min(dim=0).values, pts.max(dim=0).values
     pad = (hi - lo) * 0.06
-    xlim = (lo[0] - pad[0], hi[0] + pad[0])
-    ylim = (lo[1] - pad[1], hi[1] + pad[1])
+    xlim = (float(lo[0] - pad[0]), float(hi[0] + pad[0]))
+    ylim = (float(lo[1] - pad[1]), float(hi[1] + pad[1]))
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     for eps in EPS_VALUES:
