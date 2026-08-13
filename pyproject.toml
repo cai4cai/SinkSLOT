@@ -3,12 +3,12 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-# Distribution name for this repo (SinkSLOT). It packages two things: the
-# vendored flash_sinkhorn library below (third-party prior work, MIT-licensed,
-# kept under its own name/attribution per the license) and this paper's own
-# contribution (torch-ext/sinkslot/, gradient_flow/, configs/), which is
-# anonymous for review. `authors` below names only the former -- it is not a
-# claim about who wrote the latter.
+# Distribution name for this repo (SinkSLOT). It packages two things under
+# different attribution: the vendored flash_sinkhorn library (third-party
+# prior work, MIT-licensed, kept under its own copyright -- see
+# torch-ext/flash_sinkhorn/LICENSE) and this repo's own contribution
+# (torch-ext/sinkslot/, gradient_flow/, configs/, the benchmark harness).
+# `authors` below lists both, in that order; each covers only its own scope.
 name = "sinkslot"
 dynamic = ["version"]
 description = "SinkSLOT: sparse Sinkhorn over a sliced-OT reference plan in PyTorch + Triton, built on the vendored FlashSinkhorn kernels below."
@@ -17,7 +17,8 @@ license = {text = "MIT"}
 requires-python = ">=3.9"
 keywords = ["optimal-transport", "sinkhorn", "triton", "pytorch", "gpu"]
 authors = [
-  {name = "OT Triton Contributors"}
+  {name = "OT Triton Contributors"},
+  {name = "CAI4CAI research group", email = "contact@cai4cai.uk"},
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -36,8 +37,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ot-triton-lab/flash-sinkhorn"
-Repository = "https://github.com/ot-triton-lab/flash-sinkhorn"
+Homepage = "https://github.com/cai4cai/SinkSLOT"
+Repository = "https://github.com/cai4cai/SinkSLOT"
+Issues = "https://github.com/cai4cai/SinkSLOT/issues"
+UpstreamFlashSinkhorn = "https://github.com/ot-triton-lab/flash-sinkhorn"
 
 [project.optional-dependencies]
 dev = [
