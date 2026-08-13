@@ -11,7 +11,7 @@ build-backend = "setuptools.build_meta"
 # claim about who wrote the latter.
 name = "sinkslot"
 dynamic = ["version"]
-description = "Sinkhorn optimal transport kernels in PyTorch + Triton (squared Euclidean, no cost matrix materialization)."
+description = "SinkSLOT: sparse Sinkhorn over a sliced-OT reference plan in PyTorch + Triton, built on the vendored FlashSinkhorn kernels below."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
