@@ -16,6 +16,7 @@ from .solver import (
     sparse_sqeuclidean_cost,
     seg_lse_online,
     launch_cfg,
+    sinkslot_solve,
     _run_v5,
 )
 
@@ -26,5 +27,6 @@ __all__ = [
     "sparse_sqeuclidean_cost",
     "seg_lse_online",
     "launch_cfg",
+    "sinkslot_solve",
     "_run_v5",
 ]

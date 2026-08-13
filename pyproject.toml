@@ -64,4 +64,4 @@ version = {attr = "flash_sinkhorn.__version__"}
 
 [tool.pytest.ini_options]
 addopts = "-ra"
-testpaths = ["torch-ext/flash_sinkhorn/testing"]
+testpaths = ["torch-ext/flash_sinkhorn/testing", "torch-ext/sinkslot/testing"]

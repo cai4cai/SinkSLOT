@@ -5,7 +5,10 @@ restricted to the support of a sliced-OT reference plan and solved with fused
 Triton kernels. SinkSLOT-CUDA is the same method with a CUDA-optimised setup
 path (2.1 to 3.1× faster plan build), benchmarked as a peer method.
 
-Needs a CUDA GPU. The solver is Triton-only, with no CPU fallback.
+The benchmarked numbers below are all from the fused Triton kernels on a CUDA
+GPU. `sinkslot.sinkslot_solve` also runs on CPU (or CUDA without Triton
+installed) via a pure-torch fallback -- same algorithm, no fused kernels, so
+noticeably slower, not a substitute for the reported throughput.
 
 ## Quick start
 
