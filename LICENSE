@@ -1,11 +1,6 @@
-This license covers this repository (SinkSLOT), excluding
-torch-ext/flash_sinkhorn/, which is vendored from an upstream project and
-remains under its own license and copyright (see
-torch-ext/flash_sinkhorn/LICENSE).
-
 MIT License
 
-Copyright (c) 2025 CAI4CAI research group
+Copyright (c) 2025 OT Triton Contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
