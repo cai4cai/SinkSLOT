@@ -4,7 +4,8 @@ This is the paper's own contribution -- a distinct algorithm from FlashSinkhorn
 (sparse, built on a sliced-OT reference plan, rather than FlashSinkhorn's dense
 fused kernel over the full cost matrix). It lives in its own package rather
 than nested inside flash_sinkhorn/bench/ because it's a real solver used
-outside benchmarking too (see gradient_flow/solver.py), not benchmark-only code.
+outside benchmarking too (see slot_grad, used by gradient_flow/), not
+benchmark-only code.
 
 Package name: sinkslot
 """
@@ -16,6 +17,8 @@ from .solver import (
     sparse_sqeuclidean_cost,
     seg_lse_online,
     launch_cfg,
+    slot_grad,
+    plan_barycentric_sparse,
     _run_v5,
 )
 
@@ -26,5 +29,7 @@ __all__ = [
     "sparse_sqeuclidean_cost",
     "seg_lse_online",
     "launch_cfg",
+    "slot_grad",
+    "plan_barycentric_sparse",
     "_run_v5",
 ]

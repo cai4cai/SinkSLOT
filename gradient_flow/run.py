@@ -3,7 +3,7 @@
     python -m gradient_flow.run
 
 Requires a CUDA GPU (the SinkSLOT arm's cost/LSE kernels are Triton, which
-doesn't run on CPU -- see solver.py).
+doesn't run on CPU -- see sinkslot/solver.py).
 
 Four methods, one figure:
   * SOT (Bonneel et al., 2015): the plain, unregularized sliced W2 distance --
@@ -15,7 +15,7 @@ Four methods, one figure:
   * SinkSLOT (ours): the native v5 solver (torch-ext/sinkslot/solver.py), the
     exact pipeline this repo's own speed benchmarks exercise,
     plus the closed-form envelope-theorem gradient
-    grad_X SLOT_eps(X,Y) = 2*diag(a)*(X - T_eps(X)) (see solver.py).
+    grad_X SLOT_eps(X,Y) = 2*diag(a)*(X - T_eps(X)) (see sinkslot/solver.py).
 
     SOT/EOT/SROT run in float64 (vendor/sinkhorn_methods.py, ported from a
     sibling research repository's own copy, which has no CUDA/Triton
@@ -53,7 +53,7 @@ from gradient_flow.config import (
 from gradient_flow.vendor.sinkhorn_methods import (
     build_cost, exact_ot, sinkhorn_divergence_torch_autograd, sr_sinkhorn_divergence_torch_autograd,
 )
-from gradient_flow.solver import slot_grad
+from sinkslot.solver import slot_grad
 
 DATA_DIR = Path(__file__).parent / "data"
 OUT_DIR = Path(__file__).parent / "outputs"

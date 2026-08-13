@@ -2,7 +2,7 @@
 
     python -m gradient_flow.stopping
 
-`solver.slot_grad` differentiates SLOT_eps by the envelope theorem,
+`sinkslot.solver.slot_grad` differentiates SLOT_eps by the envelope theorem,
 
     grad_X SLOT_eps(X, Y) = 2 * diag(a) * (X - T_eps(X)),
 
@@ -43,13 +43,13 @@ import matplotlib.pyplot as plt  # noqa: E402
 from sinkslot.solver import (  # noqa: E402
     _ot_1d_coo_batched_cuda,
     _run_v5,
+    plan_barycentric_sparse,
     sot_plan_coo,
     sparse_sqeuclidean_cost,
     to_csr,
 )
 from gradient_flow.config import DATA_SCALE, L, N  # noqa: E402
 from gradient_flow.run import DATA_DIR, OUT_DIR, draw_samples  # noqa: E402
-from gradient_flow.solver import _FixedStop, plan_barycentric_sparse  # noqa: E402
 
 # Geometric-ish ladder: the interesting behaviour is all in the first ~200
 # iterations, and a linear grid wastes most of its points on the flat tail.
@@ -89,7 +89,7 @@ def _grad_at(n_iters, X, Y, a, rows, cols, lam, csr, csc):
     c_ptr, c_idx, c_lam, _ = csc
     log_a = a.log()
     phi, psi, _, _, _ = _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
-                                log_a, log_a, n, m, n_iters, _FixedStop())
+                                log_a, log_a, n, m, n_iters)
 
     T_vals = (phi[rows] + psi[cols] + lam).exp()
     # The solver's own stopping statistic: after the column half-step the column
