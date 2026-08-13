@@ -13,7 +13,7 @@ name = "sinkslot"
 dynamic = ["version"]
 description = "SinkSLOT: Sinkhorn via Sparse Lifted Optimal Transport -- a sparse Sinkhorn solver over a sliced-OT reference plan, in PyTorch + Triton."
 readme = "README.md"
-license = {text = "MIT"}
+license = "Apache-2.0"
 requires-python = ">=3.9"
 keywords = ["optimal-transport", "sliced-optimal-transport", "sparse-sinkhorn", "sinkhorn", "triton", "pytorch", "gpu"]
 authors = [
