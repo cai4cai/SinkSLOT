@@ -83,7 +83,6 @@ import argparse
 import json
 import time
 
-import numpy as np
 import torch
 
 from gradient_flow.along_flow import trajectory
@@ -112,7 +111,7 @@ def main():
         raise RuntimeError("needs a CUDA GPU: the support builder is Triton-only")
 
     n = args.n
-    rng = np.random.default_rng(1)
+    rng = torch.Generator(device="cpu").manual_seed(1)
     X = draw_samples(DATA_DIR / "density_a.png", n, rng, device="cuda").float()
     Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device="cuda").float()
     a = torch.full((n,), 1.0 / n, dtype=torch.float32, device="cuda")
@@ -191,7 +190,7 @@ def _plot_single(s, steps, iters, eps, n):
                   f"not the reference-plan gradient growing\n"
                   f"$N={n}$, $L={L}$, $\\epsilon={eps:g}$, {iters} inner iterations")
 
-    ratio = np.array(s["norm_resid"]) / np.array(s["norm_env"])
+    ratio = torch.tensor(s["norm_resid"]) / torch.tensor(s["norm_env"])
     ax1.plot(xs, ratio, "-", lw=1.8, color=C_II, label="reference-plan / envelope")
     ax1.axhline(1.0, color="0.6", lw=0.8, ls=":")
     ax1.set_yscale("log")
@@ -211,7 +210,7 @@ def _plot_single(s, steps, iters, eps, n):
     ax2.grid(alpha=0.3, which="both")
 
     # Where the two terms cross -- the point the cosine collapse is dated from.
-    cross = next((i for i, r in enumerate(ratio) if r >= 1.0), None)
+    cross = next((i for i, r in enumerate(ratio) if bool(r >= 1.0)), None)
     if cross is not None:
         for ax in (ax0, ax1, ax2):
             ax.axvline(cross, color="0.6", lw=0.8, ls="--")
@@ -242,7 +241,8 @@ def _plot_sweep(cells, eps_grid, steps, iters, n):
 
     xs = list(range(steps + 1))
     ncol = len(eps_grid)
-    has_exact = all(np.isfinite(cells[f"{e:g}"]["w2_exact"]).all() for e in eps_grid)
+    has_exact = all(bool(torch.tensor(cells[f"{e:g}"]["w2_exact"]).isfinite().all())
+                    for e in eps_grid)
     nrow = 3 if has_exact else 2
     fig, axes = plt.subplots(nrow, ncol, figsize=(3.3 * ncol, 2.5 * nrow + 0.9),
                              sharex=True, sharey="row", squeeze=False,
@@ -263,7 +263,7 @@ def _plot_sweep(cells, eps_grid, steps, iters, n):
 
         col[1].plot(xs, s["w2"], "-", lw=1.6, color=C_W2)
         if has_exact:
-            col[2].plot(xs, np.sqrt(s["w2_exact"]), "-", lw=1.6, color="0.35")
+            col[2].plot(xs, torch.tensor(s["w2_exact"]).sqrt(), "-", lw=1.6, color="0.35")
         col[-1].set_xlabel("gradient step")
 
         for ax in col:

@@ -70,7 +70,6 @@ from __future__ import annotations
 
 import argparse
 
-import numpy as np
 import torch
 
 from sinkslot.solver import _ot_1d_coo_batched_cuda, sot_plan_coo
@@ -160,7 +159,7 @@ def main():
         raise RuntimeError("needs a CUDA GPU: the support builder is Triton-only")
 
     n = args.n
-    rng = np.random.default_rng(1)
+    rng = torch.Generator(device="cpu").manual_seed(1)
     X = draw_samples(DATA_DIR / "density_a.png", n, rng, device="cuda").double()
     Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device="cuda").double()
     a = torch.full((n,), 1.0 / n, dtype=torch.float64, device="cuda")
@@ -183,14 +182,14 @@ def main():
                 r = probe(X, Y, a, v, args.h, args.iters, args.eps, L, base=base)
                 for lst, val in zip((an, fd, jp, mv), r):
                     lst.append(val)
-            an, fd, jp = np.array(an), np.array(fd), np.array(jp)
-            scale = np.abs(an).mean()
+            an, fd, jp = torch.tensor(an), torch.tensor(fd), torch.tensor(jp)
+            scale = float(an.abs().mean())
             # |mean|/mean|.| near 0 means the jumps cancel: no systematic direction.
-            bias = abs(jp.mean()) / np.abs(jp).mean()
-            print(f"{step:>5} {an.mean():>12.5e} {fd.mean():>12.5e} "
-                  f"{np.abs(fd - an).mean() / scale:>9.1e} "
-                  f"{np.abs(jp).mean() / F:>10.1e} {bias:>10.2f} "
-                  f"{np.mean(mv):>14.1e}", flush=True)
+            bias = float(jp.mean().abs()) / float(jp.abs().mean())
+            print(f"{step:>5} {float(an.mean()):>12.5e} {float(fd.mean()):>12.5e} "
+                  f"{float((fd - an).abs().mean()) / scale:>9.1e} "
+                  f"{float(jp.abs().mean()) / F:>10.1e} {bias:>10.2f} "
+                  f"{float(torch.tensor(mv).mean()):>14.1e}", flush=True)
 
         g = envelope_grad(X, Y, a, *base, args.iters, args.eps)
         X = (X - LR * n * g).clone()

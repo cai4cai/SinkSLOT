@@ -58,7 +58,6 @@ from __future__ import annotations
 
 import argparse
 
-import numpy as np
 import torch
 import matplotlib
 matplotlib.use("Agg")
@@ -96,8 +95,8 @@ def run_flow(mode, X0, Y, a, n, steps, iters, eps, checkpoints):
             g = g_full if mode == "unrolled" else g_env
 
         if step in checkpoints:
-            Xn = X.double().cpu().numpy()
-            out[step] = (Xn, exact_ot_cost(Xn, Y.double().cpu().numpy()))
+            Xn = X.double().cpu()
+            out[step] = (Xn, exact_ot_cost(Xn, Y.double().cpu()))
             print(f"  [{mode}] step {step:>3}  W2^2={out[step][1]:.4f}", flush=True)
 
         if step == steps:
@@ -120,13 +119,13 @@ def main():
 
     checkpoints = [s for s in STEPS if s <= args.steps]
     n = args.n
-    rng = np.random.default_rng(1)
+    rng = torch.Generator(device="cpu").manual_seed(1)
     X0 = draw_samples(DATA_DIR / "density_a.png", n, rng, device="cuda").float()
     Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device="cuda").float()
     a = torch.full((n,), 1.0 / n, dtype=torch.float32, device="cuda")
 
-    X0n, Yn = X0.double().cpu().numpy(), Y.double().cpu().numpy()
-    colors = ((10 * X0[:, 0]).cos() * (10 * X0[:, 1]).cos()).cpu().numpy()
+    X0n, Yn = X0.double().cpu(), Y.double().cpu()
+    colors = ((10 * X0[:, 0]).cos() * (10 * X0[:, 1]).cos()).cpu()
 
     print(f"N={n}  L={L}  eps={EPS}  iters={args.iters}  lr={LR}  steps={args.steps}")
     results = {}
@@ -139,11 +138,11 @@ def main():
 
 
 def _plot(results, checkpoints, X0n, Yn, colors, steps):
-    pts = np.vstack([X0n, Yn])
-    lo, hi = pts.min(0), pts.max(0)
+    pts = torch.cat([X0n, Yn], dim=0)
+    lo, hi = pts.min(dim=0).values, pts.max(dim=0).values
     pad = (hi - lo) * 0.06
-    xlim = (lo[0] - pad[0], hi[0] + pad[0])
-    ylim = (lo[1] - pad[1], hi[1] + pad[1])
+    xlim = (float(lo[0] - pad[0]), float(hi[0] + pad[0]))
+    ylim = (float(lo[1] - pad[1]), float(hi[1] + pad[1]))
 
     # Best (lowest) W2^2 per intermediate checkpoint, bolded -- run.py's convention.
     best = {}
