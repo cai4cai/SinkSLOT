@@ -51,9 +51,9 @@ exists.
 
 Usage:
 
-    python scripts/memory.py                          # default grid, all methods
-    python scripts/memory.py --n 100000 --d 64 --slices 2048
-    python scripts/memory.py --methods flash_symmetric,sinkslot --json out/mem.json
+    python scripts/memory_audit/memory.py                          # default grid, all methods
+    python scripts/memory_audit/memory.py --n 100000 --d 64 --slices 2048
+    python scripts/memory_audit/memory.py --methods flash_symmetric,sinkslot --json out/mem.json
 
 Sizes default low enough to fit a 4GB laptop card. SROT and Spar-Sink/Rand-Sink
 materialise an N x M matrix, so they are skipped above ``--max-dense-size``; that

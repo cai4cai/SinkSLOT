@@ -107,6 +107,12 @@ At the repo root: `configs/base.py` (`BenchConfig` plus a quick grid, not used
 for any reported number), `run.py` (sweep driver, one subprocess per
 measurement, appended to one CSV), `scripts/scalability.py`.
 
+`scripts/memory_audit/` is a closed audit, not a reproduction path: it checked
+whether the sweep's `gpu_memory_mb` column (used for `tab:accuracy_memory`) is
+comparable across methods, and confirmed it is (`memory.md`'s status note has
+the full reasoning). It doesn't produce anything the paper cites and isn't run
+as part of reproducing any result above.
+
 ## Baselines
 
 Built on [FlashSinkhorn](https://github.com/ot-triton-lab/flash-sinkhorn), and
