@@ -22,7 +22,6 @@ installed can still run SinkSLOT, just without the fused-kernel throughput.
 
 from __future__ import annotations
 
-import numpy as np
 import torch
 
 try:
@@ -33,11 +32,16 @@ except ImportError:
     _HAS_TRITON = False
 
 
-def sot_directions(d: int, L: int, seed: int) -> np.ndarray:
-    """Unit directions, matching build_sot_plan's RNG usage exactly."""
-    rng = np.random.default_rng(seed)
-    thetas = rng.standard_normal((L, d))
-    norms = np.maximum(np.linalg.norm(thetas, axis=1, keepdims=True), 1e-300)
+def sot_directions(d: int, L: int, seed: int) -> torch.Tensor:
+    """Unit directions: standard-normal draws, L2-normalised.
+
+    Same construction as vendor/sinkhorn_methods.py's build_sot_plan, but on
+    torch's own RNG rather than numpy's, so the two no longer agree bit-for-bit
+    on a shared seed (different generator, same distribution).
+    """
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    thetas = torch.randn((L, d), generator=gen, dtype=torch.float64)
+    norms = thetas.norm(dim=1, keepdim=True).clamp_min(1e-300)
     return thetas / norms
 
 

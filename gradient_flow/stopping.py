@@ -34,7 +34,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib
-import numpy as np
 import torch
 
 matplotlib.use("Agg")
@@ -107,7 +106,7 @@ def main():
                            "which has no CPU backend.")
 
     # Same rng draw order as run.py's main(), so X0/Y are the identical clouds.
-    rng = np.random.default_rng(1)
+    rng = torch.Generator(device="cpu").manual_seed(1)
     X = draw_samples(DATA_DIR / "density_a.png", N, rng, device="cuda").float()
     Y = draw_samples(DATA_DIR / "density_b.png", N, rng, device="cuda").float()
     a = torch.full((N,), 1.0 / N, dtype=torch.float32, device="cuda")
@@ -205,8 +204,11 @@ def _report(norms, rel_errs, viols, ref_norm):
     # constant relating the two -- it converts a tolerance into a gradient error.
     ratios = [re / v for re, v in zip(rel_errs, viols) if v > 1e-7]
     if ratios:
-        print(f"  relative gradient error ~= {np.median(ratios):.0f} x marginal violation")
-        print(f"     -> for 1% gradient error, stop at viol ~= {1e-2 / np.median(ratios):.1e}")
+        # quantile(0.5), not .median(), to match numpy's median() (averages the
+        # middle two for an even-length input; .median() would just pick one).
+        med = float(torch.quantile(torch.tensor(ratios), 0.5))
+        print(f"  relative gradient error ~= {med:.0f} x marginal violation")
+        print(f"     -> for 1% gradient error, stop at viol ~= {1e-2 / med:.1e}")
 
 
 if __name__ == "__main__":

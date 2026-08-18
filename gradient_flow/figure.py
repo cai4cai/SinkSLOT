@@ -28,7 +28,6 @@ from __future__ import annotations
 import argparse
 import json
 
-import numpy as np
 import torch
 
 from gradient_flow.run import OUT_DIR
@@ -51,13 +50,12 @@ def truncation_check(steps, iters, n_):
     falls. Cached to TRUNC because it is the one control not saved by any of the
     sweep scripts.
     """
-    import numpy as np
     from sinkslot.solver import _ot_1d_coo_batched_cuda, sot_plan_coo
     from gradient_flow.along_flow import _cosine
     from gradient_flow.estimators import SEED, three_gradients
     from gradient_flow.run import DATA_DIR, draw_samples
 
-    rng = np.random.default_rng(1)
+    rng = torch.Generator(device="cpu").manual_seed(1)
     X = draw_samples(DATA_DIR / "density_a.png", n_, rng, device="cuda").float()
     Y = draw_samples(DATA_DIR / "density_b.png", n_, rng, device="cuda").float()
     a = torch.full((n_,), 1.0 / n_, dtype=torch.float32, device="cuda")
@@ -135,7 +133,7 @@ def _plot(sweep, noise, trunc):
     # (b) cosine + control ---------------------------------------------------
     b.plot(xs, cell["cos"], "-", lw=2.0, color=C_FULL,
            label=r"vs complete $\langle P,C\rangle$")
-    if not np.isnan(cell["cos_reg"]).all():
+    if not bool(torch.tensor(cell["cos_reg"]).isnan().all()):
         b.plot(xs, cell["cos_reg"], "--", lw=1.8, color=C_REG,
                label=r"vs complete $\langle P,C\rangle+\epsilon\mathrm{KL}$")
     b.axhline(1.0, color="0.65", lw=0.8, ls=":")
@@ -174,16 +172,17 @@ def _plot(sweep, noise, trunc):
     d.set_title(rf"(d) every $\epsilon$ at $L={CELL_L}$", fontsize=10.5, loc="left")
 
     # (e) heatmap ------------------------------------------------------------
-    M = np.array([[sweep["cells"][f"{ev}/{lv}"]["cos"][-1] for lv in sweep["L"]]
-                  for ev in sweep["eps"]])
+    M = torch.tensor([[sweep["cells"][f"{ev}/{lv}"]["cos"][-1] for lv in sweep["L"]]
+                      for ev in sweep["eps"]])
     im = e.imshow(M, cmap="magma", vmin=0.0, vmax=1.0, aspect="auto")
     e.set_xticks(range(len(sweep["L"])), [str(v) for v in sweep["L"]])
     e.set_yticks(range(len(sweep["eps"])), [f"{v:g}" for v in sweep["eps"]])
     e.set_xlabel("$L$ (projections)"); e.set_ylabel(r"$\epsilon$")
     for i in range(M.shape[0]):
         for j in range(M.shape[1]):
-            e.text(j, i, f"{M[i, j]:.2f}", ha="center", va="center", fontsize=8.5,
-                   color="white" if M[i, j] < 0.6 else "black")
+            val = float(M[i, j])
+            e.text(j, i, f"{val:.2f}", ha="center", va="center", fontsize=8.5,
+                   color="white" if val < 0.6 else "black")
     fig.colorbar(im, ax=e, fraction=0.046)
     e.set_title(f"(e) cosine at step {steps} over the grid", fontsize=10.5, loc="left")
 

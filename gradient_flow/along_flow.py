@@ -72,7 +72,6 @@ from __future__ import annotations
 
 import argparse
 
-import numpy as np
 import torch
 
 from sinkslot.solver import _ot_1d_coo_batched_cuda, sot_plan_coo
@@ -113,8 +112,8 @@ def exact_w2sq(X, Y, a):
     import ot
 
     M = torch.cdist(X, Y) ** 2
-    w = a.detach().cpu().numpy().astype("float64")
-    return float(ot.emd2(w, w, M.detach().cpu().numpy().astype("float64")))
+    w = a.detach().cpu().double()
+    return float(ot.emd2(w, w, M.detach().cpu().double()))
 
 
 def trajectory(X, Y, a, n, steps, iters, eps, n_proj, regularized=False, on_step=None,
@@ -225,7 +224,7 @@ def main():
         raise RuntimeError("needs a CUDA GPU: the support builder is Triton-only")
 
     n = args.n
-    rng = np.random.default_rng(1)
+    rng = torch.Generator(device="cpu").manual_seed(1)
     X = draw_samples(DATA_DIR / "density_a.png", n, rng, device="cuda").float()
     Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device="cuda").float()
     a = torch.full((n,), 1.0 / n, dtype=torch.float32, device="cuda")

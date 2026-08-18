@@ -54,7 +54,6 @@ from __future__ import annotations
 import argparse
 import json
 
-import numpy as np
 import torch
 
 from gradient_flow.along_flow import trajectory
@@ -76,7 +75,7 @@ def main():
         raise RuntimeError("needs a CUDA GPU: the support builder is Triton-only")
 
     n = args.n
-    rng = np.random.default_rng(1)
+    rng = torch.Generator(device="cpu").manual_seed(1)
     X = draw_samples(DATA_DIR / "density_a.png", n, rng, device="cuda").float()
     Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device="cuda").float()
     a = torch.full((n,), 1.0 / n, dtype=torch.float32, device="cuda")
