@@ -63,11 +63,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from sinkslot.solver import _ot_1d_coo_batched_cuda, sot_plan_coo
+from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo
 from gradient_flow.along_flow import regularized_unrolled
 from gradient_flow.config import L, LR, N, N_STEPS, STEPS
 from gradient_flow.estimators import SEED, three_gradients
-from gradient_flow.run import DATA_DIR, OUT_DIR, draw_samples, exact_ot_cost
+from gradient_flow.run import DATA_DIR, DEVICE, OUT_DIR, draw_samples, exact_ot_cost
 
 EPS = 0.01
 MODES = ["envelope", "unrolled", "regularized"]
@@ -80,10 +80,10 @@ ROW_LABELS = {
 
 def run_flow(mode, X0, Y, a, n, steps, iters, eps, checkpoints):
     X = X0.clone()
+    ot1d = _ot_1d_coo_batched_cuda if X0.is_cuda else _ot_1d_coo_batched
     out = {}
     for step in range(steps + 1):
-        rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=SEED,
-                                     ot1d=_ot_1d_coo_batched_cuda)
+        rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=SEED, ot1d=ot1d)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
 
         if mode == "regularized":
@@ -103,7 +103,8 @@ def run_flow(mode, X0, Y, a, n, steps, iters, eps, checkpoints):
             break
         X = (X - LR * n * g).detach().clone()
         del g, rows, cols, S, log_S
-        torch.cuda.empty_cache()
+        if X.is_cuda:
+            torch.cuda.empty_cache()
     return out
 
 
@@ -114,15 +115,16 @@ def main():
     p.add_argument("--n", type=int, default=N)
     args = p.parse_args()
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("needs a CUDA GPU: the support builder is Triton-only")
+    if DEVICE != "cuda":
+        print("gradient_flow/flow_qualitative.py: no CUDA GPU found, running on CPU "
+              "(pure torch throughout -- much slower, same algorithm).")
 
     checkpoints = [s for s in STEPS if s <= args.steps]
     n = args.n
     rng = torch.Generator(device="cpu").manual_seed(1)
-    X0 = draw_samples(DATA_DIR / "density_a.png", n, rng, device="cuda").float()
-    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device="cuda").float()
-    a = torch.full((n,), 1.0 / n, dtype=torch.float32, device="cuda")
+    X0 = draw_samples(DATA_DIR / "density_a.png", n, rng, device=DEVICE).float()
+    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device=DEVICE).float()
+    a = torch.full((n,), 1.0 / n, dtype=torch.float32, device=DEVICE)
 
     X0n, Yn = X0.double().cpu(), Y.double().cpu()
     colors = ((10 * X0[:, 0]).cos() * (10 * X0[:, 1]).cos()).cpu()

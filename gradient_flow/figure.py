@@ -50,27 +50,26 @@ def truncation_check(steps, iters, n_):
     falls. Cached to TRUNC because it is the one control not saved by any of the
     sweep scripts.
     """
-    from sinkslot.solver import _ot_1d_coo_batched_cuda, sot_plan_coo
+    from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo
     from gradient_flow.along_flow import _cosine
     from gradient_flow.estimators import SEED, three_gradients
-    from gradient_flow.run import DATA_DIR, draw_samples
+    from gradient_flow.run import DATA_DIR, DEVICE, draw_samples
 
     rng = torch.Generator(device="cpu").manual_seed(1)
-    X = draw_samples(DATA_DIR / "density_a.png", n_, rng, device="cuda").float()
-    Y = draw_samples(DATA_DIR / "density_b.png", n_, rng, device="cuda").float()
-    a = torch.full((n_,), 1.0 / n_, dtype=torch.float32, device="cuda")
+    X = draw_samples(DATA_DIR / "density_a.png", n_, rng, device=DEVICE).float()
+    Y = draw_samples(DATA_DIR / "density_b.png", n_, rng, device=DEVICE).float()
+    a = torch.full((n_,), 1.0 / n_, dtype=torch.float32, device=DEVICE)
+    ot1d = _ot_1d_coo_batched_cuda if DEVICE == "cuda" else _ot_1d_coo_batched
 
     from gradient_flow.config import LR
     for _ in range(steps):
-        rows, cols, S = sot_plan_coo(X, Y, a, a, L=CELL_L, seed=SEED,
-                                     ot1d=_ot_1d_coo_batched_cuda)
+        rows, cols, S = sot_plan_coo(X, Y, a, a, L=CELL_L, seed=SEED, ot1d=ot1d)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
         g, _, _, _, _ = three_gradients(iters, X, Y, a, rows, cols, log_S, n_, n_,
                                      unroll=False, eps=CELL_EPS)
         X = (X - LR * n_ * g).detach().clone()
 
-    rows, cols, S = sot_plan_coo(X, Y, a, a, L=CELL_L, seed=SEED,
-                                 ot1d=_ot_1d_coo_batched_cuda)
+    rows, cols, S = sot_plan_coo(X, Y, a, a, L=CELL_L, seed=SEED, ot1d=ot1d)
     log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
     out = {"k": K_GRID, "cos": [], "viol": []}
     for k in K_GRID:
@@ -80,7 +79,8 @@ def truncation_check(steps, iters, n_):
         out["viol"].append(viol)
         print(f"  k={k:>4}  cos={out['cos'][-1]:.6f}  viol={viol:.2e}", flush=True)
         del ge, gf
-        torch.cuda.empty_cache()
+        if DEVICE == "cuda":
+            torch.cuda.empty_cache()
     return out
 
 
@@ -98,7 +98,8 @@ def main():
 
     if args.recompute_truncation or not TRUNC.exists():
         if not torch.cuda.is_available():
-            raise SystemExit("truncation check needs a CUDA GPU (Triton support builder)")
+            print("gradient_flow/figure.py: no CUDA GPU found, running the truncation "
+                  "check on CPU (pure torch throughout -- much slower, same algorithm).")
         print(f"computing truncation check (not cached at {TRUNC})")
         TRUNC.write_text(json.dumps(
             truncation_check(sweep["steps"], sweep["iters"], sweep["n"])))

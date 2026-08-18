@@ -42,10 +42,10 @@ magnitude and is unaffected.
 import torch
 
 from sinkslot.solver import (
-    _ot_1d_coo_batched_cuda, sot_plan_coo, sparse_sqeuclidean_cost,
+    _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo, sparse_sqeuclidean_cost,
 )
 from gradient_flow.config import L, N
-from gradient_flow.run import DATA_DIR, draw_samples
+from gradient_flow.run import DATA_DIR, DEVICE, draw_samples
 
 EPS, SEED = 0.01, 0
 
@@ -104,12 +104,16 @@ def three_gradients(k, X, Y, a, rows, cols, log_S, n, m, unroll=True, eps=EPS):
 
 
 def main():
+    if DEVICE != "cuda":
+        print("gradient_flow/estimators.py: no CUDA GPU found, running on CPU "
+              "(pure torch throughout -- much slower, same algorithm).")
     rng = torch.Generator(device="cpu").manual_seed(1)
-    X = draw_samples(DATA_DIR / "density_a.png", N, rng, device="cuda").float()
-    Y = draw_samples(DATA_DIR / "density_b.png", N, rng, device="cuda").float()
-    a = torch.full((N,), 1.0 / N, dtype=torch.float32, device="cuda")
+    X = draw_samples(DATA_DIR / "density_a.png", N, rng, device=DEVICE).float()
+    Y = draw_samples(DATA_DIR / "density_b.png", N, rng, device=DEVICE).float()
+    a = torch.full((N,), 1.0 / N, dtype=torch.float32, device=DEVICE)
 
-    rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=SEED, ot1d=_ot_1d_coo_batched_cuda)
+    ot1d = _ot_1d_coo_batched_cuda if DEVICE == "cuda" else _ot_1d_coo_batched
+    rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=SEED, ot1d=ot1d)
     log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
     print(f"support nnz={rows.numel()}  N={N}  L={L}  eps={EPS}")
 
@@ -129,7 +133,8 @@ def main():
         best = ["envelope", "detach", "unrolled"][int(torch.tensor(e).argmin())]
         print(f"{k:>5} {e[0]:>11.3e} {e[1]:>11.3e} {e[2]:>11.3e}   {best:>9}")
         del ge, gd, gu
-        torch.cuda.empty_cache()
+        if DEVICE == "cuda":
+            torch.cuda.empty_cache()
 
     _plot(grid, curves)
 

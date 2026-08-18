@@ -88,7 +88,7 @@ import torch
 from gradient_flow.along_flow import trajectory
 from gradient_flow.config import L, N, N_STEPS
 from gradient_flow.estimators import EPS
-from gradient_flow.run import DATA_DIR, OUT_DIR, draw_samples
+from gradient_flow.run import DATA_DIR, DEVICE, OUT_DIR, draw_samples
 from gradient_flow.sweep_along_flow import VIOL_WARN
 
 EPS_GRID = [0.003, 0.01, 0.03, 0.1]
@@ -107,14 +107,15 @@ def main():
                    help="skip the dense EMD reference W2 (one solve per step)")
     args = p.parse_args()
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("needs a CUDA GPU: the support builder is Triton-only")
+    if DEVICE != "cuda":
+        print("gradient_flow/term_norms.py: no CUDA GPU found, running on CPU "
+              "(pure torch throughout -- much slower, same algorithm).")
 
     n = args.n
     rng = torch.Generator(device="cpu").manual_seed(1)
-    X = draw_samples(DATA_DIR / "density_a.png", n, rng, device="cuda").float()
-    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device="cuda").float()
-    a = torch.full((n,), 1.0 / n, dtype=torch.float32, device="cuda")
+    X = draw_samples(DATA_DIR / "density_a.png", n, rng, device=DEVICE).float()
+    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device=DEVICE).float()
+    a = torch.full((n,), 1.0 / n, dtype=torch.float32, device=DEVICE)
 
     print(f"N={n}  L={L}  steps={args.steps}  inner iters={args.iters}  "
           f"eps grid={args.eps_grid}")
