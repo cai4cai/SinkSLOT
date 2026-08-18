@@ -11,7 +11,7 @@ Package name: sinkslot
 """
 
 from .solver import (
-    sot_directions,
+    get_random_projections,
     sot_plan_coo,
     to_csr,
     sparse_sqeuclidean_cost,
@@ -24,7 +24,7 @@ from .solver import (
 )
 
 __all__ = [
-    "sot_directions",
+    "get_random_projections",
     "sot_plan_coo",
     "to_csr",
     "sparse_sqeuclidean_cost",

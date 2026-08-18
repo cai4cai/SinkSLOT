@@ -32,8 +32,13 @@ except ImportError:
     _HAS_TRITON = False
 
 
-def sot_directions(d: int, L: int, seed: int) -> torch.Tensor:
-    """Unit directions: standard-normal draws, L2-normalised.
+def get_random_projections(d: int, L: int, seed: int) -> torch.Tensor:
+    """L random directions, drawn uniformly from the unit sphere in R^d.
+
+    Standard-normal draws, L2-normalised -- the standard way to sample
+    uniformly on the sphere. Same role as POT's own
+    `ot.sliced.get_random_projections`, which this is named to match; see
+    https://pythonot.github.io/gen_modules/ot.sliced.html#ot.sliced.get_random_projections.
 
     Same construction as vendor/sinkhorn_methods.py's build_sot_plan, but on
     torch's own RNG rather than numpy's, so the two no longer agree bit-for-bit
@@ -186,7 +191,7 @@ def sot_plan_coo(
     """
     n, d = X.shape
     m = Y.shape[0]
-    thetas = torch.as_tensor(sot_directions(d, L, seed), dtype=X.dtype, device=X.device)
+    thetas = torch.as_tensor(get_random_projections(d, L, seed), dtype=X.dtype, device=X.device)
     key_dtype = torch.int32 if n * m < 2**31 else torch.int64
 
     def coalesce(flat, vals):
