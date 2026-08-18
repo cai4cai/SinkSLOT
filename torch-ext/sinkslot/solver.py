@@ -285,7 +285,7 @@ if _HAS_TRITON:
         tl.store(OUT + k, acc, mask=mask)
 
 
-def sparse_sqeuclidean_cost(x, y, rows, cols, block: int = 1024):
+def sparse_sqeuclidean_cost(x, y, rows, cols, block: int = 1024, use_triton=None):
     """Squared-euclidean cost on the sparse support.
 
     Fused Triton kernel when `x` is CUDA and Triton is installed (the
@@ -296,6 +296,14 @@ def sparse_sqeuclidean_cost(x, y, rows, cols, block: int = 1024):
     function (and everything built on it) also works without a CUDA GPU or
     without Triton installed at all, per #10.
 
+    `use_triton`: None (default) auto-detects from `_HAS_TRITON and x.is_cuda`.
+    Pass explicitly to override -- e.g. `False` to force the torch fallback on
+    a CUDA tensor even though Triton is available, which `sinkslot_solve`'s own
+    `backend="torch"` needs (auto-detection alone can't express "torch path,
+    but on GPU": that combination is CUDA-true, Triton-available-true, and
+    auto-detection always picks Triton there). `True` raises if Triton isn't
+    actually usable, rather than silently falling back.
+
     Fused-path notes: materialising the (nnz, d) intermediates costs 832 MB each
     at nnz=26M, d=8, against 104 MB of output. Measured 9-10x faster fused across
     n=16k..65k, and it is the difference between the cost stage being 27.8 ms and
@@ -303,7 +311,11 @@ def sparse_sqeuclidean_cost(x, y, rows, cols, block: int = 1024):
     (fp32 reassociation of the d-term sum); the resulting shift in the dual
     objective is below 2e-7.
     """
-    if not (_HAS_TRITON and x.is_cuda):
+    if use_triton is None:
+        use_triton = _HAS_TRITON and x.is_cuda
+    elif use_triton and not _HAS_TRITON:
+        raise ValueError("use_triton=True but Triton isn't importable")
+    if not use_triton:
         return (x[rows] - y[cols]).square().sum(1)
     nnz, d = rows.numel(), x.shape[1]
     out = torch.empty(nnz, device=x.device, dtype=torch.float32)
@@ -591,7 +603,8 @@ def _run_v5_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=None, eps=N
     return phi, psi, it, converged, viol
 
 
-def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None):
+def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None,
+                    backend="auto"):
     """SinkSLOT end to end: build the sliced plan, then solve -- on any device.
 
     Dispatches on X's device and whether Triton is importable: the fused Triton
@@ -604,15 +617,37 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None):
     not for reproducing the paper's own throughput numbers, which are all
     measured on the Triton path.
 
+    `backend`: "auto" (default) picks Triton when it's importable and X is
+    CUDA, torch otherwise -- covers the CPU and the "no Triton installed"
+    cases. "triton" forces it, raising if unavailable. "torch" forces the
+    pure-torch cost/solve path regardless of device -- the only way to run
+    that path ON a CUDA tensor, since "auto" always prefers Triton there when
+    it's available; useful for testing the torch path's CUDA numerics
+    specifically, or as a workaround if Triton itself is ever the problem.
+    The sliced-plan builder (`_ot_1d_coo_batched[_cuda]`) is chosen by device
+    either way, independent of `backend`: it's plain torch regardless, and the
+    CUDA-layout variant is still the better choice on a CUDA tensor even when
+    the cost/solve stage is forced to torch.
+
     Returns (phi, psi, rows, cols, S, iters_run, converged, final_viol): phi,
     psi absorbed (phi=f/eps, psi=g/eps); rows/cols/S the sliced support, needed
     by callers building the transport plan or its gradient.
     """
-    use_triton = _HAS_TRITON and X.is_cuda
+    if backend not in ("auto", "triton", "torch"):
+        raise ValueError(f"backend must be 'auto', 'triton', or 'torch', got {backend!r}")
+    if backend == "triton":
+        if not (_HAS_TRITON and X.is_cuda):
+            raise ValueError("backend='triton' requires Triton installed and X on CUDA")
+        use_triton = True
+    elif backend == "torch":
+        use_triton = False
+    else:
+        use_triton = _HAS_TRITON and X.is_cuda
+
     n, m = X.shape[0], Y.shape[0]
-    ot1d = _ot_1d_coo_batched_cuda if use_triton else _ot_1d_coo_batched
+    ot1d = _ot_1d_coo_batched_cuda if X.is_cuda else _ot_1d_coo_batched
     rows, cols, S = sot_plan_coo(X, Y, a, b, L=L, seed=seed, chunk=chunk, ot1d=ot1d)
-    cost = sparse_sqeuclidean_cost(X, Y, rows, cols)
+    cost = sparse_sqeuclidean_cost(X, Y, rows, cols, use_triton=use_triton)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()
 
