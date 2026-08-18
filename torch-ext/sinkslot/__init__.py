@@ -10,6 +10,15 @@ benchmark-only code.
 Package name: sinkslot
 """
 
+# _run_v5 and _run_v5_torch are deliberately not exported here (fixes #14):
+# they're the underscore-prefixed internal solve loops sinkslot_solve already
+# wraps and dispatches between, not something a caller should reach for
+# directly. Re-exporting an internal name at the package's top level was the
+# actual bug -- `sinkslot.solver._run_v5` still works for anyone who genuinely
+# needs it (the benchmark harness and gradient_flow/stopping.py do, since they
+# need the raw CSR/CSC-based loop, not the whole build-plan-then-solve
+# pipeline sinkslot_solve wraps it in), it just isn't advertised as the public
+# API.
 from .solver import (
     sot_directions,
     sot_plan_coo,
@@ -20,7 +29,6 @@ from .solver import (
     sinkslot_solve,
     slot_grad,
     plan_barycentric_sparse,
-    _run_v5,
 )
 
 __all__ = [
@@ -33,5 +41,4 @@ __all__ = [
     "sinkslot_solve",
     "slot_grad",
     "plan_barycentric_sparse",
-    "_run_v5",
 ]
