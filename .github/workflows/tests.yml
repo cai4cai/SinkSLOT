@@ -1,0 +1,42 @@
+name: tests
+
+# Minimal CI (#11): confirm SinkSLOT installs and runs correctly on hosts
+# that don't look like the paper's own H100 machine -- no CUDA, no Triton
+# (not even installable on macOS), a plain `pip install`. That's exactly
+# the pure-torch fallback #10 added, so this is what actually exercises it.
+#
+# Deliberately out of scope: torch-ext/flash_sinkhorn/testing/. Importing
+# flash_sinkhorn at all currently requires Triton (its own __init__.py chain
+# imports it unconditionally), and two of its test files hit a separate,
+# already-known geomloss version-drift issue -- neither is a "does this PR's
+# code run on a plain host" question, and both would make this workflow flaky
+# for reasons unrelated to what it's meant to check.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.9", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install (no extras -- this is the point)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest
+
+      - name: Run the portable test suite
+        run: pytest torch-ext/sinkslot/testing/ -v
