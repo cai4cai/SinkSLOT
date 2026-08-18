@@ -7,7 +7,7 @@ All three differentiate <P, C> wrt X. They differ only in what they do with the
 solve:
 
   envelope : P treated as optimal, grad = 2*diag(a)*(X - T(X)), normalised by the
-             plan's achieved row mass (this is gradient_flow/solver.slot_grad)
+             plan's achieved row mass (this is sinkslot.solver.slot_grad)
   detach   : P detached, autograd through C only -- the same envelope gradient
              WITHOUT that normalisation (verified: envelope == (a/r) * detach)
   unrolled : no detach; autograd runs back through all k Sinkhorn iterations, so
