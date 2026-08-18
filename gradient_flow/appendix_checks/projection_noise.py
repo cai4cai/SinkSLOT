@@ -1,6 +1,6 @@
 """Why the envelope-vs-complete curve is erratic at small L.
 
-    python -m gradient_flow.projection_noise
+    python -m gradient_flow.appendix_checks.projection_noise
 
 In sweep_along_flow.py's middle panel the cosine curve wiggles visibly at L=10
 and L=30 -- non-monotone step to step, with bumps of a few times 1e-2 -- while
