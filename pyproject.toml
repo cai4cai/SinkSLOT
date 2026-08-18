@@ -53,6 +53,7 @@ dev = [
   "pot",
   "rich",
   "textual",
+  "torchsparsegradutils",
 ]
 
 [tool.setuptools]
