@@ -38,6 +38,13 @@ def sot_directions(d: int, L: int, seed: int) -> torch.Tensor:
     Same construction as vendor/sinkhorn_methods.py's build_sot_plan, but on
     torch's own RNG rather than numpy's, so the two no longer agree bit-for-bit
     on a shared seed (different generator, same distribution).
+
+    Dtype: there's no tensor input to take a dtype from (d, L, seed are plain
+    Python ints), so this always returns float64, on purpose, for an accurate
+    normalisation regardless of what dtype the caller works in. `sot_plan_coo`
+    (the only caller) immediately casts the result down to `X`'s dtype -- if
+    you add a new caller, do the same, or you'll end up carrying float64
+    directions through an otherwise float32 pipeline.
     """
     gen = torch.Generator(device="cpu").manual_seed(seed)
     thetas = torch.randn((L, d), generator=gen, dtype=torch.float64)
@@ -190,6 +197,18 @@ def sot_plan_coo(
     `ot1d` selects the per-slice 1-D OT builder: the naive `_ot_1d_coo_batched`
     (the SinkSLOT baseline) or `_ot_1d_coo_batched_cuda` (the SinkSLOT-CUDA fp64
     path). Only the plan differs; the coalesce is identical.
+
+    Dtype: with `ot1d=_ot_1d_coo_batched_cuda`, the returned `vals` are always
+    float32, whatever dtype `X`/`Y`/`a`/`b` are (see that function's own
+    docstring) -- passing float64 in does not get you a float64 plan. With the
+    naive `_ot_1d_coo_batched` there's no such ceiling; the output follows the
+    input dtype. Either way, there is no way to get a float64-precision plan
+    on a CUDA tensor: `gradient_flow/finite_diff.py`'s `build_support`, which
+    needs float64 for everything downstream, doesn't try -- it explicitly
+    passes `.float()` inputs to whichever builder the device selects, accepts
+    the float32-quality plan either way, and only upcasts the *returned*
+    tensor to float64 afterward so the rest of its pipeline has a consistent
+    dtype. That's a container cast, not recovered precision.
     """
     n, d = X.shape
     m = Y.shape[0]
