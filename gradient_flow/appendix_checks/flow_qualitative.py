@@ -1,6 +1,6 @@
 """Does the envelope-vs-complete gradient gap change the flow you actually see?
 
-    python -m gradient_flow.flow_qualitative
+    python -m gradient_flow.appendix_checks.flow_qualitative
 
 along_flow.py and sweep_along_flow.py establish that the two gradients diverge
 to a cosine of ~0.61 by step 50. That is a statement about directions in R^(Nx2);
