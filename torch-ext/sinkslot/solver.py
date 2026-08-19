@@ -810,7 +810,7 @@ def slot_grad(X, Y, a, eps, L, seed, n_iters, backend="auto"):
 
 
 def slot_hvp(X, Y, a, eps, L, seed, n_iters, v, tau2=3e-7, solve_tol=1e-11,
-             max_cg_iter=8000):
+             max_cg_iter=8000, backend="auto"):
     """Hessian-vector product H(X) @ v of grad_X SLOT_eps, by implicit
     differentiation of the entropic-OT fixed point on the sliced-OT support --
     the second-order counterpart to `slot_grad`'s envelope-theorem gradient.
@@ -868,6 +868,29 @@ def slot_hvp(X, Y, a, eps, L, seed, n_iters, v, tau2=3e-7, solve_tol=1e-11,
     `a` is used as both marginals, matching slot_grad's own
     `sot_plan_coo(X, Y, a, a, ...)` call (X, Y assumed equal-size, uniform-a,
     as in every caller in this repo).
+
+    `backend`: "auto" (default) / "triton" / "torch", same meaning and same
+    dispatch rule as `sinkslot_solve`'s -- picks Triton (`_run_v5`) when it's
+    importable and X is CUDA, `_run_v5_torch` otherwise; "triton" forces it
+    (raising if unavailable), "torch" forces the pure-torch solve regardless
+    of device. Unlike `sinkslot_solve`, the sliced-support builder here stays
+    `_ot_1d_coo_batched_cuda` for every backend, not device-switched to the
+    naive builder on CPU: it's plain torch underneath (no Triton, no `.cuda()`
+    calls), so it runs anywhere, and its internal fp64 cumsum is exactly the
+    extra precision the existing validation below relies on -- switching to
+    the naive builder would risk a genuinely different support (see its own
+    docstring), not just different rounding. So `backend="torch"` changes
+    only the solve stage's numerics, not the support.
+
+    Accuracy caveat: the ~2% figure above and the `tau2=3e-7` default were
+    both obtained through the Triton path (`_run_v5`) on two small synthetic
+    problems (testing/test_hvp.py's `_problem()`, n<=300, d=3) -- not on any
+    of the paper's five real datasets at their actual n=10000 scale, and not
+    on `_run_v5_torch` at all. `backend="torch"` is offered for portability
+    (#10) the same way `sinkslot_solve`'s is, not because the 2%/3e-7 pairing
+    has been re-confirmed on that path; matrix conditioning depends on the
+    actual data (via `a`, `T_vals`), so a real distribution shift (dataset or
+    scale) could call for a different `tau2` independent of backend too.
     """
     try:
         import torchsparsegradutils as tsgu
@@ -878,18 +901,35 @@ def slot_hvp(X, Y, a, eps, L, seed, n_iters, v, tau2=3e-7, solve_tol=1e-11,
         ) from e
     import functools
 
+    if backend not in ("auto", "triton", "torch"):
+        raise ValueError(f"backend must be 'auto', 'triton', or 'torch', got {backend!r}")
+    if backend == "triton":
+        if not (_HAS_TRITON and X.is_cuda):
+            raise ValueError("backend='triton' requires Triton installed and X on CUDA")
+        use_triton = True
+    elif backend == "torch":
+        use_triton = False
+    else:
+        use_triton = _HAS_TRITON and X.is_cuda
+
     n, d = X.shape
     m = Y.shape[0]
     rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=seed, ot1d=_ot_1d_coo_batched_cuda)
-    cost = sparse_sqeuclidean_cost(X, Y, rows, cols)
+    cost = sparse_sqeuclidean_cost(
+        X, Y, rows, cols,
+        use_triton=(backend == "triton") if backend != "auto" else None,
+    )
     log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
     lam = log_S - cost / eps
-    r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n, narrow_key=True)
-    c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m, narrow_key=True)
-
     log_a = a.log()
-    phi, psi, _, _, _ = _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
-                                 log_a, log_a, n, m, n_iters)
+
+    if use_triton:
+        r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n, narrow_key=True)
+        c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m, narrow_key=True)
+        phi, psi, _, _, _ = _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
+                                     log_a, log_a, n, m, n_iters)
+    else:
+        phi, psi, _, _, _ = _run_v5_torch(rows, cols, lam, log_a, log_a, n, m, n_iters)
     T_vals = (phi[rows] + psi[cols] + lam).exp()
 
     # Explicit part: d(lam_ij)/dt for this v, only X depends on t.
