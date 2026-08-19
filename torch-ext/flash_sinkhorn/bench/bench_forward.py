@@ -1953,11 +1953,11 @@ def bench_sinkslot(
     matmul, so TF32 does not apply). Reference is the converged gamma=0 optimum on
     the same support. See torch-ext/sinkslot/solver.py.
 
-    seed: data-generation seed only (x, y, a, b). sot_coo's own projection
+    seed: data-generation seed only (x, y, a, b). sot_plan_coo's own projection
     RNG stays at its independent default seed=0, unaffected by this.
     """
     from sinkslot.solver import (
-        sot_coo, to_csr,
+        sot_plan_coo, to_csr,
     )
     from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
     _set_tf32(allow_tf32)
@@ -1972,7 +1972,7 @@ def bench_sinkslot(
 
     try:
         # Setup: sliced support + CSR/CSC layouts, timed once (warmed).
-        rows, cols, S = sot_coo(x, y, a, b, L=slices, seed=0)
+        rows, cols, S = sot_plan_coo(x, y, a, b, L=slices, seed=0)
         cost = (x[rows] - y[cols]).square().sum(1)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
         lam = log_S - cost / eps
@@ -1980,7 +1980,7 @@ def bench_sinkslot(
         c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m)
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        rows, cols, S = sot_coo(x, y, a, b, L=slices, seed=0)
+        rows, cols, S = sot_plan_coo(x, y, a, b, L=slices, seed=0)
         cost = (x[rows] - y[cols]).square().sum(1)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
         lam = log_S - cost / eps
@@ -2065,11 +2065,11 @@ def bench_sinkslotcuda(
     cache. Its RMAE is therefore measured against its own plan's optimum, exactly
     as SinkSLOT is against the baseline plan. See sinkslot/solver.py.
 
-    seed: data-generation seed only (x, y, a, b). sot_coo's own projection
+    seed: data-generation seed only (x, y, a, b). sot_plan_coo's own projection
     RNG stays at its independent default seed=0, unaffected by this.
     """
     from sinkslot.solver import (
-        sot_coo, to_csr, sparse_sqeuclidean_cost, _ot_1d_coo_batched_cuda,
+        sot_plan_coo, to_csr, sparse_sqeuclidean_cost, _ot_1d_coo_batched_cuda,
     )
     from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
     _set_tf32(allow_tf32)
@@ -2083,7 +2083,7 @@ def bench_sinkslotcuda(
     log_a, log_b = a.log(), b.log()
 
     def _setup():
-        rows, cols, S = sot_coo(x, y, a, b, L=slices, seed=0, ot1d=_ot_1d_coo_batched_cuda)
+        rows, cols, S = sot_plan_coo(x, y, a, b, L=slices, seed=0, ot1d=_ot_1d_coo_batched_cuda)
         cost = sparse_sqeuclidean_cost(x, y, rows, cols)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
         lam = log_S - cost / eps

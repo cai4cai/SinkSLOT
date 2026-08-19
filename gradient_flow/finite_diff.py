@@ -25,7 +25,7 @@ rank orders are free to move. Along a random unit direction v,
                base point reused at X +- h v -- a control that must match the
                analytic value, since it is the same function the analytic
                gradient differentiates
-  FD rebuilt   central difference with sot_coo re-run at X +- h v, so any
+  FD rebuilt   central difference with sot_plan_coo re-run at X +- h v, so any
                rank flip between the two evaluations enters the difference
 
 SLOT_eps is evaluated from the converged potentials as eps*(<phi,a> + <psi,b>),
@@ -72,7 +72,7 @@ import argparse
 
 import torch
 
-from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_coo
+from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo
 from gradient_flow.config import L, LR, N, N_STEPS
 from gradient_flow.estimators import EPS, SEED, seg_lse
 from gradient_flow.run import DATA_DIR, DEVICE, draw_samples
@@ -80,7 +80,7 @@ from gradient_flow.run import DATA_DIR, DEVICE, draw_samples
 
 def build_support(X, Y, a, n_proj, seed=SEED):
     ot1d = _ot_1d_coo_batched_cuda if X.is_cuda else _ot_1d_coo_batched
-    rows, cols, S = sot_coo(X.float(), Y.float(), a.float(), a.float(),
+    rows, cols, S = sot_plan_coo(X.float(), Y.float(), a.float(), a.float(),
                                  L=n_proj, seed=seed, ot1d=ot1d)
     return rows, cols, S.double().clamp_min(1e-300).log()
 

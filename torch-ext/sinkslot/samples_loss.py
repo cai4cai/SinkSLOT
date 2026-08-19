@@ -80,7 +80,7 @@ class SamplesLoss(torch.nn.Module):
 
     `eps`: entropic regularisation (SinkSLOT's own `eps`, not GeomLoss's
     `blur` -- there is no `blur**p = eps` conversion here; pass `eps`
-    directly). `L`: number of slicing directions. `seed`: `sot_coo`'s
+    directly). `L`: number of slicing directions. `seed`: `sot_plan_coo`'s
     projection RNG seed. `n_iters`: fixed Sinkhorn iteration count (no
     early-stopping `stop` config exposed here; use `sinkslot_solve` directly
     for that). `backend`: "auto" / "triton" / "torch", see `sinkslot_solve`.

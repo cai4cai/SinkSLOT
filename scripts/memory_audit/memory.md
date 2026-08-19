@@ -94,7 +94,7 @@ The 12 bytes/nnz is not reducible by engineering: storing values once plus a `pe
 
 ## Open levers on the CUDA path
 
-The build transient is 10–14x the persistent state — `sot_coo` materialises all L(N+M) raw entries before coalescing. `chunk` (already a parameter, defaulted to one-shot) caps it. Measured on the full setup path, prototyped and then reverted since the campaign ran without it:
+The build transient is 10–14x the persistent state — `sot_plan_coo` materialises all L(N+M) raw entries before coalescing. `chunk` (already a parameter, defaulted to one-shot) caps it. Measured on the full setup path, prototyped and then reverted since the campaign ran without it:
 
 ```
    L    chunk   narrow_idx   setup ms   peak MB
