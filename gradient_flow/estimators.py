@@ -7,7 +7,7 @@ All three differentiate <P, C> wrt X. They differ only in what they do with the
 solve:
 
   envelope : P treated as optimal, grad = 2*diag(a)*(X - T(X)), normalised by the
-             plan's achieved row mass (this is sinkslot.solver.slot_grad)
+             plan's achieved row mass (this is sinkslot.gradient.slot_grad)
   detach   : P detached, autograd through C only -- the same envelope gradient
              WITHOUT that normalisation (verified: envelope == (a/r) * detach)
   unrolled : no detach; autograd runs back through all k Sinkhorn iterations, so
@@ -59,7 +59,7 @@ def seg_lse(vals, idx, size):
 
 
 def solve(lam, rows, cols, log_a, n, m, k):
-    """k plain-torch Sinkhorn iterations, absorbed potentials, matching _run_v5."""
+    """k plain-torch Sinkhorn iterations, absorbed potentials, matching sinkhorn_alternating_triton."""
     phi = torch.zeros(n, device=lam.device, dtype=lam.dtype)
     psi = torch.zeros(m, device=lam.device, dtype=lam.dtype)
     for _ in range(k):

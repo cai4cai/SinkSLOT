@@ -2,7 +2,7 @@
 
     python -m gradient_flow.appendix_checks.stopping
 
-`sinkslot.solver.slot_grad` differentiates SLOT_eps by the envelope theorem,
+`sinkslot.gradient.slot_grad` differentiates SLOT_eps by the envelope theorem,
 
     grad_X SLOT_eps(X, Y) = 2 * diag(a) * (X - T_eps(X)),
 
@@ -44,13 +44,15 @@ from sinkslot.solver import (  # noqa: E402
     _HAS_TRITON,
     _ot_1d_coo_batched,
     _ot_1d_coo_batched_cuda,
-    _run_v5,
-    _run_v5_torch,
-    plan_barycentric_sparse,
     sot_plan_coo,
     sparse_sqeuclidean_cost,
     to_csr,
 )
+from sinkslot.sinkhorn_solvers import (  # noqa: E402
+    sinkhorn_alternating_triton,
+    sinkhorn_alternating_torch,
+)
+from sinkslot.gradient import plan_barycentric_sparse  # noqa: E402
 from gradient_flow.config import DATA_SCALE, L, N  # noqa: E402
 from gradient_flow.run import DATA_DIR, DEVICE, OUT_DIR, draw_samples  # noqa: E402
 
@@ -70,8 +72,8 @@ def _build_support(X, Y, a, eps, slices, seed):
     iteration count below solves the *same* problem -- otherwise the curves
     would confound solver progress with a re-randomised support.
 
-    CSR/CSC are only needed for the fused Triton loop (_run_v5); on the
-    pure-torch path (_run_v5_torch) they're skipped entirely -- it operates
+    CSR/CSC are only needed for the fused Triton loop (sinkhorn_alternating_triton); on the
+    pure-torch path (sinkhorn_alternating_torch) they're skipped entirely -- it operates
     on the COO (rows, cols, lam) directly, so there's nothing to hoist there.
     """
     n, m = X.shape[0], Y.shape[0]
@@ -90,7 +92,7 @@ def _build_support(X, Y, a, eps, slices, seed):
 def _grad_at(n_iters, X, Y, a, rows, cols, lam, csr, csc):
     """(gradient, max marginal violation) after exactly `n_iters` inner iterations.
 
-    `_run_v5`/`_run_v5_torch` both initialise the potentials to zero, so
+    `sinkhorn_alternating_triton`/`sinkhorn_alternating_torch` both initialise the potentials to zero, so
     running with n_iters=k reproduces the state the solver would be in after
     k iterations -- no need to checkpoint a single long run. Dispatches on
     whether `_build_support` built CSR/CSC (Triton available and X on CUDA)
@@ -101,10 +103,10 @@ def _grad_at(n_iters, X, Y, a, rows, cols, lam, csr, csc):
     if csr is not None:
         r_ptr, r_idx, r_lam, _ = csr
         c_ptr, c_idx, c_lam, _ = csc
-        phi, psi, _, _, _ = _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
+        phi, psi, _, _, _ = sinkhorn_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
                                     log_a, log_a, n, m, n_iters)
     else:
-        phi, psi, _, _, _ = _run_v5_torch(rows, cols, lam, log_a, log_a, n, m, n_iters)
+        phi, psi, _, _, _ = sinkhorn_alternating_torch(rows, cols, lam, log_a, log_a, n, m, n_iters)
 
     T_vals = (phi[rows] + psi[cols] + lam).exp()
     # The solver's own stopping statistic: after the column half-step the column

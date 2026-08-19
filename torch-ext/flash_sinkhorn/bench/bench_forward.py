@@ -1957,8 +1957,9 @@ def bench_sinkslot(
     RNG stays at its independent default seed=0, unaffected by this.
     """
     from sinkslot.solver import (
-        sot_plan_coo, to_csr, _run_v5,
+        sot_plan_coo, to_csr,
     )
+    from sinkslot.sinkhorn_solvers import sinkhorn_alternating_triton
     _set_tf32(allow_tf32)
 
     torch.manual_seed(seed)
@@ -1995,9 +1996,9 @@ def bench_sinkslot(
     _stop = stop or StopCfg.fixed()
 
     def run():
-        _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
+        sinkhorn_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
 
-    phi, psi, iters_run, converged, final_viol = _run_v5(
+    phi, psi, iters_run, converged, final_viol = sinkhorn_alternating_triton(
         r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
     cost_gap_pct = None
     bary = None
@@ -2068,8 +2069,9 @@ def bench_sinkslotcuda(
     RNG stays at its independent default seed=0, unaffected by this.
     """
     from sinkslot.solver import (
-        sot_plan_coo, to_csr, sparse_sqeuclidean_cost, _ot_1d_coo_batched_cuda, _run_v5,
+        sot_plan_coo, to_csr, sparse_sqeuclidean_cost, _ot_1d_coo_batched_cuda,
     )
+    from sinkslot.sinkhorn_solvers import sinkhorn_alternating_triton
     _set_tf32(allow_tf32)
 
     torch.manual_seed(seed)
@@ -2106,9 +2108,9 @@ def bench_sinkslotcuda(
     _stop = stop or StopCfg.fixed()
 
     def run():
-        _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
+        sinkhorn_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
 
-    phi, psi, iters_run, converged, final_viol = _run_v5(
+    phi, psi, iters_run, converged, final_viol = sinkhorn_alternating_triton(
         r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
     cost_gap_pct = None
     bary = None

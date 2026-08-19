@@ -22,11 +22,11 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUD
 from sinkslot.solver import (  # noqa: E402
     _ot_1d_coo_batched,
     _ot_1d_coo_batched_cuda,
-    _run_v5,
     sot_plan_coo,
     sparse_sqeuclidean_cost,
     to_csr,
 )
+from sinkslot.sinkhorn_solvers import sinkhorn_alternating_triton  # noqa: E402
 
 
 def _problem(n=512, m=384, d=4, seed=0, device="cuda"):
@@ -129,7 +129,7 @@ def test_naive_and_cuda_builders_agree_on_the_transport():
     assert torch.allclose(P0, P1, atol=1e-5), f"max |dP| = {(P0 - P1).abs().max():.3e}"
 
 
-def test_run_v5_matches_plain_torch_segmented_lse():
+def test_sinkhorn_alternating_triton_matches_plain_torch_segmented_lse():
     """The fused Triton loop against a straightforward scatter-based Sinkhorn."""
     n, m, eps, L, iters = 512, 384, 0.05, 32, 40
     x, y, a, b = _problem(n, m, d=4)
@@ -141,7 +141,7 @@ def test_run_v5_matches_plain_torch_segmented_lse():
 
     r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n)
     c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m)
-    phi, psi, *_ = _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
+    phi, psi, *_ = sinkhorn_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
                            log_a, log_b, n, m, iters)
 
     def seg_lse(vals, idx, size):
@@ -150,7 +150,7 @@ def test_run_v5_matches_plain_torch_segmented_lse():
         acc = vals.new_zeros(size).index_add_(0, idx, (vals - mx[idx]).exp())
         return mx + acc.clamp_min(torch.finfo(vals.dtype).tiny).log()
 
-    # Same absorbed convention as _run_v5: phi = f/eps, psi = g/eps.
+    # Same absorbed convention as sinkhorn_alternating_triton: phi = f/eps, psi = g/eps.
     p = torch.zeros(n, device=x.device)
     q = torch.zeros(m, device=x.device)
     for _ in range(iters):

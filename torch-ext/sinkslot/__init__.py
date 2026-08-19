@@ -7,28 +7,48 @@ than nested inside flash_sinkhorn/bench/ because it's a real solver used
 outside benchmarking too (see slot_grad, used by gradient_flow/), not
 benchmark-only code.
 
+Layout mirrors flash_sinkhorn's own {sinkhorn_solvers,implicit_grad,hvp}.py
+split (#14, #30): solver.py holds the sliced-OT support construction with no
+FlashSinkhorn equivalent; sinkhorn_solvers.py the Sinkhorn iteration loops and
+device-agnostic entry point; gradient.py the envelope-theorem gradient
+(deliberately not named implicit_grad.py -- see that file's own docstring for
+why); hvp.py the Hessian-vector product.
+
 Package name: sinkslot
 """
 
-# _run_v5 and _run_v5_torch are deliberately not exported here (fixes #14):
-# they're the underscore-prefixed internal solve loops sinkslot_solve already
-# wraps and dispatches between, not something a caller should reach for
-# directly. Re-exporting an internal name at the package's top level was the
-# actual bug -- `sinkslot.solver._run_v5` still works for anyone who genuinely
-# needs it (the benchmark harness and gradient_flow/stopping.py do, since they
-# need the raw CSR/CSC-based loop, not the whole build-plan-then-solve
-# pipeline sinkslot_solve wraps it in), it just isn't advertised as the public
-# API.
+# sinkhorn_alternating_triton/_torch are deliberately not exported here
+# (fixes #14): they're the low-level solve loops sinkslot_solve already wraps
+# and dispatches between, not something a caller should reach for directly.
+# Re-exporting an internal name at the package's top level was the actual bug
+# -- `sinkslot.sinkhorn_solvers.sinkhorn_alternating_triton` still works for
+# anyone who genuinely needs it (the benchmark harness and
+# gradient_flow/stopping.py do, since they need the raw CSR/CSC-based loop,
+# not the whole build-plan-then-solve pipeline sinkslot_solve wraps it in),
+# it just isn't advertised as the public API. Matches flash_sinkhorn's own
+# convention: its sinkhorn_flashstyle_alternating/_symmetric aren't
+# underscore-prefixed either, but aren't re-exported from
+# flash_sinkhorn/__init__.py -- a descriptive name plus staying out of
+# __init__.py's import list is how both packages mark "internal, but not
+# hidden behind Python's underscore convention."
 from .solver import (
     sot_directions,
     sot_plan_coo,
     to_csr,
     sparse_sqeuclidean_cost,
+)
+from .sinkhorn_solvers import (
     seg_lse_online,
     launch_cfg,
     sinkslot_solve,
+)
+from .gradient import (
     slot_grad,
     plan_barycentric_sparse,
+)
+from .hvp import (
+    hvp_x_sqeuclid,
+    hvp_x_sqeuclid_from_potentials,
 )
 
 __all__ = [
@@ -41,4 +61,6 @@ __all__ = [
     "sinkslot_solve",
     "slot_grad",
     "plan_barycentric_sparse",
+    "hvp_x_sqeuclid",
+    "hvp_x_sqeuclid_from_potentials",
 ]
