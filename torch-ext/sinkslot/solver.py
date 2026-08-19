@@ -432,25 +432,38 @@ def seg_lse_online(indptr, colidx, lam, phi, psi, n, block=None, num_warps=None,
 # --------------------------------------------------------------------------
 
 
-def _run_v5_loop(half_step_row, half_step_col, half_step_row_alt,
-                  log_a, log_b, n, m, n_iters, stop=None, eps=None):
-    """Alternating-half-step Sinkhorn loop shared by `_run_v5` (Triton) and
-    `_run_v5_torch` (pure torch) -- same four `stop.mode` semantics either way;
-    the two differ only in how one half-step is actually computed, which they
-    supply as closures rather than duplicating this dispatch:
+_STOP_MODES = ("fixed", "marginal", "potential", "potential_linf")
 
-    `half_step_row(psi) -> phi`, `half_step_col(phi) -> psi`: one alternating
-    half-step each, over whatever support/backend the caller closed over.
-    `half_step_row_alt(psi) -> phi_next`: the SAME computation as
-    `half_step_row`, kept separate so a backend that reuses an output buffer
-    (the Triton path's `out=`) writes phi_next into a buffer distinct from phi
-    -- collapsing the two into one closure would silently alias them and break
-    the phi-vs-phi_next comparison marginal/potential mode needs. The torch
-    backend has no such buffer to alias and passes `half_step_row` for both.
+
+def _resolve_stop_mode(stop):
+    """Shared by `_run_v5` and `_run_v5_torch`: resolve `stop.mode` (or "fixed"
+    if `stop` is None) and validate it against `_STOP_MODES` upfront, so the
+    four valid modes stay one source of truth instead of two independently
+    -maintained checks. They drifted out of sync once already -- `_run_v5_torch`
+    validated from the start, `_run_v5` didn't, so a typo'd mode used to behave
+    differently depending on which backend happened to run it (fixed alongside
+    this helper, not by it: the old inline check ran only after the "fixed"
+    and "potential_linf" branches had already been ruled out, but for an
+    invalid mode neither of those branches matches anyway, so validating here
+    instead, before any branch runs, raises in the exact same cases as before).
+    """
+    mode = getattr(stop, "mode", "fixed") if stop is not None else "fixed"
+    if mode not in _STOP_MODES:
+        raise ValueError(
+            f"unknown stop.mode {mode!r}; expected one of "
+            f"'fixed', 'marginal', 'potential', 'potential_linf'"
+        )
+    return mode
+
+
+def _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
+            n_iters, stop=None, eps=None):
+    """v5: alternating fused half-steps over prebuilt CSR/CSC.
 
     Potentials are absorbed (phi = f/eps, psi = g/eps): lam already carries
-    log P^SOT - C/eps, so a row half-step with base=log_a returns log_a - LSE
-    directly, which is the next phi.
+    log P^SOT - C/eps, so seg_lse_online with base=log_a returns log_a - LSE
+    directly, which is the next phi. The excluded potential is zeroed on its own
+    axis (z_n, z_m).
 
     Returns (phi, psi, iters_run, converged, final_viol). With `stop` None or
     stop.mode == "fixed" it runs exactly n_iters (converged/final_viol None).
@@ -473,13 +486,17 @@ def _run_v5_loop(half_step_row, half_step_col, half_step_row_alt,
     (required in this mode) so stop.tol compares on the same physical scale as
     FlashSinkhorn's and SROT's unabsorbed f, g.
     """
+    r_blk, r_w = launch_cfg(r_idx.numel(), n)
+    c_blk, c_w = launch_cfg(c_idx.numel(), m)
     phi, psi = torch.zeros_like(log_a), torch.zeros_like(log_b)
-    mode = getattr(stop, "mode", "fixed") if stop is not None else "fixed"
+    z_n, z_m = torch.zeros_like(log_a), torch.zeros_like(log_b)
+
+    mode = _resolve_stop_mode(stop)
 
     if mode == "fixed":
         for _ in range(n_iters):
-            phi = half_step_row(psi)
-            psi = half_step_col(phi)
+            seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi)
+            seg_lse_online(c_ptr, c_idx, c_lam, z_m, phi, m, c_blk, c_w, base=log_b, out=psi)
         return phi, psi, n_iters, None, None
 
     if mode == "potential_linf":
@@ -490,8 +507,8 @@ def _run_v5_loop(half_step_row, half_step_col, half_step_row_alt,
         converged = False
         change = float("inf")
         while it < stop.max_iter:
-            phi = half_step_row(psi)
-            psi = half_step_col(phi)
+            seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi)
+            seg_lse_online(c_ptr, c_idx, c_lam, z_m, phi, m, c_blk, c_w, base=log_b, out=psi)
             it += 1
             if it % stop.check_every == 0:
                 change = eps * max((phi - prev_phi).abs().max().item(),
@@ -503,19 +520,15 @@ def _run_v5_loop(half_step_row, half_step_col, half_step_row_alt,
                 prev_psi.copy_(psi)
         return phi, psi, it, converged, change
 
-    if mode not in ("marginal", "potential"):
-        raise ValueError(
-            f"unknown stop.mode {mode!r}; expected one of "
-            f"'fixed', 'marginal', 'potential', 'potential_linf'"
-        )
-
+    # mode in {"marginal", "potential"} -- the only two left after _resolve_stop_mode.
     a = log_a.exp()
+    phi_next = torch.empty_like(log_a)
     it = 0
     converged = False
     viol = float("inf")
     while it < stop.max_iter:
-        phi = half_step_row(psi)
-        psi = half_step_col(phi)
+        seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi)
+        seg_lse_online(c_ptr, c_idx, c_lam, z_m, phi, m, c_blk, c_w, base=log_b, out=psi)
         it += 1
         if it % stop.check_every == 0 or it == stop.max_iter:
             # phi_next is NOT a redundant recompute of phi: phi used the psi from
@@ -526,7 +539,7 @@ def _run_v5_loop(half_step_row, half_step_col, half_step_row_alt,
             # (how much phi itself moved), not the row marginal's actual deviation
             # from a. See the docstring above for the r = a*exp(phi - phi_next)
             # identity this relies on.
-            phi_next = half_step_row_alt(psi)
+            seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi_next)
             row_marg = a * (phi - phi_next).exp()          # col marginal is exactly b
             # max (L-infinity), matching SLOT's actual _run_v5 exactly:
             # `if float((a * ((phi - phi_new).exp() - 1.0).abs()).max()) <= threshold`.
@@ -538,39 +551,6 @@ def _run_v5_loop(half_step_row, half_step_col, half_step_row_alt,
                 converged = True
                 break
     return phi, psi, it, converged, viol
-
-
-def _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
-            n_iters, stop=None, eps=None):
-    """v5: alternating fused half-steps over prebuilt CSR/CSC.
-
-    The excluded potential is zeroed on its own axis (z_n, z_m). phi, psi, and
-    phi_next are preallocated once and written in place via `out=` -- one
-    allocator call each for the whole loop instead of one per iteration -- so
-    the three closures below each own a fixed buffer rather than allocating
-    fresh output every half-step. See `_run_v5_loop` for what each `stop.mode`
-    actually does.
-    """
-    r_blk, r_w = launch_cfg(r_idx.numel(), n)
-    c_blk, c_w = launch_cfg(c_idx.numel(), m)
-    phi_buf, psi_buf = torch.zeros_like(log_a), torch.zeros_like(log_b)
-    phi_next_buf = torch.empty_like(log_a)
-    z_n, z_m = torch.zeros_like(log_a), torch.zeros_like(log_b)
-
-    def half_step_row(psi):
-        seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi_buf)
-        return phi_buf
-
-    def half_step_col(phi):
-        seg_lse_online(c_ptr, c_idx, c_lam, z_m, phi, m, c_blk, c_w, base=log_b, out=psi_buf)
-        return psi_buf
-
-    def half_step_row_alt(psi):
-        seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi_next_buf)
-        return phi_next_buf
-
-    return _run_v5_loop(half_step_row, half_step_col, half_step_row_alt,
-                         log_a, log_b, n, m, n_iters, stop, eps)
 
 
 # --------------------------------------------------------------------------
@@ -597,20 +577,62 @@ def _run_v5_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=None, eps=N
     """Pure-torch counterpart to `_run_v5` -- same four `stop.mode` semantics, no
     Triton, no CSR/CSC (operates directly on the COO `sot_plan_coo` returns,
     since `index_add_`/`scatter_reduce_` don't need sorted input the way the
-    Triton kernel's one-program-per-row parallelism does). No output buffer to
-    reuse here (each half-step is a fresh torch expression, not a kernel launch
-    worth amortising), so both `half_step_row_alt` and `half_step_row` are the
-    literal same closure. See `_run_v5_loop` for what each `stop.mode` does;
-    cross-checked against `_run_v5` in testing/test_sinkslot_bench.py.
+    Triton kernel's one-program-per-row parallelism does).
+
+    See `_run_v5`'s docstring for what each mode does; the logic here mirrors it
+    exactly, substituting `_seg_lse_coo(lam + other[idx], self_idx, size)` for
+    `seg_lse_online(...)`. Cross-checked against `_run_v5` in
+    testing/test_sinkslot_bench.py.
     """
-    def half_step_row(psi):
-        return log_a - _seg_lse_coo(lam + psi[cols], rows, n)
+    phi, psi = torch.zeros_like(log_a), torch.zeros_like(log_b)
+    mode = _resolve_stop_mode(stop)
 
-    def half_step_col(phi):
-        return log_b - _seg_lse_coo(lam + phi[rows], cols, m)
+    if mode == "fixed":
+        for _ in range(n_iters):
+            phi = log_a - _seg_lse_coo(lam + psi[cols], rows, n)
+            psi = log_b - _seg_lse_coo(lam + phi[rows], cols, m)
+        return phi, psi, n_iters, None, None
 
-    return _run_v5_loop(half_step_row, half_step_col, half_step_row,
-                         log_a, log_b, n, m, n_iters, stop, eps)
+    if mode == "potential_linf":
+        if eps is None:
+            raise ValueError("eps is required for stop.mode == 'potential_linf'")
+        prev_phi, prev_psi = phi.clone(), psi.clone()
+        it = 0
+        converged = False
+        change = float("inf")
+        while it < stop.max_iter:
+            phi = log_a - _seg_lse_coo(lam + psi[cols], rows, n)
+            psi = log_b - _seg_lse_coo(lam + phi[rows], cols, m)
+            it += 1
+            if it % stop.check_every == 0:
+                change = eps * max((phi - prev_phi).abs().max().item(),
+                                    (psi - prev_psi).abs().max().item())
+                if change < stop.tol:
+                    converged = True
+                    break
+                prev_phi.copy_(phi)
+                prev_psi.copy_(psi)
+        return phi, psi, it, converged, change
+
+    # mode in {"marginal", "potential"} -- the only two left after _resolve_stop_mode.
+    a = log_a.exp()
+    it = 0
+    converged = False
+    viol = float("inf")
+    while it < stop.max_iter:
+        phi = log_a - _seg_lse_coo(lam + psi[cols], rows, n)
+        psi = log_b - _seg_lse_coo(lam + phi[rows], cols, m)
+        it += 1
+        if it % stop.check_every == 0 or it == stop.max_iter:
+            # One-step-ahead phi using the psi just updated above -- see _run_v5's
+            # matching comment for why this isn't a redundant recompute.
+            phi_next = log_a - _seg_lse_coo(lam + psi[cols], rows, n)
+            row_marg = a * (phi - phi_next).exp()
+            viol = float((row_marg - a).abs().max())
+            if viol <= stop.tol:
+                converged = True
+                break
+    return phi, psi, it, converged, viol
 
 
 def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None,
