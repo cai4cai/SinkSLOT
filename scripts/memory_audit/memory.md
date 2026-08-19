@@ -1,10 +1,24 @@
 # Memory
 
-The sweep's `gpu_memory_mb` is `total - free` from `cudaMemGetInfo` — whole-device. It bundles four things into one number, and it is read after the run so it misses transients. `scripts/memory.py` splits it and samples the true peak.
+**Status: audit closed.** This started as a worry that the sweep's `gpu_memory_mb`
+column understates FlashSinkhorn (its `TOTAL` here, which includes the transient
+Triton-autotune allocator pool, is far above its `device` reading). It doesn't:
+`gpu_memory_used_mb()` (`torch-ext/flash_sinkhorn/bench/bench_forward.py`) calls
+`empty_cache()` before reading specifically to strip that ~270MB of pooled-but-unused
+autotune scratch, and says so in its own docstring — the sweep's number was always
+meant to be steady-state footprint, not instantaneous peak, and that choice is applied
+identically to every method (one shared function, `isolate=True` giving each
+measurement its own subprocess). So `TOTAL` and `device` disagreeing here isn't a bug
+in the sweep; they're deliberately different quantities. The published
+`tab:accuracy_memory` numbers stand. Kept for the operator-level attribution and the
+CUDA-path memory analysis below, which are still accurate and may be useful again, but
+not maintained against future changes to `sinkslot`'s CUDA setup path.
+
+The sweep's `gpu_memory_mb` is `total - free` from `cudaMemGetInfo` — whole-device. It bundles four things into one number, and it is read after the run so it misses transients. `scripts/memory_audit/memory.py` splits it and samples the true peak.
 
 n=4096, d=64, L=512, RTX A1000, all MB:
 
-**Autotune on** (`python scripts/memory.py --n 4096 --d 64 --slices 512`):
+**Autotune on** (`python scripts/memory_audit/memory.py --n 4096 --d 64 --slices 512`):
 
 ```
 method               device  context  modules reserved tens:setup tens:solve  TENSORS     warm     TOTAL
@@ -57,7 +71,7 @@ So Flash's `TENSORS` of 3.2 against a `TOTAL` of 381.0 is not a contradiction. T
 
 **2. The current table has the ordering backwards.** exp1 reports Flash at 1,786.8 MiB against SinkSLOT's 782.3. On `TENSORS` it is Flash 3.2 against SinkSLOT-CUDA's 490.9, and on `TOTAL` 381.0 against 666.2. **We do not have a memory advantage over Flash and should not claim one.** Our advantage is O(L(N+M)) support vs dense O(NM) — a different axis, and one that only holds against SROT, not against Flash. See below.
 
-**3. Triton autotuning is the prime suspect for the H100 spread.** With autotune on, Flash's `TOTAL` is 381.0 MB against a 112.5 MB `warm`; with `--no-autotune` the nvidia-smi peak collapses from 364 MiB to 106 MiB. So 258 MiB of the A1000 figure is compilation transient, and an H100 admits more autotune configs across far more SMs. This supersedes an earlier reading of mine that dismissed autotune because `--no-autotune` only moved `modules` from 2.1 to 0.0 — that is the residual, which is not where autotuning shows up. Run `scripts/memory.py` on Jean Zay and compare `warm` against `TOTAL` to confirm.
+**3. Triton autotuning is the prime suspect for the H100 spread.** With autotune on, Flash's `TOTAL` is 381.0 MB against a 112.5 MB `warm`; with `--no-autotune` the nvidia-smi peak collapses from 364 MiB to 106 MiB. So 258 MiB of the A1000 figure is compilation transient, and an H100 admits more autotune configs across far more SMs. This supersedes an earlier reading of mine that dismissed autotune because `--no-autotune` only moved `modules` from 2.1 to 0.0 — that is the residual, which is not where autotuning shows up. Run `scripts/memory_audit/memory.py` on Jean Zay and compare `warm` against `TOTAL` to confirm.
 
 ## Why SinkSLOT-CUDA is heavier than Flash
 
@@ -102,7 +116,7 @@ Neither is applied. End to end on the table, both together moved SinkSLOT-CUDA's
 
 `sinkslot`'s 2,935 MB against `sinkslot_cuda`'s 491 MB is not a defect — the non-CUDA path is the untouched naive baseline (483aa68), and this gap is what the CUDA setup path exists to close. Recording it because it is the memory half of the same speedup, which the sweep only ever reported as time.
 
-`scripts/memory_profile.py` attributes it operator by operator. Top of the SETUP phase, n=4096, d=64, L=512:
+`scripts/memory_audit/memory_profile.py` attributes it operator by operator. Top of the SETUP phase, n=4096, d=64, L=512:
 
 ```
 sinkslot                            sinkslot_cuda
@@ -116,15 +130,15 @@ Those are the three intermediates of the baseline's `cost = (x[rows] - y[cols]).
 ## Reproduce
 
 ```
-python scripts/memory.py                                  # defaults above
-python scripts/memory.py --n 100000 --d 64 --slices 2048
-python scripts/memory.py --no-autotune                    # second table above
+python scripts/memory_audit/memory.py                                  # defaults above
+python scripts/memory_audit/memory.py --n 100000 --d 64 --slices 2048
+python scripts/memory_audit/memory.py --no-autotune                    # second table above
 ```
 
 One subprocess per method: context and compiled modules are never released within a process, so methods sharing one inherit each other's floor.
 
-For operator-level attribution rather than aggregates, `scripts/memory_profile.py` wraps the same probes in `torch.profiler` and writes `torch.cuda.memory._dump_snapshot` pickles you can load at https://pytorch.org/memory_viz :
+For operator-level attribution rather than aggregates, `scripts/memory_audit/memory_profile.py` wraps the same probes in `torch.profiler` and writes `torch.cuda.memory._dump_snapshot` pickles you can load at https://pytorch.org/memory_viz :
 
 ```
-python scripts/memory_profile.py --method sinkslot --n 4096 --d 64 --slices 512 --output-dir out/prof
+python scripts/memory_audit/memory_profile.py --method sinkslot --n 4096 --d 64 --slices 512 --output-dir out/prof
 ```

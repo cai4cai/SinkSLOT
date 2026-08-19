@@ -27,7 +27,9 @@ python -m gradient_flow.run                # the gradient-flow figure
 | Table 1, Gaussian d=64 | `configs/speedup_gaussian_d64.py` | same policy, d=64, ε in [0.1, 1], L 64 to 8192 |
 | Figure 2, scalability | `configs/scalability.py` via `scripts/scalability.py` | N in {5k,10k,20k,30k,50k} at d in {3,64}; d in {4..1024} at N=10,000; 5 seeds |
 | Figure 3, gradient flow | `gradient_flow/config.py` via `gradient_flow/run.py` | N=1000, ε=0.01, L=100, 50 steps; SOT/EOT/SROT/SinkSLOT |
-| Gradient accuracy under early stopping | `gradient_flow/stopping.py` | same problem, inner iterations 1 to 1000 against a 5000-iteration reference |
+| Appendix, gradient term split | `gradient_flow/term_norms.py` | same problem; splits the complete gradient into the envelope term and the residual |
+| Appendix, dropped-term finite difference | `gradient_flow/finite_diff.py` | same problem, float64, 6 random directions per point |
+| Gradient accuracy under early stopping | `gradient_flow/appendix_checks/stopping.py` | same problem, inner iterations 1 to 1000 against a 5000-iteration reference |
 
 ```bash
 python run.py --config speedup --execute   # a published sweep
@@ -58,13 +60,34 @@ gradient (`slot_grad`, `plan_barycentric_sparse`). It sits in its own package
 because it is a different algorithm from the dense fused kernel it builds on,
 and is used outside benchmarking, by `gradient_flow/` below.
 
-`gradient_flow/` produces Figure 3 and investigates the gradient itself:
+`gradient_flow/` produces Figure 3 and the two gradient-decomposition results
+quoted in the appendix (the `fig:gradient_terms` figure and the `tab:fd_check`
+table):
 
 ```bash
-python -m gradient_flow.stopping           # how early the inner solve can stop
-python -m gradient_flow.term_norms         # split the gradient into two terms
-python -m gradient_flow.finite_diff        # is the dropped term really zero?
-python -m gradient_flow.closed_form_check  # is the closed form an artefact?
+python -m gradient_flow.run          # Figure 3: blob -> crescent, SOT/EOT/SROT/SinkSLOT
+python -m gradient_flow.term_norms   # appendix figure: split the gradient into two terms
+python -m gradient_flow.finite_diff  # appendix table: is the dropped term really zero?
+```
+
+`along_flow.py`, `estimators.py`, `sweep_along_flow.py` and `config.py` are
+shared infrastructure underneath those three (the trajectory/`three_gradients`
+helpers), not standalone results.
+
+`gradient_flow/appendix_checks/` holds the controls behind specific appendix
+claims that don't have a directly-embedded figure of their own -- each answers
+one worry about the result above (is the closed form an artefact? is the
+cosine decay a discretisation artefact rather than the flow converging? does
+the small-`L` wiggle in the sweep wash out as sampling noise? does the gap
+actually change the flow you'd see?):
+
+```bash
+python -m gradient_flow.appendix_checks.stopping           # how early the inner solve can stop
+python -m gradient_flow.appendix_checks.closed_form_check  # is the closed form an artefact?
+python -m gradient_flow.appendix_checks.step_size          # is the cosine decay a discretisation artefact?
+python -m gradient_flow.appendix_checks.projection_noise   # is the small-L wiggle sampling noise?
+python -m gradient_flow.appendix_checks.flow_qualitative   # does the gap change the flow you see?
+python -m gradient_flow.appendix_checks.figure             # 6-panel summary of the sweep above
 ```
 
 Each module's docstring carries its own results table. `torch-ext/sinkslot/
@@ -83,6 +106,12 @@ sweep, every baseline adapter and its RMAE reference).
 At the repo root: `configs/base.py` (`BenchConfig` plus a quick grid, not used
 for any reported number), `run.py` (sweep driver, one subprocess per
 measurement, appended to one CSV), `scripts/scalability.py`.
+
+`scripts/memory_audit/` is a closed audit, not a reproduction path: it checked
+whether the sweep's `gpu_memory_mb` column (used for `tab:accuracy_memory`) is
+comparable across methods, and confirmed it is (`memory.md`'s status note has
+the full reasoning). It doesn't produce anything the paper cites and isn't run
+as part of reproducing any result above.
 
 ## Baselines
 
