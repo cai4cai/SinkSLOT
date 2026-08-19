@@ -1,6 +1,6 @@
 """One figure summarising the envelope-vs-complete gradient result.
 
-    python -m gradient_flow.figure
+    python -m gradient_flow.appendix_checks.figure
 
 Assembles six panels from the runs already on disk, so it is cheap to re-render
 and always consistent with the numbers in the commit messages:

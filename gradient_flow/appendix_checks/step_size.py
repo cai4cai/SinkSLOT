@@ -1,6 +1,6 @@
 """Is the falling cosine an artefact of finite Euler steps?
 
-    python -m gradient_flow.step_size
+    python -m gradient_flow.appendix_checks.step_size
 
 The natural reading of along_flow.py's curve is that the two gradients differ a
 little at every step and the difference piles up over 50 Euler steps, so that

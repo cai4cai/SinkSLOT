@@ -1,6 +1,6 @@
 """Is the envelope gradient an artefact of the closed form? Recompute it by autograd.
 
-    python -m gradient_flow.closed_form_check [--steps 50] [--iters 600]
+    python -m gradient_flow.appendix_checks.closed_form_check [--steps 50] [--iters 600]
 
 term_norms.py computes term (I), the envelope gradient, from the barycentric
 closed form 2*diag(a)*(X - T_eps(X)) under no_grad -- no autograd anywhere. That
