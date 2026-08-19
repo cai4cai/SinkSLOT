@@ -1,6 +1,6 @@
-"""Validate slot_hvp against a FROZEN-SUPPORT central finite difference, #18.
+"""Validate hvp_x_sqeuclid against a FROZEN-SUPPORT central finite difference, #18.
 
-slot_hvp differentiates grad_X SLOT_eps treating the sliced-OT support (S,
+hvp_x_sqeuclid differentiates grad_X SLOT_eps treating the sliced-OT support (S,
 rows, cols) as fixed -- it only differentiates the cost-dependent lam_ij =
 log(S_ij) - cost_ij(X)/eps through cost_ij, not through S itself. That's the
 same assumption slot_grad's own envelope-theorem gradient makes (S is
@@ -15,7 +15,7 @@ enough to resolve second-order structure picks up O(1/h) rank-flip jump
 artifacts that swamp the real signal. So this test builds the support ONCE
 at X and reuses it for both perturbed evaluations -- the "FD frozen" arm in
 finite_diff.py's own terminology, which is what a correct comparison to
-slot_hvp (support held fixed by construction) requires.
+hvp_x_sqeuclid (support held fixed by construction) requires.
 """
 
 import pytest
@@ -26,9 +26,12 @@ tsgu = pytest.importorskip("torchsparsegradutils")
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
 from sinkslot.solver import (  # noqa: E402
-    slot_hvp, sot_plan_coo, sparse_sqeuclidean_cost, to_csr, _run_v5,
-    _ot_1d_coo_batched_cuda, plan_barycentric_sparse,
+    sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
+    _ot_1d_coo_batched_cuda,
 )
+from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton  # noqa: E402
+from sinkslot.gradient import plan_barycentric_sparse  # noqa: E402
+from sinkslot.hvp import hvp_x_sqeuclid  # noqa: E402
 
 
 def _problem(n=300, d=3, seed=0):
@@ -43,8 +46,8 @@ def _frozen_grad(X, Y, a, rows, cols, S, eps, n_iters):
     """slot_grad's formula, on a FIXED (rows, cols, S) instead of rebuilding it.
 
     Mirrors gradient_flow/finite_diff.py's envelope_grad, but through the real
-    Triton solver (_run_v5) rather than the plain-torch loop, so this is
-    checking slot_hvp against the exact same numerical path slot_grad itself
+    Triton solver (sinkslot_alternating_triton) rather than the plain-torch loop, so this is
+    checking hvp_x_sqeuclid against the exact same numerical path slot_grad itself
     uses -- not a second, independent implementation of the inner solve.
     """
     n, m = X.shape[0], Y.shape[0]
@@ -54,7 +57,7 @@ def _frozen_grad(X, Y, a, rows, cols, S, eps, n_iters):
     r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n, narrow_key=True)
     c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m, narrow_key=True)
     log_a = a.log()
-    phi, psi, _, _, _ = _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
+    phi, psi, _, _, _ = sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
                                  log_a, log_a, n, m, n_iters)
     T_vals = (phi[rows] + psi[cols] + lam).exp()
     Tx, _ = plan_barycentric_sparse(T_vals, rows, cols, X, Y)
@@ -68,7 +71,7 @@ def test_slot_hvp_matches_frozen_support_finite_difference():
     v = torch.randn(X.shape, generator=g).cuda()
     v = v / v.norm()
 
-    hvp = slot_hvp(X, Y, a, eps, L, seed, n_iters, v)
+    hvp = hvp_x_sqeuclid(X, Y, a, eps, L, seed, n_iters, v)
 
     rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=seed, ot1d=_ot_1d_coo_batched_cuda)
     h = 1e-3
@@ -79,7 +82,7 @@ def test_slot_hvp_matches_frozen_support_finite_difference():
     rel_err = float((hvp - fd).norm() / fd.norm())
     print(f"\n|hvp|={float(hvp.norm()):.4e}  |fd|={float(fd.norm()):.4e}  "
           f"rel_err={rel_err:.3e}")
-    assert rel_err < 0.08, f"slot_hvp disagrees with the frozen-support FD: {rel_err:.3e}"
+    assert rel_err < 0.08, f"hvp_x_sqeuclid disagrees with the frozen-support FD: {rel_err:.3e}"
 
 
 def test_slot_hvp_matches_frozen_support_finite_difference_at_two_step_sizes():
@@ -90,7 +93,7 @@ def test_slot_hvp_matches_frozen_support_finite_difference_at_two_step_sizes():
     v = torch.randn(X.shape, generator=g).cuda()
     v = v / v.norm()
 
-    hvp = slot_hvp(X, Y, a, eps, L, seed, n_iters, v)
+    hvp = hvp_x_sqeuclid(X, Y, a, eps, L, seed, n_iters, v)
     rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=seed, ot1d=_ot_1d_coo_batched_cuda)
 
     for h in (1e-3, 3e-4):
@@ -99,7 +102,7 @@ def test_slot_hvp_matches_frozen_support_finite_difference_at_two_step_sizes():
         fd = (g_plus - g_minus) / (2 * h)
         rel_err = float((hvp - fd).norm() / fd.norm())
         print(f"\nh={h:g}  rel_err={rel_err:.3e}")
-        assert rel_err < 0.08, f"h={h:g}: slot_hvp disagrees: {rel_err:.3e}"
+        assert rel_err < 0.08, f"h={h:g}: hvp_x_sqeuclid disagrees: {rel_err:.3e}"
 
 
 def test_slot_hvp_is_linear_in_v():
@@ -109,8 +112,8 @@ def test_slot_hvp_is_linear_in_v():
     g = torch.Generator(device="cpu").manual_seed(5)
     v = torch.randn(X.shape, generator=g).cuda()
 
-    hvp1 = slot_hvp(X, Y, a, eps, L, seed, n_iters, v)
-    hvp2 = slot_hvp(X, Y, a, eps, L, seed, n_iters, 2.0 * v)
+    hvp1 = hvp_x_sqeuclid(X, Y, a, eps, L, seed, n_iters, v)
+    hvp2 = hvp_x_sqeuclid(X, Y, a, eps, L, seed, n_iters, 2.0 * v)
 
     rel_err = float((hvp2 - 2.0 * hvp1).norm() / hvp1.norm())
     assert rel_err < 1e-2, f"not linear in v: rel_err={rel_err:.3e}"

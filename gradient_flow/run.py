@@ -3,8 +3,8 @@
     python -m gradient_flow.run
 
 Runs on CPU or CUDA. A CUDA GPU with Triton reproduces the reported numbers
-(the fused kernels, see sinkslot/solver.py); without one, slot_grad falls
-back to a pure-torch path (same algorithm, much slower) automatically.
+(the fused kernels, see sinkslot/sinkhorn_solvers.py); without one, slot_grad
+falls back to a pure-torch path (same algorithm, much slower) automatically.
 
 Four methods, one figure:
   * SOT (Bonneel et al., 2015): the plain, unregularized sliced W2 distance --
@@ -13,10 +13,10 @@ Four methods, one figure:
     the analytical gradient.
   * EOT (Feydy et al., 2019): `sinkhorn_divergence_torch_autograd`.
   * SROT (Nguyen 2026): `sr_sinkhorn_divergence_torch_autograd`, delta=1e-8.
-  * SinkSLOT (ours): the native v5 solver (torch-ext/sinkslot/solver.py), the
-    exact pipeline this repo's own speed benchmarks exercise,
+  * SinkSLOT (ours): the native v5 solver (torch-ext/sinkslot/sinkhorn_solvers.py),
+    the exact pipeline this repo's own speed benchmarks exercise,
     plus the closed-form envelope-theorem gradient
-    grad_X SLOT_eps(X,Y) = 2*diag(a)*(X - T_eps(X)) (see sinkslot/solver.py).
+    grad_X SLOT_eps(X,Y) = 2*diag(a)*(X - T_eps(X)) (see sinkslot/gradient.py).
 
     SOT/EOT/SROT run in float64 (vendor/sinkhorn_methods.py, ported from a
     sibling research repository's own copy, which has no CUDA/Triton
@@ -54,7 +54,7 @@ from gradient_flow.config import (
 from gradient_flow.vendor.sinkhorn_methods import (
     sinkhorn_divergence_torch_autograd, sr_sinkhorn_divergence_torch_autograd,
 )
-from sinkslot.solver import slot_grad
+from sinkslot.gradient import slot_grad
 
 DATA_DIR = Path(__file__).parent / "data"
 OUT_DIR = Path(__file__).parent / "outputs"

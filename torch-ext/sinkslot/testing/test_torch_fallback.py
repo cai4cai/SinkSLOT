@@ -1,4 +1,4 @@
-"""Tests for the pure-torch fallback (`_run_v5_torch`, `sinkslot_solve`), #10.
+"""Tests for the pure-torch fallback (`sinkslot_alternating_torch`, `sinkslot_solve`), #10.
 
 Every test here except one is deliberately unmarked -- no
 `skipif(not torch.cuda.is_available())`, no `pytest.importorskip("triton")` --
@@ -18,11 +18,13 @@ import pytest
 import torch
 
 from sinkslot.solver import (
-    _run_v5_torch,
-    _seg_lse_coo,
-    sinkslot_solve,
     sot_plan_coo,
     sparse_sqeuclidean_cost,
+)
+from sinkslot.sinkhorn_solvers import (
+    sinkslot_alternating_torch,
+    _seg_lse_coo,
+    sinkslot_solve,
 )
 
 
@@ -71,7 +73,7 @@ def test_run_v5_torch_fixed_mode_gives_correct_marginals():
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()
 
-    phi, psi, it, converged, viol = _run_v5_torch(
+    phi, psi, it, converged, viol = sinkslot_alternating_torch(
         rows, cols, lam, log_a, log_b, n, m, iters)
     assert it == iters and converged is None and viol is None
 
@@ -92,11 +94,11 @@ def test_run_v5_torch_marginal_and_potential_modes_converge_and_agree():
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()
 
-    phi_m, psi_m, it_m, conv_m, viol_m = _run_v5_torch(
+    phi_m, psi_m, it_m, conv_m, viol_m = sinkslot_alternating_torch(
         rows, cols, lam, log_a, log_b, n, m, 20000, _Stop(mode="marginal"))
     assert conv_m and viol_m <= 1e-6
 
-    phi_p, psi_p, it_p, conv_p, viol_p = _run_v5_torch(
+    phi_p, psi_p, it_p, conv_p, viol_p = sinkslot_alternating_torch(
         rows, cols, lam, log_a, log_b, n, m, 20000, _Stop(mode="potential"))
     assert conv_p
     # Documented to fall back to the same check as marginal mode.
@@ -111,7 +113,7 @@ def test_run_v5_torch_potential_linf_mode_converges():
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()
 
-    phi, psi, it, converged, change = _run_v5_torch(
+    phi, psi, it, converged, change = sinkslot_alternating_torch(
         rows, cols, lam, log_a, log_b, n, m, 20000,
         _Stop(mode="potential_linf", tol=1e-4), eps=eps)
     assert converged and change < 1e-4
@@ -126,7 +128,7 @@ def test_run_v5_torch_rejects_unknown_mode():
     log_a, log_b = a.log(), b.log()
 
     with pytest.raises(ValueError, match="unknown stop.mode"):
-        _run_v5_torch(rows, cols, lam, log_a, log_b, n, m, 100,
+        sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, 100,
                       _Stop(mode="bogus", max_iter=100))
 
 
