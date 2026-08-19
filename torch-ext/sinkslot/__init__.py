@@ -36,7 +36,7 @@ Package name: sinkslot
 # __init__.py's import list is how both packages mark "internal, but not
 # hidden behind Python's underscore convention."
 from .solver import (
-    sot_directions,
+    get_random_projections,
     sot_plan_coo,
     to_csr,
     sparse_sqeuclidean_cost,
@@ -57,7 +57,7 @@ from .hvp import (
 from .samples_loss import SamplesLoss
 
 __all__ = [
-    "sot_directions",
+    "get_random_projections",
     "sot_plan_coo",
     "to_csr",
     "sparse_sqeuclidean_cost",
