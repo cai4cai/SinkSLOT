@@ -1,6 +1,6 @@
 """How early can the inner Sinkhorn stop before the gradient goes wrong?
 
-    python -m gradient_flow.stopping
+    python -m gradient_flow.appendix_checks.stopping
 
 `sinkslot.solver.slot_grad` differentiates SLOT_eps by the envelope theorem,
 
