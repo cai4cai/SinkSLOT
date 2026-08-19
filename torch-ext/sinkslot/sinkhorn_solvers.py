@@ -270,6 +270,111 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
     return phi, psi, it, converged, viol
 
 
+def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
+            n_iters, stop=None, eps=None, alpha=0.5):
+    """Symmetric (Jacobi) Sinkhorn over prebuilt CSR/CSC, fused Triton half-steps (#34).
+
+    Both half-steps read the SAME (phi, psi) pair -- unlike
+    `sinkslot_alternating_triton`'s Gauss-Seidel scheme, where the column
+    half-step already sees the row half-step's fresh update -- so the two
+    candidates are computed into separate buffers, then blended:
+
+        phi_new = (1 - alpha) * phi + alpha * phi_cand
+        psi_new = (1 - alpha) * psi + alpha * psi_cand
+
+    matching FlashSinkhorn's own `sinkhorn_flashstyle_symmetric` update rule,
+    simplified to a single fixed `alpha` applied every iteration rather than
+    that function's own alpha=1.0-then-0.5 schedule tied to its epsilon
+    scaling -- SinkSLOT runs at a single fixed eps, so there's no schedule to
+    tie it to. `alpha=0.5` (the default, matching FlashSinkhorn's own
+    steady-state value) is genuine Jacobi averaging; `alpha=1.0` recovers an
+    unaveraged simultaneous update (both candidates fully replace their old
+    values, still order-independent unlike Gauss-Seidel).
+
+    Returns (phi, psi, iters_run, converged, final_viol), same contract as
+    `sinkslot_alternating_triton`. With stop.mode in {"marginal", "potential"}:
+    unlike alternating, NEITHER marginal is exact after a blended update --
+    the column marginal being exact right after the column half-step is a
+    Gauss-Seidel property this scheme doesn't have (both `phi` and `psi` move
+    on every iteration, and by less than a full half-step whenever
+    alpha < 1) -- so both marginals need a fresh check: two extra half-step
+    calls per check, reusing `phi_cand`/`psi_cand`'s buffers since they're
+    stale by then. FlashSinkhorn's own implementation avoids the extra calls
+    by reconstructing the pre-blend candidate algebraically
+    (`cand = 2*new - old`), a shortcut that only holds at alpha=0.5 exactly;
+    not used here since `alpha` is a general parameter, not hardcoded.
+    """
+    r_blk, r_w = launch_cfg(r_idx.numel(), n)
+    c_blk, c_w = launch_cfg(c_idx.numel(), m)
+    phi, psi = torch.zeros_like(log_a), torch.zeros_like(log_b)
+    phi_cand, psi_cand = torch.empty_like(log_a), torch.empty_like(log_b)
+    z_n, z_m = torch.zeros_like(log_a), torch.zeros_like(log_b)
+
+    mode = _resolve_stop_mode(stop)
+
+    def half_steps():
+        # Both read the CURRENT phi/psi (unmutated at this point in every
+        # call site below); writes go into phi_cand/psi_cand, never phi/psi
+        # directly, so this is safe to call before OR after the blend that
+        # follows it -- it never observes its own output.
+        seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi_cand)
+        seg_lse_online(c_ptr, c_idx, c_lam, z_m, phi, m, c_blk, c_w, base=log_b, out=psi_cand)
+
+    if mode == "fixed":
+        for _ in range(n_iters):
+            half_steps()
+            phi.mul_(1.0 - alpha).add_(phi_cand, alpha=alpha)
+            psi.mul_(1.0 - alpha).add_(psi_cand, alpha=alpha)
+        return phi, psi, n_iters, None, None
+
+    if mode == "potential_linf":
+        if eps is None:
+            raise ValueError("eps is required for stop.mode == 'potential_linf'")
+        prev_phi, prev_psi = phi.clone(), psi.clone()
+        it = 0
+        converged = False
+        change = float("inf")
+        while it < stop.max_iter:
+            half_steps()
+            phi.mul_(1.0 - alpha).add_(phi_cand, alpha=alpha)
+            psi.mul_(1.0 - alpha).add_(psi_cand, alpha=alpha)
+            it += 1
+            if it % stop.check_every == 0:
+                change = eps * max((phi - prev_phi).abs().max().item(),
+                                    (psi - prev_psi).abs().max().item())
+                if change < stop.tol:
+                    converged = True
+                    break
+                prev_phi.copy_(phi)
+                prev_psi.copy_(psi)
+        return phi, psi, it, converged, change
+
+    # mode in {"marginal", "potential"} -- the only two left after _resolve_stop_mode.
+    a = log_a.exp()
+    b = log_b.exp()
+    it = 0
+    converged = False
+    viol = float("inf")
+    while it < stop.max_iter:
+        half_steps()
+        phi.mul_(1.0 - alpha).add_(phi_cand, alpha=alpha)
+        psi.mul_(1.0 - alpha).add_(psi_cand, alpha=alpha)
+        it += 1
+        if it % stop.check_every == 0 or it == stop.max_iter:
+            # Fresh half-steps from the just-updated (phi, psi) -- see the
+            # docstring above for why neither marginal is exact here the way
+            # alternating's column marginal is. Overwrites phi_cand/psi_cand,
+            # already stale from the blend two lines up.
+            half_steps()
+            row_marg = a * (phi - phi_cand).exp()
+            col_marg = b * (psi - psi_cand).exp()
+            viol = max(float((row_marg - a).abs().max()), float((col_marg - b).abs().max()))
+            if viol <= stop.tol:
+                converged = True
+                break
+    return phi, psi, it, converged, viol
+
+
 # --------------------------------------------------------------------------
 # Pure-torch fallback (#10) -- no Triton, works on CPU or a non-CUDA device.
 # --------------------------------------------------------------------------
@@ -355,8 +460,78 @@ def sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, sto
     return phi, psi, it, converged, viol
 
 
+def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=None,
+                              eps=None, alpha=0.5):
+    """Pure-torch counterpart to `sinkslot_symmetric_triton` (#34) -- see its
+    docstring for the update rule and stop-mode semantics; the logic here
+    mirrors it exactly, substituting `_seg_lse_coo(...)` for
+    `seg_lse_online(...)`, matching `sinkslot_alternating_torch`'s own
+    relationship to `sinkslot_alternating_triton`.
+    """
+    phi, psi = torch.zeros_like(log_a), torch.zeros_like(log_b)
+    mode = _resolve_stop_mode(stop)
+
+    def half_steps(phi_cur, psi_cur):
+        phi_cand = log_a - _seg_lse_coo(lam + psi_cur[cols], rows, n)
+        psi_cand = log_b - _seg_lse_coo(lam + phi_cur[rows], cols, m)
+        return phi_cand, psi_cand
+
+    if mode == "fixed":
+        for _ in range(n_iters):
+            phi_cand, psi_cand = half_steps(phi, psi)
+            phi = (1.0 - alpha) * phi + alpha * phi_cand
+            psi = (1.0 - alpha) * psi + alpha * psi_cand
+        return phi, psi, n_iters, None, None
+
+    if mode == "potential_linf":
+        if eps is None:
+            raise ValueError("eps is required for stop.mode == 'potential_linf'")
+        prev_phi, prev_psi = phi.clone(), psi.clone()
+        it = 0
+        converged = False
+        change = float("inf")
+        while it < stop.max_iter:
+            phi_cand, psi_cand = half_steps(phi, psi)
+            phi = (1.0 - alpha) * phi + alpha * phi_cand
+            psi = (1.0 - alpha) * psi + alpha * psi_cand
+            it += 1
+            if it % stop.check_every == 0:
+                change = eps * max((phi - prev_phi).abs().max().item(),
+                                    (psi - prev_psi).abs().max().item())
+                if change < stop.tol:
+                    converged = True
+                    break
+                prev_phi.copy_(phi)
+                prev_psi.copy_(psi)
+        return phi, psi, it, converged, change
+
+    # mode in {"marginal", "potential"} -- the only two left after _resolve_stop_mode.
+    a = log_a.exp()
+    b = log_b.exp()
+    it = 0
+    converged = False
+    viol = float("inf")
+    while it < stop.max_iter:
+        phi_cand, psi_cand = half_steps(phi, psi)
+        phi = (1.0 - alpha) * phi + alpha * phi_cand
+        psi = (1.0 - alpha) * psi + alpha * psi_cand
+        it += 1
+        if it % stop.check_every == 0 or it == stop.max_iter:
+            # Fresh half-steps from the just-updated (phi, psi) -- see
+            # sinkslot_symmetric_triton's docstring for why neither marginal
+            # is exact here the way alternating's column marginal is.
+            phi_fresh, psi_fresh = half_steps(phi, psi)
+            row_marg = a * (phi - phi_fresh).exp()
+            col_marg = b * (psi - psi_fresh).exp()
+            viol = max(float((row_marg - a).abs().max()), float((col_marg - b).abs().max()))
+            if viol <= stop.tol:
+                converged = True
+                break
+    return phi, psi, it, converged, viol
+
+
 def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None,
-                    backend="auto"):
+                    backend="auto", variant="alternating", alpha=0.5):
     """SinkSLOT end to end: build the sliced plan, then solve -- on any device.
 
     Dispatches on X's device and whether Triton is importable: the fused Triton
@@ -381,12 +556,23 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None,
     CUDA-layout variant is still the better choice on a CUDA tensor even when
     the cost/solve stage is forced to torch.
 
+    `variant`: "alternating" (default, unchanged behavior) picks the
+    Gauss-Seidel loop (`sinkslot_alternating_triton`/`_torch`); "symmetric"
+    (#34) picks the Jacobi loop (`sinkslot_symmetric_triton`/`_torch`) instead,
+    which updates phi and psi simultaneously from the same prior state rather
+    than sequentially -- see that function's own docstring for the update
+    rule and why its marginal-violation check costs more than alternating's.
+    `alpha` is the symmetric update's blend weight (`phi_new = (1-alpha)*phi
+    + alpha*phi_cand`); unused when `variant="alternating"`.
+
     Returns (phi, psi, rows, cols, S, iters_run, converged, final_viol): phi,
     psi absorbed (phi=f/eps, psi=g/eps); rows/cols/S the sliced support, needed
     by callers building the transport plan or its gradient.
     """
     if backend not in ("auto", "triton", "torch"):
         raise ValueError(f"backend must be 'auto', 'triton', or 'torch', got {backend!r}")
+    if variant not in ("alternating", "symmetric"):
+        raise ValueError(f"variant must be 'alternating' or 'symmetric', got {variant!r}")
     if backend == "triton":
         if not (_HAS_TRITON and X.is_cuda):
             raise ValueError("backend='triton' requires Triton installed and X on CUDA")
@@ -406,11 +592,20 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None,
     if use_triton:
         r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n, narrow_key=True)
         c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m, narrow_key=True)
-        phi, psi, it, converged, viol = sinkslot_alternating_triton(
-            r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
-            n_iters, stop, eps)
+        if variant == "symmetric":
+            phi, psi, it, converged, viol = sinkslot_symmetric_triton(
+                r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
+                n_iters, stop, eps, alpha)
+        else:
+            phi, psi, it, converged, viol = sinkslot_alternating_triton(
+                r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
+                n_iters, stop, eps)
     else:
-        phi, psi, it, converged, viol = sinkslot_alternating_torch(
-            rows, cols, lam, log_a, log_b, n, m, n_iters, stop, eps)
+        if variant == "symmetric":
+            phi, psi, it, converged, viol = sinkslot_symmetric_torch(
+                rows, cols, lam, log_a, log_b, n, m, n_iters, stop, eps, alpha)
+        else:
+            phi, psi, it, converged, viol = sinkslot_alternating_torch(
+                rows, cols, lam, log_a, log_b, n, m, n_iters, stop, eps)
 
     return phi, psi, rows, cols, S, it, converged, viol

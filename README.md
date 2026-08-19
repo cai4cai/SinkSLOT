@@ -76,7 +76,12 @@ gradient is `slot_grad`'s analytic envelope-theorem formula, not
 backpropagation through the Sinkhorn loop -- no second solve, no unrolled
 gradient (see `gradient_flow/estimators.py` for why unrolling is the wrong
 choice here: it loses to the envelope form by 2-3 orders of magnitude under
-early stopping). `SamplesLoss` doesn't (yet) support GeomLoss's
+early stopping). Pass `symmetric=True` for the Jacobi (simultaneous
+phi/psi-update) solve loop instead of the default Gauss-Seidel one, with
+`alpha` as its blend weight -- see `sinkhorn_solvers.sinkslot_symmetric_
+triton`'s own docstring for the update rule; both schemes converge to the
+same transport plan, just via different iterative paths. `SamplesLoss`
+doesn't (yet) support GeomLoss's
 `blur`/epsilon-scheduling, debiasing, unbalanced OT, or double-backward/HVP
 -- pass `potentials=True` for the raw dual potentials `(phi, psi)` instead of
 the scalar cost, and see `torch-ext/sinkslot/hvp.py`'s `hvp_x_sqeuclid` for
@@ -100,8 +105,9 @@ this benchmarks against):
   FlashSinkhorn equivalent, since sliced-OT support construction is this
   paper's own contribution.
 - `sinkhorn_solvers.py`: the Triton v5 loop and its pure-torch fallback
-  (`sinkslot_alternating_triton`/`_torch`), and `sinkslot_solve`, the
-  device-agnostic entry point that dispatches between them.
+  (`sinkslot_alternating_triton`/`_torch`), the symmetric/Jacobi counterpart
+  (`sinkslot_symmetric_triton`/`_torch`), and `sinkslot_solve`, the
+  device-agnostic entry point that dispatches between backend AND variant.
 - `gradient.py`: the envelope-theorem gradient (`slot_grad`,
   `plan_barycentric_sparse`).
 - `hvp.py`: the Hessian-vector product (`hvp_x_sqeuclid`), by implicit
