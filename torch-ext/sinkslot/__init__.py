@@ -21,11 +21,11 @@ that module's own docstring).
 Package name: sinkslot
 """
 
-# sinkhorn_alternating_triton/_torch are deliberately not exported here
+# sinkslot_alternating_triton/_torch are deliberately not exported here
 # (fixes #14): they're the low-level solve loops sinkslot_solve already wraps
 # and dispatches between, not something a caller should reach for directly.
 # Re-exporting an internal name at the package's top level was the actual bug
-# -- `sinkslot.sinkhorn_solvers.sinkhorn_alternating_triton` still works for
+# -- `sinkslot.sinkhorn_solvers.sinkslot_alternating_triton` still works for
 # anyone who genuinely needs it (the benchmark harness and
 # gradient_flow/stopping.py do, since they need the raw CSR/CSC-based loop,
 # not the whole build-plan-then-solve pipeline sinkslot_solve wraps it in),

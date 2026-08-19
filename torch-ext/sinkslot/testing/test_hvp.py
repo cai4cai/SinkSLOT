@@ -29,7 +29,7 @@ from sinkslot.solver import (  # noqa: E402
     sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
     _ot_1d_coo_batched_cuda,
 )
-from sinkslot.sinkhorn_solvers import sinkhorn_alternating_triton  # noqa: E402
+from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton  # noqa: E402
 from sinkslot.gradient import plan_barycentric_sparse  # noqa: E402
 from sinkslot.hvp import hvp_x_sqeuclid  # noqa: E402
 
@@ -46,7 +46,7 @@ def _frozen_grad(X, Y, a, rows, cols, S, eps, n_iters):
     """slot_grad's formula, on a FIXED (rows, cols, S) instead of rebuilding it.
 
     Mirrors gradient_flow/finite_diff.py's envelope_grad, but through the real
-    Triton solver (sinkhorn_alternating_triton) rather than the plain-torch loop, so this is
+    Triton solver (sinkslot_alternating_triton) rather than the plain-torch loop, so this is
     checking hvp_x_sqeuclid against the exact same numerical path slot_grad itself
     uses -- not a second, independent implementation of the inner solve.
     """
@@ -57,7 +57,7 @@ def _frozen_grad(X, Y, a, rows, cols, S, eps, n_iters):
     r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n, narrow_key=True)
     c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m, narrow_key=True)
     log_a = a.log()
-    phi, psi, _, _, _ = sinkhorn_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
+    phi, psi, _, _, _ = sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
                                  log_a, log_a, n, m, n_iters)
     T_vals = (phi[rows] + psi[cols] + lam).exp()
     Tx, _ = plan_barycentric_sparse(T_vals, rows, cols, X, Y)

@@ -6,9 +6,9 @@ for the column half-step). Mathematically identical to a plain torch segmented
 LSE; the point is throughput, not a different algorithm. The CUDA-graph capture
 of the upstream production path is intentionally omitted here.
 
-`sinkslot_solve` is the device-agnostic entry point: `sinkhorn_alternating_triton`
+`sinkslot_solve` is the device-agnostic entry point: `sinkslot_alternating_triton`
 above when Triton is installed and the input is CUDA, the pure-torch fallback
-(`sinkhorn_alternating_torch`) otherwise -- same algorithm, cross-checked in
+(`sinkslot_alternating_torch`) otherwise -- same algorithm, cross-checked in
 testing/test_sinkslot_bench.py, so a CPU machine or a machine without Triton
 installed can still run SinkSLOT, just without the fused-kernel throughput.
 
@@ -124,7 +124,7 @@ def seg_lse_online(indptr, colidx, lam, phi, psi, n, block=None, num_warps=None,
     would otherwise do inside the loop.
 
     Triton-only (the fused CSR kernel). For a device- or Triton-agnostic solve,
-    use `sinkslot_solve` or `sinkhorn_alternating_torch`, which use
+    use `sinkslot_solve` or `sinkslot_alternating_torch`, which use
     `_seg_lse_coo` instead.
     """
     if not _HAS_TRITON:
@@ -152,7 +152,7 @@ _STOP_MODES = ("fixed", "marginal", "potential", "potential_linf")
 
 
 def _resolve_stop_mode(stop):
-    """Shared by `sinkhorn_alternating_triton` and `sinkhorn_alternating_torch`:
+    """Shared by `sinkslot_alternating_triton` and `sinkslot_alternating_torch`:
     resolve `stop.mode` (or "fixed" if `stop` is None) and validate it against
     `_STOP_MODES` upfront, so the four valid modes stay one source of truth
     instead of two independently-maintained checks. They drifted out of sync
@@ -173,7 +173,7 @@ def _resolve_stop_mode(stop):
     return mode
 
 
-def sinkhorn_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
+def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
             n_iters, stop=None, eps=None):
     """Alternating (Gauss-Seidel) Sinkhorn over prebuilt CSR/CSC, fused Triton half-steps.
 
@@ -290,17 +290,17 @@ def _seg_lse_coo(vals, idx, size):
                         torch.full_like(mx, float("-inf")))
 
 
-def sinkhorn_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=None, eps=None):
-    """Pure-torch counterpart to `sinkhorn_alternating_triton` -- same four
+def sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=None, eps=None):
+    """Pure-torch counterpart to `sinkslot_alternating_triton` -- same four
     `stop.mode` semantics, no Triton, no CSR/CSC (operates directly on the COO
     `sot_plan_coo` returns, since `index_add_`/`scatter_reduce_` don't need
     sorted input the way the Triton kernel's one-program-per-row parallelism
     does).
 
-    See `sinkhorn_alternating_triton`'s docstring for what each mode does; the
+    See `sinkslot_alternating_triton`'s docstring for what each mode does; the
     logic here mirrors it exactly, substituting
     `_seg_lse_coo(lam + other[idx], self_idx, size)` for `seg_lse_online(...)`.
-    Cross-checked against `sinkhorn_alternating_triton` in
+    Cross-checked against `sinkslot_alternating_triton` in
     testing/test_sinkslot_bench.py.
     """
     phi, psi = torch.zeros_like(log_a), torch.zeros_like(log_b)
@@ -344,7 +344,7 @@ def sinkhorn_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, sto
         it += 1
         if it % stop.check_every == 0 or it == stop.max_iter:
             # One-step-ahead phi using the psi just updated above -- see
-            # sinkhorn_alternating_triton's matching comment for why this isn't
+            # sinkslot_alternating_triton's matching comment for why this isn't
             # a redundant recompute.
             phi_next = log_a - _seg_lse_coo(lam + psi[cols], rows, n)
             row_marg = a * (phi - phi_next).exp()
@@ -360,7 +360,7 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None,
     """SinkSLOT end to end: build the sliced plan, then solve -- on any device.
 
     Dispatches on X's device and whether Triton is importable: the fused Triton
-    kernels when both hold, the pure-torch path (`sinkhorn_alternating_torch`,
+    kernels when both hold, the pure-torch path (`sinkslot_alternating_torch`,
     `_ot_1d_coo_batched`) otherwise. Same algorithm and stopping semantics
     either way -- the two are cross-checked in testing/test_sinkslot_bench.py --
     so this is the one call that works whether or not the caller has a CUDA GPU
@@ -406,11 +406,11 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None,
     if use_triton:
         r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n, narrow_key=True)
         c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m, narrow_key=True)
-        phi, psi, it, converged, viol = sinkhorn_alternating_triton(
+        phi, psi, it, converged, viol = sinkslot_alternating_triton(
             r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
             n_iters, stop, eps)
     else:
-        phi, psi, it, converged, viol = sinkhorn_alternating_torch(
+        phi, psi, it, converged, viol = sinkslot_alternating_torch(
             rows, cols, lam, log_a, log_b, n, m, n_iters, stop, eps)
 
     return phi, psi, rows, cols, S, it, converged, viol

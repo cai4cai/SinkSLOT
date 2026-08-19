@@ -1959,7 +1959,7 @@ def bench_sinkslot(
     from sinkslot.solver import (
         sot_plan_coo, to_csr,
     )
-    from sinkslot.sinkhorn_solvers import sinkhorn_alternating_triton
+    from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
     _set_tf32(allow_tf32)
 
     torch.manual_seed(seed)
@@ -1996,9 +1996,9 @@ def bench_sinkslot(
     _stop = stop or StopCfg.fixed()
 
     def run():
-        sinkhorn_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
+        sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
 
-    phi, psi, iters_run, converged, final_viol = sinkhorn_alternating_triton(
+    phi, psi, iters_run, converged, final_viol = sinkslot_alternating_triton(
         r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
     cost_gap_pct = None
     bary = None
@@ -2071,7 +2071,7 @@ def bench_sinkslotcuda(
     from sinkslot.solver import (
         sot_plan_coo, to_csr, sparse_sqeuclidean_cost, _ot_1d_coo_batched_cuda,
     )
-    from sinkslot.sinkhorn_solvers import sinkhorn_alternating_triton
+    from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
     _set_tf32(allow_tf32)
 
     torch.manual_seed(seed)
@@ -2108,9 +2108,9 @@ def bench_sinkslotcuda(
     _stop = stop or StopCfg.fixed()
 
     def run():
-        sinkhorn_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
+        sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
 
-    phi, psi, iters_run, converged, final_viol = sinkhorn_alternating_triton(
+    phi, psi, iters_run, converged, final_viol = sinkslot_alternating_triton(
         r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
     cost_gap_pct = None
     bary = None

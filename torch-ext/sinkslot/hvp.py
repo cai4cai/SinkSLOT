@@ -26,7 +26,7 @@ import functools
 import torch
 
 from .solver import _HAS_TRITON, sot_plan_coo, _ot_1d_coo_batched_cuda, to_csr, sparse_sqeuclidean_cost
-from .sinkhorn_solvers import sinkhorn_alternating_triton, sinkhorn_alternating_torch
+from .sinkhorn_solvers import sinkslot_alternating_triton, sinkslot_alternating_torch
 
 
 def hvp_x_sqeuclid_from_potentials(X, Y, a, v, rows, cols, T_vals, eps, *,
@@ -142,8 +142,8 @@ def hvp_x_sqeuclid(X, Y, a, eps, L, seed, n_iters, v, tau2=3e-7, solve_tol=1e-11
 
     `backend`: "auto" (default) / "triton" / "torch", same meaning and same
     dispatch rule as `sinkslot_solve`'s -- picks Triton
-    (`sinkhorn_alternating_triton`) when it's importable and X is CUDA,
-    `sinkhorn_alternating_torch` otherwise; "triton" forces it (raising if
+    (`sinkslot_alternating_triton`) when it's importable and X is CUDA,
+    `sinkslot_alternating_torch` otherwise; "triton" forces it (raising if
     unavailable), "torch" forces the pure-torch solve regardless of device.
     Unlike `sinkslot_solve`, the sliced-support builder here stays
     `_ot_1d_coo_batched_cuda` for every backend, not device-switched to the
@@ -155,10 +155,10 @@ def hvp_x_sqeuclid(X, Y, a, eps, L, seed, n_iters, v, tau2=3e-7, solve_tol=1e-11
     only the solve stage's numerics, not the support.
 
     Accuracy caveat: the ~2% figure above and the `tau2=3e-7` default were
-    both obtained through the Triton path (`sinkhorn_alternating_triton`) on
+    both obtained through the Triton path (`sinkslot_alternating_triton`) on
     two small synthetic problems (testing/test_hvp.py's `_problem()`,
     n<=300, d=3) -- not on any of the paper's five real datasets at their
-    actual n=10000 scale, and not on `sinkhorn_alternating_torch` at all.
+    actual n=10000 scale, and not on `sinkslot_alternating_torch` at all.
     `backend="torch"` is offered for portability (#10) the same way
     `sinkslot_solve`'s is, not because the 2%/3e-7 pairing has been
     re-confirmed on that path; matrix conditioning depends on the actual data
@@ -190,10 +190,10 @@ def hvp_x_sqeuclid(X, Y, a, eps, L, seed, n_iters, v, tau2=3e-7, solve_tol=1e-11
     if use_triton:
         r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n, narrow_key=True)
         c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m, narrow_key=True)
-        phi, psi, _, _, _ = sinkhorn_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
+        phi, psi, _, _, _ = sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
                                      log_a, log_a, n, m, n_iters)
     else:
-        phi, psi, _, _, _ = sinkhorn_alternating_torch(rows, cols, lam, log_a, log_a, n, m, n_iters)
+        phi, psi, _, _, _ = sinkslot_alternating_torch(rows, cols, lam, log_a, log_a, n, m, n_iters)
     T_vals = (phi[rows] + psi[cols] + lam).exp()
 
     return hvp_x_sqeuclid_from_potentials(

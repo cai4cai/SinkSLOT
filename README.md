@@ -100,7 +100,7 @@ this benchmarks against):
   FlashSinkhorn equivalent, since sliced-OT support construction is this
   paper's own contribution.
 - `sinkhorn_solvers.py`: the Triton v5 loop and its pure-torch fallback
-  (`sinkhorn_alternating_triton`/`_torch`), and `sinkslot_solve`, the
+  (`sinkslot_alternating_triton`/`_torch`), and `sinkslot_solve`, the
   device-agnostic entry point that dispatches between them.
 - `gradient.py`: the envelope-theorem gradient (`slot_grad`,
   `plan_barycentric_sparse`).

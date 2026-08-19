@@ -59,7 +59,7 @@ def seg_lse(vals, idx, size):
 
 
 def solve(lam, rows, cols, log_a, n, m, k):
-    """k plain-torch Sinkhorn iterations, absorbed potentials, matching sinkhorn_alternating_triton."""
+    """k plain-torch Sinkhorn iterations, absorbed potentials, matching sinkslot_alternating_triton."""
     phi = torch.zeros(n, device=lam.device, dtype=lam.dtype)
     psi = torch.zeros(m, device=lam.device, dtype=lam.dtype)
     for _ in range(k):
