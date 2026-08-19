@@ -20,6 +20,7 @@ from .solver import (
     sinkslot_solve,
     slot_grad,
     plan_barycentric_sparse,
+    slot_hvp,
     _run_v5,
 )
 
@@ -33,5 +34,6 @@ __all__ = [
     "sinkslot_solve",
     "slot_grad",
     "plan_barycentric_sparse",
+    "slot_hvp",
     "_run_v5",
 ]
