@@ -9,7 +9,7 @@ reproduced and validated in gradient_flow/finite_diff.py).
 
 A finite difference that calls slot_grad(X+h*v) and slot_grad(X-h*v)
 separately does NOT test that assumption fairly: each call rebuilds the
-support from scratch via sparse_sot_coo, and finite_diff.py already
+support from scratch via sot_coo, and finite_diff.py already
 demonstrates (empirically, in this exact repo) that doing so at any h small
 enough to resolve second-order structure picks up O(1/h) rank-flip jump
 artifacts that swamp the real signal. So this test builds the support ONCE
@@ -26,7 +26,7 @@ tsgu = pytest.importorskip("torchsparsegradutils")
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
 from sinkslot.solver import (  # noqa: E402
-    sparse_sot_coo, sparse_sqeuclidean_cost, to_csr,
+    sot_coo, sparse_sqeuclidean_cost, to_csr,
     _ot_1d_coo_batched_cuda,
 )
 from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton  # noqa: E402
@@ -73,7 +73,7 @@ def test_slot_hvp_matches_frozen_support_finite_difference():
 
     hvp = hvp_x_sqeuclid(X, Y, a, eps, L, seed, n_iters, v)
 
-    rows, cols, S = sparse_sot_coo(X, Y, a, a, L=L, seed=seed, ot1d=_ot_1d_coo_batched_cuda)
+    rows, cols, S = sot_coo(X, Y, a, a, L=L, seed=seed, ot1d=_ot_1d_coo_batched_cuda)
     h = 1e-3
     g_plus = _frozen_grad(X + h * v, Y, a, rows, cols, S, eps, n_iters)
     g_minus = _frozen_grad(X - h * v, Y, a, rows, cols, S, eps, n_iters)
@@ -94,7 +94,7 @@ def test_slot_hvp_matches_frozen_support_finite_difference_at_two_step_sizes():
     v = v / v.norm()
 
     hvp = hvp_x_sqeuclid(X, Y, a, eps, L, seed, n_iters, v)
-    rows, cols, S = sparse_sot_coo(X, Y, a, a, L=L, seed=seed, ot1d=_ot_1d_coo_batched_cuda)
+    rows, cols, S = sot_coo(X, Y, a, a, L=L, seed=seed, ot1d=_ot_1d_coo_batched_cuda)
 
     for h in (1e-3, 3e-4):
         g_plus = _frozen_grad(X + h * v, Y, a, rows, cols, S, eps, n_iters)

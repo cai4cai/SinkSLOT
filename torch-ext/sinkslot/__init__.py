@@ -37,7 +37,7 @@ Package name: sinkslot
 # hidden behind Python's underscore convention."
 from .solver import (
     get_random_projections,
-    sparse_sot_coo,
+    sot_coo,
     to_csr,
     sparse_sqeuclidean_cost,
 )
@@ -58,7 +58,7 @@ from .samples_loss import SamplesLoss
 
 __all__ = [
     "get_random_projections",
-    "sparse_sot_coo",
+    "sot_coo",
     "to_csr",
     "sparse_sqeuclidean_cost",
     "seg_lse_online",

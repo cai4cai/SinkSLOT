@@ -99,7 +99,7 @@ gradient), `hvp_x_sqeuclid` -- see the Layout section below.
 layout, since flash_sinkhorn is vendored in this exact repo as the method
 this benchmarks against):
 
-- `solver.py`: sliced-plan builder (`sparse_sot_coo`, `_ot_1d_coo_batched[_cuda]`),
+- `solver.py`: sliced-plan builder (`sot_coo`, `_ot_1d_coo_batched[_cuda]`),
   the SinkSLOT-CUDA setup path (`_ot_1d_coo_batched_cuda`,
   `sparse_sqeuclidean_cost`, int32-key `to_csr`) -- the pieces with no
   FlashSinkhorn equivalent, since sliced-OT support construction is this

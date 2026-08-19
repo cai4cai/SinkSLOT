@@ -22,7 +22,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUD
 from sinkslot.solver import (  # noqa: E402
     _ot_1d_coo_batched,
     _ot_1d_coo_batched_cuda,
-    sparse_sot_coo,
+    sot_coo,
     sparse_sqeuclidean_cost,
     to_csr,
 )
@@ -119,8 +119,8 @@ def test_naive_and_cuda_builders_agree_on_the_transport():
     n, m = 512, 384
     x, y, a, b = _problem(n, m, d=4)
 
-    r0, c0, v0 = sparse_sot_coo(x, y, a, b, L=32, seed=0, ot1d=_ot_1d_coo_batched)
-    r1, c1, v1 = sparse_sot_coo(x, y, a, b, L=32, seed=0, ot1d=_ot_1d_coo_batched_cuda)
+    r0, c0, v0 = sot_coo(x, y, a, b, L=32, seed=0, ot1d=_ot_1d_coo_batched)
+    r1, c1, v1 = sot_coo(x, y, a, b, L=32, seed=0, ot1d=_ot_1d_coo_batched_cuda)
 
     P0, P1 = _dense(r0, c0, v0, n, m), _dense(r1, c1, v1, n, m)
     for P in (P0, P1):
@@ -134,7 +134,7 @@ def test_sinkslot_alternating_triton_matches_plain_torch_segmented_lse():
     n, m, eps, L, iters = 512, 384, 0.05, 32, 40
     x, y, a, b = _problem(n, m, d=4)
 
-    rows, cols, S = sparse_sot_coo(x, y, a, b, L=L, seed=0)
+    rows, cols, S = sot_coo(x, y, a, b, L=L, seed=0)
     cost = sparse_sqeuclidean_cost(x, y, rows, cols)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()

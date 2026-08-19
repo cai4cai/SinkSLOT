@@ -50,7 +50,7 @@ def truncation_check(steps, iters, n_):
     falls. Cached to TRUNC because it is the one control not saved by any of the
     sweep scripts.
     """
-    from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sparse_sot_coo
+    from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_coo
     from gradient_flow.along_flow import _cosine
     from gradient_flow.estimators import SEED, three_gradients
     from gradient_flow.run import DATA_DIR, DEVICE, draw_samples
@@ -63,13 +63,13 @@ def truncation_check(steps, iters, n_):
 
     from gradient_flow.config import LR
     for _ in range(steps):
-        rows, cols, S = sparse_sot_coo(X, Y, a, a, L=CELL_L, seed=SEED, ot1d=ot1d)
+        rows, cols, S = sot_coo(X, Y, a, a, L=CELL_L, seed=SEED, ot1d=ot1d)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
         g, _, _, _, _ = three_gradients(iters, X, Y, a, rows, cols, log_S, n_, n_,
                                      unroll=False, eps=CELL_EPS)
         X = (X - LR * n_ * g).detach().clone()
 
-    rows, cols, S = sparse_sot_coo(X, Y, a, a, L=CELL_L, seed=SEED, ot1d=ot1d)
+    rows, cols, S = sot_coo(X, Y, a, a, L=CELL_L, seed=SEED, ot1d=ot1d)
     log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
     out = {"k": K_GRID, "cos": [], "viol": []}
     for k in K_GRID:
