@@ -61,6 +61,7 @@ dev = [
   "pot",
   "rich",
   "textual",
+  "torchsparsegradutils",
   "sinkslot[triton]",
 ]
 

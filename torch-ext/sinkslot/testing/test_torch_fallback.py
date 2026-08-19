@@ -1,4 +1,4 @@
-"""Tests for the pure-torch fallback (`_run_v5_torch`, `sinkslot_solve`), #10.
+"""Tests for the pure-torch fallback (`sinkslot_alternating_torch`, `sinkslot_solve`), #10.
 
 Every test here except one is deliberately unmarked -- no
 `skipif(not torch.cuda.is_available())`, no `pytest.importorskip("triton")` --
@@ -18,11 +18,14 @@ import pytest
 import torch
 
 from sinkslot.solver import (
-    _run_v5_torch,
-    _seg_lse_coo,
-    sinkslot_solve,
     sot_plan_coo,
     sparse_sqeuclidean_cost,
+)
+from sinkslot.sinkhorn_solvers import (
+    sinkslot_alternating_torch,
+    sinkslot_symmetric_torch,
+    _seg_lse_coo,
+    sinkslot_solve,
 )
 
 
@@ -71,7 +74,7 @@ def test_run_v5_torch_fixed_mode_gives_correct_marginals():
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()
 
-    phi, psi, it, converged, viol = _run_v5_torch(
+    phi, psi, it, converged, viol = sinkslot_alternating_torch(
         rows, cols, lam, log_a, log_b, n, m, iters)
     assert it == iters and converged is None and viol is None
 
@@ -92,11 +95,11 @@ def test_run_v5_torch_marginal_and_potential_modes_converge_and_agree():
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()
 
-    phi_m, psi_m, it_m, conv_m, viol_m = _run_v5_torch(
+    phi_m, psi_m, it_m, conv_m, viol_m = sinkslot_alternating_torch(
         rows, cols, lam, log_a, log_b, n, m, 20000, _Stop(mode="marginal"))
     assert conv_m and viol_m <= 1e-6
 
-    phi_p, psi_p, it_p, conv_p, viol_p = _run_v5_torch(
+    phi_p, psi_p, it_p, conv_p, viol_p = sinkslot_alternating_torch(
         rows, cols, lam, log_a, log_b, n, m, 20000, _Stop(mode="potential"))
     assert conv_p
     # Documented to fall back to the same check as marginal mode.
@@ -111,7 +114,7 @@ def test_run_v5_torch_potential_linf_mode_converges():
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()
 
-    phi, psi, it, converged, change = _run_v5_torch(
+    phi, psi, it, converged, change = sinkslot_alternating_torch(
         rows, cols, lam, log_a, log_b, n, m, 20000,
         _Stop(mode="potential_linf", tol=1e-4), eps=eps)
     assert converged and change < 1e-4
@@ -126,7 +129,7 @@ def test_run_v5_torch_rejects_unknown_mode():
     log_a, log_b = a.log(), b.log()
 
     with pytest.raises(ValueError, match="unknown stop.mode"):
-        _run_v5_torch(rows, cols, lam, log_a, log_b, n, m, 100,
+        sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, 100,
                       _Stop(mode="bogus", max_iter=100))
 
 
@@ -167,6 +170,114 @@ def test_sinkslot_solve_backend_override_on_cpu():
         sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=200, backend="triton")
     with pytest.raises(ValueError, match="backend must be"):
         sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=200, backend="bogus")
+
+
+def test_sinkslot_solve_variant_default_matches_explicit_alternating():
+    """variant='alternating' is the default -- omitting it must be identical
+    to passing it explicitly, not just "close" (#34 added the parameter;
+    every existing caller omits it, so this is the compatibility guarantee).
+    """
+    n, m, eps, L = 300, 250, 0.05, 40
+    x, y, a, b = _problem(n, m)
+
+    default = sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=500, backend="torch")
+    explicit = sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=500, backend="torch",
+                               variant="alternating")
+    assert torch.equal(default[0], explicit[0]) and torch.equal(default[1], explicit[1])
+
+    with pytest.raises(ValueError, match="variant must be"):
+        sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=200, variant="bogus")
+
+
+def test_sinkslot_symmetric_torch_fixed_mode_gives_correct_marginals():
+    """Same shape of test as alternating's own fixed-mode marginal check --
+    enough iterations to be near the fixed point, since "fixed" mode has no
+    convergence criterion of its own.
+    """
+    n, m, eps, L, iters = 300, 250, 0.05, 40, 4000
+    x, y, a, b = _problem(n, m)
+    rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
+    cost = sparse_sqeuclidean_cost(x, y, rows, cols)
+    lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
+    log_a, log_b = a.log(), b.log()
+
+    phi, psi, it, converged, viol = sinkslot_symmetric_torch(
+        rows, cols, lam, log_a, log_b, n, m, iters)
+    assert it == iters and converged is None and viol is None
+
+    T_vals = (phi[rows] + psi[cols] + lam).exp()
+    row_marg = torch.zeros(n).index_add_(0, rows, T_vals)
+    col_marg = torch.zeros(m).index_add_(0, cols, T_vals)
+    assert torch.allclose(row_marg, a, atol=1e-3)
+    assert torch.allclose(col_marg, b, atol=1e-3)
+
+
+def test_sinkslot_symmetric_torch_marginal_and_potential_modes_converge_and_agree():
+    """Unlike alternating, neither marginal is exact after a symmetric update
+    (see sinkslot_symmetric_triton's own docstring), so this checks BOTH row
+    and col marginals directly against the achieved plan, not just the
+    solver's own self-reported `viol`.
+    """
+    n, m, eps, L = 300, 250, 0.05, 40
+    x, y, a, b = _problem(n, m)
+    rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
+    cost = sparse_sqeuclidean_cost(x, y, rows, cols)
+    lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
+    log_a, log_b = a.log(), b.log()
+
+    for mode in ("marginal", "potential"):
+        stop = _Stop(mode=mode, max_iter=20000)
+        phi, psi, it, converged, viol = sinkslot_symmetric_torch(
+            rows, cols, lam, log_a, log_b, n, m, 20000, stop=stop)
+        assert converged, f"{mode}: did not converge within max_iter"
+        assert viol <= stop.tol
+
+        T_vals = (phi[rows] + psi[cols] + lam).exp()
+        row_marg = torch.zeros(n).index_add_(0, rows, T_vals)
+        col_marg = torch.zeros(m).index_add_(0, cols, T_vals)
+        assert float((row_marg - a).abs().max()) <= stop.tol * 10
+        assert float((col_marg - b).abs().max()) <= stop.tol * 10
+
+
+def test_sinkslot_symmetric_torch_potential_linf_mode_converges():
+    n, m, eps, L = 300, 250, 0.05, 40
+    x, y, a, b = _problem(n, m)
+    rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
+    cost = sparse_sqeuclidean_cost(x, y, rows, cols)
+    lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
+    log_a, log_b = a.log(), b.log()
+
+    stop = _Stop(mode="potential_linf", max_iter=20000, tol=1e-6)
+    phi, psi, it, converged, change = sinkslot_symmetric_torch(
+        rows, cols, lam, log_a, log_b, n, m, 20000, stop=stop, eps=eps)
+    assert converged
+    assert change < stop.tol
+
+
+def test_sinkslot_symmetric_converges_to_the_same_plan_as_alternating():
+    """The two schemes solve the same convex problem, so at tight tolerance
+    they must agree on the achieved TRANSPORT PLAN -- not on phi/psi
+    themselves, which are only defined up to the usual (+c,-c) potential
+    -shift ambiguity and can (and do) converge to different additive shifts.
+    """
+    n, m, eps, L = 300, 250, 0.05, 40
+    x, y, a, b = _problem(n, m)
+    stop = _Stop(mode="marginal", max_iter=20000, tol=1e-8)
+
+    r_alt = sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=20000, stop=stop,
+                            backend="torch", variant="alternating")
+    r_sym = sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=20000, stop=stop,
+                            backend="torch", variant="symmetric")
+    phi_a, psi_a, rows_a, cols_a, S_a = r_alt[:5]
+    phi_s, psi_s, rows_s, cols_s, S_s = r_sym[:5]
+    assert torch.equal(rows_a, rows_s) and torch.equal(cols_a, cols_s)
+
+    cost = (x[rows_a] - y[cols_a]).square().sum(1)
+    lam = S_a.clamp_min(torch.finfo(S_a.dtype).tiny).log() - cost / eps
+    T_a = (phi_a[rows_a] + psi_a[cols_a] + lam).exp()
+    T_s = (phi_s[rows_s] + psi_s[cols_s] + lam).exp()
+    relerr = float((T_a - T_s).norm() / T_a.norm())
+    assert relerr < 1e-3, f"alternating and symmetric converged to different plans: {relerr:.3e}"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
@@ -215,3 +326,44 @@ def test_seg_lse_coo_matches_brute_force():
         if group.numel() > 0:
             want[i] = torch.logsumexp(group, dim=0)
     assert torch.allclose(got, want, atol=1e-5)
+
+
+def test_samples_loss_symmetric_option_runs_and_agrees_with_alternating():
+    """SamplesLoss(symmetric=True) (#34): forward value and backward gradient
+    must both be finite, and -- given enough iterations for both schemes to
+    be near their (shared, see test_sinkslot_symmetric_converges_to_the_same
+    _plan_as_alternating above) fixed point -- close to the default
+    (alternating) SamplesLoss on the same problem. Not bit-identical: they
+    take different iterative paths to the same plan.
+    """
+    from sinkslot import SamplesLoss
+
+    n, d = 100, 3
+    g = torch.Generator(device="cpu").manual_seed(0)
+    x = torch.randn(n, d, generator=g)
+    y = torch.randn(n, d, generator=g) + 1.0
+
+    x_sym = x.clone().requires_grad_(True)
+    loss_sym = SamplesLoss(eps=0.05, L=20, n_iters=3000, backend="torch", symmetric=True)
+    L_sym = loss_sym(x_sym, y)
+    L_sym.backward()
+    assert torch.isfinite(L_sym) and torch.isfinite(x_sym.grad).all()
+
+    x_alt = x.clone().requires_grad_(True)
+    loss_alt = SamplesLoss(eps=0.05, L=20, n_iters=3000, backend="torch", symmetric=False)
+    L_alt = loss_alt(x_alt, y)
+    L_alt.backward()
+
+    loss_relerr = abs(float(L_sym) - float(L_alt)) / abs(float(L_alt))
+    grad_relerr = float((x_sym.grad - x_alt.grad).norm() / x_alt.grad.norm())
+    assert loss_relerr < 0.01, f"loss disagrees too much: {loss_relerr:.3e}"
+    assert grad_relerr < 0.02, f"grad disagrees too much: {grad_relerr:.3e}"
+
+    # alpha=1.0: unaveraged simultaneous update: must still run and be finite.
+    loss_a1 = SamplesLoss(eps=0.05, L=20, n_iters=500, backend="torch",
+                           symmetric=True, alpha=1.0)
+    assert torch.isfinite(loss_a1(x, y))
+
+    # potentials=True escape hatch under symmetric too.
+    phi, psi = loss_sym(x, y, potentials=True)
+    assert phi.shape == (n,) and psi.shape == (n,)
