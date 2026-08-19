@@ -25,7 +25,7 @@ import functools
 
 import torch
 
-from .solver import _HAS_TRITON, sot_plan_coo, _ot_1d_coo_batched_cuda, to_csr, sparse_sqeuclidean_cost
+from .solver import _HAS_TRITON, expected_sliced_plan, _ot_1d_coo_batched_cuda, to_csr, sparse_sqeuclidean_cost
 from .sinkhorn_solvers import sinkslot_alternating_triton, sinkslot_alternating_torch
 
 
@@ -137,7 +137,7 @@ def hvp_x_sqeuclid(X, Y, a, eps, L, seed, n_iters, v, tau2=3e-7, solve_tol=1e-11
 
     X, Y, a, v expected fp32 (same Triton-kernel constraint as slot_grad).
     `a` is used as both marginals, matching slot_grad's own
-    `sot_plan_coo(X, Y, a, a, ...)` call (X, Y assumed equal-size, uniform-a,
+    `expected_sliced_plan(X, Y, a, a, ...)` call (X, Y assumed equal-size, uniform-a,
     as in every caller in this repo).
 
     `backend`: "auto" (default) / "triton" / "torch", same meaning and same
@@ -178,7 +178,7 @@ def hvp_x_sqeuclid(X, Y, a, eps, L, seed, n_iters, v, tau2=3e-7, solve_tol=1e-11
 
     n, d = X.shape
     m = Y.shape[0]
-    rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=seed, ot1d=_ot_1d_coo_batched_cuda)
+    rows, cols, S = expected_sliced_plan(X, Y, a, a, L=L, seed=seed, ot1d=_ot_1d_coo_batched_cuda)
     cost = sparse_sqeuclidean_cost(
         X, Y, rows, cols,
         use_triton=(backend == "triton") if backend != "auto" else None,

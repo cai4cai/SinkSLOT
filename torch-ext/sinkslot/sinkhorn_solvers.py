@@ -30,7 +30,7 @@ from .solver import (
     _HAS_TRITON,
     _ot_1d_coo_batched,
     _ot_1d_coo_batched_cuda,
-    sot_plan_coo,
+    expected_sliced_plan,
     to_csr,
     sparse_sqeuclidean_cost,
 )
@@ -398,7 +398,7 @@ def _seg_lse_coo(vals, idx, size):
 def sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=None, eps=None):
     """Pure-torch counterpart to `sinkslot_alternating_triton` -- same four
     `stop.mode` semantics, no Triton, no CSR/CSC (operates directly on the COO
-    `sot_plan_coo` returns, since `index_add_`/`scatter_reduce_` don't need
+    `expected_sliced_plan` returns, since `index_add_`/`scatter_reduce_` don't need
     sorted input the way the Triton kernel's one-program-per-row parallelism
     does).
 
@@ -584,7 +584,7 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None,
 
     n, m = X.shape[0], Y.shape[0]
     ot1d = _ot_1d_coo_batched_cuda if X.is_cuda else _ot_1d_coo_batched
-    rows, cols, S = sot_plan_coo(X, Y, a, b, L=L, seed=seed, chunk=chunk, ot1d=ot1d)
+    rows, cols, S = expected_sliced_plan(X, Y, a, b, L=L, seed=seed, chunk=chunk, ot1d=ot1d)
     cost = sparse_sqeuclidean_cost(X, Y, rows, cols, use_triton=use_triton)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()

@@ -18,7 +18,7 @@ import pytest
 import torch
 
 from sinkslot.solver import (
-    sot_plan_coo,
+    expected_sliced_plan,
     sparse_sqeuclidean_cost,
 )
 from sinkslot.sinkhorn_solvers import (
@@ -56,7 +56,7 @@ def test_no_triton_import_required():
 
 def test_sparse_sqeuclidean_cost_matches_dense_on_cpu():
     x, y, a, b = _problem()
-    rows, cols, S = sot_plan_coo(x, y, a, b, L=20, seed=0)
+    rows, cols, S = expected_sliced_plan(x, y, a, b, L=20, seed=0)
     cost = sparse_sqeuclidean_cost(x, y, rows, cols)
     ref = (x[rows] - y[cols]).square().sum(1)
     assert torch.allclose(cost, ref)
@@ -69,7 +69,7 @@ def test_run_v5_torch_fixed_mode_gives_correct_marginals():
     # explicit tolerance and don't depend on picking "enough" iterations.
     n, m, eps, L, iters = 300, 250, 0.05, 40, 3000
     x, y, a, b = _problem(n, m)
-    rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
+    rows, cols, S = expected_sliced_plan(x, y, a, b, L=L, seed=0)
     cost = sparse_sqeuclidean_cost(x, y, rows, cols)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()
@@ -90,7 +90,7 @@ def test_run_v5_torch_fixed_mode_gives_correct_marginals():
 def test_run_v5_torch_marginal_and_potential_modes_converge_and_agree():
     n, m, eps, L = 300, 250, 0.05, 40
     x, y, a, b = _problem(n, m)
-    rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
+    rows, cols, S = expected_sliced_plan(x, y, a, b, L=L, seed=0)
     cost = sparse_sqeuclidean_cost(x, y, rows, cols)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()
@@ -109,7 +109,7 @@ def test_run_v5_torch_marginal_and_potential_modes_converge_and_agree():
 def test_run_v5_torch_potential_linf_mode_converges():
     n, m, eps, L = 300, 250, 0.05, 40
     x, y, a, b = _problem(n, m)
-    rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
+    rows, cols, S = expected_sliced_plan(x, y, a, b, L=L, seed=0)
     cost = sparse_sqeuclidean_cost(x, y, rows, cols)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()
@@ -123,7 +123,7 @@ def test_run_v5_torch_potential_linf_mode_converges():
 def test_run_v5_torch_rejects_unknown_mode():
     n, m, eps, L = 100, 80, 0.1, 20
     x, y, a, b = _problem(n, m)
-    rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
+    rows, cols, S = expected_sliced_plan(x, y, a, b, L=L, seed=0)
     cost = sparse_sqeuclidean_cost(x, y, rows, cols)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()
@@ -196,7 +196,7 @@ def test_sinkslot_symmetric_torch_fixed_mode_gives_correct_marginals():
     """
     n, m, eps, L, iters = 300, 250, 0.05, 40, 4000
     x, y, a, b = _problem(n, m)
-    rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
+    rows, cols, S = expected_sliced_plan(x, y, a, b, L=L, seed=0)
     cost = sparse_sqeuclidean_cost(x, y, rows, cols)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()
@@ -220,7 +220,7 @@ def test_sinkslot_symmetric_torch_marginal_and_potential_modes_converge_and_agre
     """
     n, m, eps, L = 300, 250, 0.05, 40
     x, y, a, b = _problem(n, m)
-    rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
+    rows, cols, S = expected_sliced_plan(x, y, a, b, L=L, seed=0)
     cost = sparse_sqeuclidean_cost(x, y, rows, cols)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()
@@ -242,7 +242,7 @@ def test_sinkslot_symmetric_torch_marginal_and_potential_modes_converge_and_agre
 def test_sinkslot_symmetric_torch_potential_linf_mode_converges():
     n, m, eps, L = 300, 250, 0.05, 40
     x, y, a, b = _problem(n, m)
-    rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
+    rows, cols, S = expected_sliced_plan(x, y, a, b, L=L, seed=0)
     cost = sparse_sqeuclidean_cost(x, y, rows, cols)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()

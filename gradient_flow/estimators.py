@@ -42,7 +42,7 @@ magnitude and is unaffected.
 import torch
 
 from sinkslot.solver import (
-    _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo, sparse_sqeuclidean_cost,
+    _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, expected_sliced_plan, sparse_sqeuclidean_cost,
 )
 from gradient_flow.config import L, N
 from gradient_flow.run import DATA_DIR, DEVICE, draw_samples
@@ -113,7 +113,7 @@ def main():
     a = torch.full((N,), 1.0 / N, dtype=torch.float32, device=DEVICE)
 
     ot1d = _ot_1d_coo_batched_cuda if DEVICE == "cuda" else _ot_1d_coo_batched
-    rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=SEED, ot1d=ot1d)
+    rows, cols, S = expected_sliced_plan(X, Y, a, a, L=L, seed=SEED, ot1d=ot1d)
     log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
     print(f"support nnz={rows.numel()}  N={N}  L={L}  eps={EPS}")
 

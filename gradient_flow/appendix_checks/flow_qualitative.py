@@ -63,7 +63,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo
+from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, expected_sliced_plan
 from gradient_flow.along_flow import regularized_unrolled
 from gradient_flow.config import L, LR, N, N_STEPS, STEPS
 from gradient_flow.estimators import SEED, three_gradients
@@ -83,7 +83,7 @@ def run_flow(mode, X0, Y, a, n, steps, iters, eps, checkpoints):
     ot1d = _ot_1d_coo_batched_cuda if X0.is_cuda else _ot_1d_coo_batched
     out = {}
     for step in range(steps + 1):
-        rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=SEED, ot1d=ot1d)
+        rows, cols, S = expected_sliced_plan(X, Y, a, a, L=L, seed=SEED, ot1d=ot1d)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
 
         if mode == "regularized":

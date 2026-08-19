@@ -74,7 +74,7 @@ import argparse
 
 import torch
 
-from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo
+from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, expected_sliced_plan
 from gradient_flow.config import L, LR, N, N_STEPS
 from gradient_flow.estimators import EPS, SEED, solve, three_gradients
 from gradient_flow.run import DATA_DIR, DEVICE, draw_samples
@@ -124,7 +124,7 @@ def trajectory(X, Y, a, n, steps, iters, eps, n_proj, regularized=False, on_step
     cos_reg, nnz, viol.  norm_resid is |g_full - g_env|, the term the envelope
     theorem drops, and w2 is the plan's transport cost <P,C> from the same solve.
     X is not modified. `on_step(step, record)` is called after each step.
-    `seed` picks the projection directions sot_plan_coo draws the support from.
+    `seed` picks the projection directions expected_sliced_plan draws the support from.
     """
     X = X.clone()
     out = {k: [] for k in ("norm_env", "norm_full", "norm_resid", "w2", "cos",
@@ -135,7 +135,7 @@ def trajectory(X, Y, a, n, steps, iters, eps, n_proj, regularized=False, on_step
         # Support is rebuilt from the current X, as the flow itself does; both
         # estimators then share it, so the step's comparison is like-for-like.
         ot1d = _ot_1d_coo_batched_cuda if X.is_cuda else _ot_1d_coo_batched
-        rows, cols, S = sot_plan_coo(X, Y, a, a, L=n_proj, seed=seed, ot1d=ot1d)
+        rows, cols, S = expected_sliced_plan(X, Y, a, a, L=n_proj, seed=seed, ot1d=ot1d)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
 
         g_env, g_det, g_full, viol, w2 = three_gradients(

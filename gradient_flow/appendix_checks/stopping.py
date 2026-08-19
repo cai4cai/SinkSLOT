@@ -44,7 +44,7 @@ from sinkslot.solver import (  # noqa: E402
     _HAS_TRITON,
     _ot_1d_coo_batched,
     _ot_1d_coo_batched_cuda,
-    sot_plan_coo,
+    expected_sliced_plan,
     sparse_sqeuclidean_cost,
     to_csr,
 )
@@ -78,7 +78,7 @@ def _build_support(X, Y, a, eps, slices, seed):
     """
     n, m = X.shape[0], Y.shape[0]
     ot1d = _ot_1d_coo_batched_cuda if X.is_cuda else _ot_1d_coo_batched
-    rows, cols, S = sot_plan_coo(X, Y, a, a, L=slices, seed=seed, ot1d=ot1d)
+    rows, cols, S = expected_sliced_plan(X, Y, a, a, L=slices, seed=seed, ot1d=ot1d)
     cost = sparse_sqeuclidean_cost(X, Y, rows, cols)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     if _HAS_TRITON and X.is_cuda:
