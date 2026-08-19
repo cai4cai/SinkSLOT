@@ -5,7 +5,7 @@
 In sweep_along_flow.py's middle panel the cosine curve wiggles visibly at L=10
 and L=30 -- non-monotone step to step, with bumps of a few times 1e-2 -- while
 L=100 and L=300 are smooth. The suspicion is that this is not a property of the
-gradients at all but sampling noise in the support: expected_sliced_plan builds the
+gradients at all but sampling noise in the support: sparse_sot_coo builds the
 sparse support from L random 1-D projections, so L directly sets how many
 independent draws the support averages over (~9.3k nnz at L=10 against ~72k at
 L=100). As X moves, one projection's sort order flips and a correspondingly

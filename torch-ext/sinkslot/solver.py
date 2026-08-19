@@ -5,7 +5,7 @@ This is the paper's own contribution -- a distinct algorithm from FlashSinkhorn
 fused kernel over the full cost matrix).
 
 This module holds the pieces with no FlashSinkhorn equivalent to mirror: the
-sliced-OT support construction (`expected_sliced_plan`, `_ot_1d_coo_batched[_cuda]`),
+sliced-OT support construction (`sparse_sot_coo`, `_ot_1d_coo_batched[_cuda]`),
 CSR conversion (`to_csr`), and the sparse cost (`sparse_sqeuclidean_cost`).
 The Sinkhorn solve loops live in `sinkhorn_solvers.py`, the envelope-theorem
 gradient in `gradient.py`, the Hessian-vector product in `hvp.py` -- split out
@@ -38,7 +38,7 @@ def get_random_projections(d: int, L: int, seed: int) -> torch.Tensor:
 
     Dtype: there's no tensor input to take a dtype from (d, L, seed are plain
     Python ints), so this always returns float64, on purpose, for an accurate
-    normalisation regardless of what dtype the caller works in. `expected_sliced_plan`
+    normalisation regardless of what dtype the caller works in. `sparse_sot_coo`
     (the only caller) immediately casts the result down to `X`'s dtype -- if
     you add a new caller, do the same, or you'll end up carrying float64
     directions through an otherwise float32 pipeline.
@@ -171,14 +171,14 @@ def _ot_1d_coo_batched_cuda(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor,
     return R.reshape(-1)[sel], Cc.reshape(-1)[sel], mass.reshape(-1)[sel]
 
 
-def expected_sliced_plan(
+def sparse_sot_coo(
     X: torch.Tensor, Y: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
     L: int, seed: int, chunk: int = None, ot1d=_ot_1d_coo_batched,
 ):
     """Unsmoothed SOT plan as COO: (rows, cols, vals), nnz <= L(N+M).
 
-    Named to match POT's `ot.sliced.expected_sliced_plan` (POT's version is
-    dense; this one is sparse-native throughout).
+    Same role as POT's `ot.sliced.expected_sliced_plan(..., dense=False)`,
+    but always sparse -- there's no dense option here.
 
     Same construction as sot_plan_dense but never allocates N x M. The gamma
     blend is deliberately absent -- gamma * (a (x) b) is rank-one and separable,
@@ -261,7 +261,7 @@ def to_csr(rows: torch.Tensor, cols: torch.Tensor, vals: torch.Tensor, n: int,
     `perm` is kept so caller-side per-entry arrays (cost, plan values) can be
     reordered into the same layout, and results mapped back.
 
-    The sort is STABLE on purpose. `expected_sliced_plan` returns its entries ordered by
+    The sort is STABLE on purpose. `sparse_sot_coo` returns its entries ordered by
     the flat index `row * m + col`, so they already arrive sorted by column
     within each row; an unstable sort is free to scramble that, and the inner
     loop's cost is the gather `psi[colidx[k]]`, whose locality is exactly that
@@ -273,7 +273,7 @@ def to_csr(rows: torch.Tensor, cols: torch.Tensor, vals: torch.Tensor, n: int,
     and the int64 sort was scanning 64 bits for nothing -- 4.96 -> 2.24 ms at
     nnz=26M, same permutation (stability makes it exact, not merely equivalent).
     """
-    # `expected_sliced_plan` coalesces on the flat key `row * m + col` and returns it
+    # `sparse_sot_coo` coalesces on the flat key `row * m + col` and returns it
     # sorted, so for the CSR build `rows` is already non-decreasing and the
     # permutation is the identity. Detecting that skips an int64 argsort of nnz
     # (7.9 MiB at nnz=989k) and lets the values be aliased rather than gathered.
