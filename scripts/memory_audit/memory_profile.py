@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Profile GPU memory allocation at the operator level using PyTorch's profiler.
 
-The aggregate figures from scripts/memory.py answer "how much memory did the
+The aggregate figures from scripts/memory_audit/memory.py answer "how much memory did the
 entire phase need" but not "where did it come from". This script uses PyTorch's
 built-in profilers to attribute GPU memory to specific kernels and operations:
 
@@ -20,8 +20,8 @@ compilation does not dominate the attribution.
 
 Usage:
 
-    python scripts/memory_profile.py --method sinkslot --n 4096 --d 64 --slices 512 --output-dir /tmp/profile
-    python scripts/memory_profile.py --method flash_symmetric --n 4096 --d 64 --output-dir /tmp/profile
+    python scripts/memory_audit/memory_profile.py --method sinkslot --n 4096 --d 64 --slices 512 --output-dir /tmp/profile
+    python scripts/memory_audit/memory_profile.py --method flash_symmetric --n 4096 --d 64 --output-dir /tmp/profile
 """
 
 from __future__ import annotations
