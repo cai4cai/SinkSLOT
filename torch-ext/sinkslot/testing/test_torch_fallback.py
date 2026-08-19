@@ -120,6 +120,33 @@ def test_run_v5_torch_potential_linf_mode_converges():
     assert converged and change < 1e-4
 
 
+def test_run_v5_torch_marginal_mode_proxy_tracks_real_violation():
+    """#33: "marginal" mode's viol is now a*(phi-phi_old).exp() (cheap, no
+    extra seg_lse_coo call), not the exact one-step-ahead check -- verify the
+    proxy's "converged" signal corresponds to a genuinely small ACHIEVED row
+    marginal error, not just a self-reported number that happens to clear
+    tol without meaning much.
+    """
+    n, m, eps, L = 300, 250, 0.05, 40
+    x, y, a, b = _problem(n, m)
+    rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
+    cost = sparse_sqeuclidean_cost(x, y, rows, cols)
+    lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
+    log_a, log_b = a.log(), b.log()
+
+    phi, psi, it, converged, viol = sinkslot_alternating_torch(
+        rows, cols, lam, log_a, log_b, n, m, 20000, _Stop(mode="marginal", tol=1e-6))
+    assert converged and viol <= 1e-6
+
+    T_vals = (phi[rows] + psi[cols] + lam).exp()
+    row_marg = torch.zeros(n).index_add_(0, rows, T_vals)
+    real_viol = float((row_marg - a).abs().max())
+    # Not asserting real_viol <= 1e-6 too: the proxy isn't exact (that's the
+    # whole point of #33), so a modest gap is expected -- just that
+    # "converged" isn't wildly wrong, i.e. off by orders of magnitude.
+    assert real_viol <= 1e-3, f"proxy reported converged but real violation is {real_viol:.3e}"
+
+
 def test_run_v5_torch_rejects_unknown_mode():
     n, m, eps, L = 100, 80, 0.1, 20
     x, y, a, b = _problem(n, m)
