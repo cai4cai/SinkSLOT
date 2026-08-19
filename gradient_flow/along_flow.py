@@ -74,10 +74,10 @@ import argparse
 
 import torch
 
-from sinkslot.solver import _ot_1d_coo_batched_cuda, sot_plan_coo
+from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo
 from gradient_flow.config import L, LR, N, N_STEPS
 from gradient_flow.estimators import EPS, SEED, solve, three_gradients
-from gradient_flow.run import DATA_DIR, draw_samples
+from gradient_flow.run import DATA_DIR, DEVICE, draw_samples
 
 
 def regularized_unrolled(k, X, Y, a, rows, cols, log_S, n, eps=EPS):
@@ -134,8 +134,8 @@ def trajectory(X, Y, a, n, steps, iters, eps, n_proj, regularized=False, on_step
     for step in range(steps + 1):
         # Support is rebuilt from the current X, as the flow itself does; both
         # estimators then share it, so the step's comparison is like-for-like.
-        rows, cols, S = sot_plan_coo(X, Y, a, a, L=n_proj, seed=seed,
-                                     ot1d=_ot_1d_coo_batched_cuda)
+        ot1d = _ot_1d_coo_batched_cuda if X.is_cuda else _ot_1d_coo_batched
+        rows, cols, S = sot_plan_coo(X, Y, a, a, L=n_proj, seed=seed, ot1d=ot1d)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
 
         g_env, g_det, g_full, viol, w2 = three_gradients(
@@ -163,9 +163,11 @@ def trajectory(X, Y, a, n, steps, iters, eps, n_proj, regularized=False, on_step
 
         if step == steps:
             break
+        was_cuda = X.is_cuda
         X = (X - lr * n * g_env).detach().clone()
         del g_env, g_det, g_full, rows, cols, S, log_S
-        torch.cuda.empty_cache()
+        if was_cuda:
+            torch.cuda.empty_cache()
     return out
 
 
@@ -220,14 +222,15 @@ def main():
                    help="also unroll <P,C> + eps*KL(P||S), which should match g_env")
     args = p.parse_args()
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("needs a CUDA GPU: the support builder is Triton-only")
+    if DEVICE != "cuda":
+        print("gradient_flow/along_flow.py: no CUDA GPU found, running on CPU "
+              "(pure torch throughout -- much slower, same algorithm).")
 
     n = args.n
     rng = torch.Generator(device="cpu").manual_seed(1)
-    X = draw_samples(DATA_DIR / "density_a.png", n, rng, device="cuda").float()
-    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device="cuda").float()
-    a = torch.full((n,), 1.0 / n, dtype=torch.float32, device="cuda")
+    X = draw_samples(DATA_DIR / "density_a.png", n, rng, device=DEVICE).float()
+    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device=DEVICE).float()
+    a = torch.full((n,), 1.0 / n, dtype=torch.float32, device=DEVICE)
 
     print(f"N={n}  L={L}  eps={EPS}  inner iters={args.iters}  lr={LR}  steps={args.steps}")
     extra = f" {'cos(env,reg)':>13}" if args.regularized else ""

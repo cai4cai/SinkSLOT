@@ -2,8 +2,9 @@
 
     python -m gradient_flow.run
 
-Requires a CUDA GPU (the SinkSLOT arm's cost/LSE kernels are Triton, which
-doesn't run on CPU -- see solver.py).
+Runs on CPU or CUDA. A CUDA GPU with Triton reproduces the reported numbers
+(the fused kernels, see sinkslot/solver.py); without one, slot_grad falls
+back to a pure-torch path (same algorithm, much slower) automatically.
 
 Four methods, one figure:
   * SOT (Bonneel et al., 2015): the plain, unregularized sliced W2 distance --
@@ -15,19 +16,20 @@ Four methods, one figure:
   * SinkSLOT (ours): the native v5 solver (torch-ext/sinkslot/solver.py), the
     exact pipeline this repo's own speed benchmarks exercise,
     plus the closed-form envelope-theorem gradient
-    grad_X SLOT_eps(X,Y) = 2*diag(a)*(X - T_eps(X)) (see solver.py).
+    grad_X SLOT_eps(X,Y) = 2*diag(a)*(X - T_eps(X)) (see sinkslot/solver.py).
 
     SOT/EOT/SROT run in float64 (vendor/sinkhorn_methods.py, ported from a
     sibling research repository's own copy, which has no CUDA/Triton
-    dependency). SinkSLOT runs in float32: its Triton cost kernel accumulates
-    in fp32 regardless of input dtype, so there is no float64 path for it in
-    this codebase. A companion script in that sibling repo instead used a
-    plain-torch (non-Triton) port of the same solver to keep every method at
-    float64 -- not available here, since this repo's SinkSLOT implementation
-    is Triton-only. In practice this float32-vs-float64
-    difference is invisible at 4-decimal reporting precision: this script's
-    output (W2^2 per step, per method) matches the companion float64 run
-    exactly, digit for digit.
+    dependency). SinkSLOT runs in float32 on the Triton path: its fused cost
+    kernel accumulates in fp32 regardless of input dtype (see
+    sparse_sqeuclidean_cost's own docstring), so there is no float64 path
+    there. The pure-torch fallback (used automatically without a GPU) has no
+    such restriction and follows X/Y/a's own dtype, but this script still
+    passes fp32 either way for a like-for-like comparison across both
+    backends. In practice the float32-vs-float64 difference is invisible at
+    4-decimal reporting precision: this script's Triton-path output (W2^2 per
+    step, per method) matches a float64 reference run exactly, digit for
+    digit.
 
 Compiled figure formatting: compact vertically with no dead space between
 adjacent method rows; for every intermediate checkpoint (step > 0), the
@@ -52,7 +54,7 @@ from gradient_flow.config import (
 from gradient_flow.vendor.sinkhorn_methods import (
     sinkhorn_divergence_torch_autograd, sr_sinkhorn_divergence_torch_autograd,
 )
-from gradient_flow.solver import slot_grad
+from sinkslot.solver import slot_grad
 
 DATA_DIR = Path(__file__).parent / "data"
 OUT_DIR = Path(__file__).parent / "outputs"
@@ -135,8 +137,9 @@ def run_flow(method, X0, Y, a_t, eps):
 
 def main():
     if DEVICE != "cuda":
-        raise RuntimeError("gradient_flow/run.py needs a CUDA GPU: the SinkSLOT arm's "
-                            "cost/LSE kernels are Triton, which has no CPU backend.")
+        print("gradient_flow/run.py: no CUDA GPU found, running the SinkSLOT arm on the "
+              "pure-torch fallback (slot_grad's backend='auto') -- much slower than the "
+              "fused Triton kernels the reported numbers use, but the same algorithm.")
 
     rng = torch.Generator(device="cpu").manual_seed(1)
     X0 = draw_samples(DATA_DIR / "density_a.png", N, rng, device=DEVICE)

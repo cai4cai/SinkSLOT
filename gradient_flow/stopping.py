@@ -2,7 +2,7 @@
 
     python -m gradient_flow.stopping
 
-`solver.slot_grad` differentiates SLOT_eps by the envelope theorem,
+`sinkslot.solver.slot_grad` differentiates SLOT_eps by the envelope theorem,
 
     grad_X SLOT_eps(X, Y) = 2 * diag(a) * (X - T_eps(X)),
 
@@ -27,7 +27,8 @@ proxy.
 
 Setup is identical to run.py's (same densities, same rng seed, same N, L, eps),
 and the measurement is taken at the first gradient step, where X is still the
-source blob. fp32 throughout, as solver.py requires.
+source blob. fp32 throughout. Runs on CPU or CUDA (see _build_support/_grad_at's
+own dispatch between the fused Triton loop and its pure-torch fallback).
 """
 from __future__ import annotations
 
@@ -40,15 +41,18 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from sinkslot.solver import (  # noqa: E402
+    _HAS_TRITON,
+    _ot_1d_coo_batched,
     _ot_1d_coo_batched_cuda,
     _run_v5,
+    _run_v5_torch,
+    plan_barycentric_sparse,
     sot_plan_coo,
     sparse_sqeuclidean_cost,
     to_csr,
 )
 from gradient_flow.config import DATA_SCALE, L, N  # noqa: E402
-from gradient_flow.run import DATA_DIR, OUT_DIR, draw_samples  # noqa: E402
-from gradient_flow.solver import _FixedStop, plan_barycentric_sparse  # noqa: E402
+from gradient_flow.run import DATA_DIR, DEVICE, OUT_DIR, draw_samples  # noqa: E402
 
 # Geometric-ish ladder: the interesting behaviour is all in the first ~200
 # iterations, and a linear grid wastes most of its points on the flat tail.
@@ -65,30 +69,42 @@ def _build_support(X, Y, a, eps, slices, seed):
     on (X, Y, a, L, seed), none of which vary across the sweep, so every
     iteration count below solves the *same* problem -- otherwise the curves
     would confound solver progress with a re-randomised support.
+
+    CSR/CSC are only needed for the fused Triton loop (_run_v5); on the
+    pure-torch path (_run_v5_torch) they're skipped entirely -- it operates
+    on the COO (rows, cols, lam) directly, so there's nothing to hoist there.
     """
     n, m = X.shape[0], Y.shape[0]
-    rows, cols, S = sot_plan_coo(X, Y, a, a, L=slices, seed=seed,
-                                 ot1d=_ot_1d_coo_batched_cuda)
+    ot1d = _ot_1d_coo_batched_cuda if X.is_cuda else _ot_1d_coo_batched
+    rows, cols, S = sot_plan_coo(X, Y, a, a, L=slices, seed=seed, ot1d=ot1d)
     cost = sparse_sqeuclidean_cost(X, Y, rows, cols)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
-    csr = to_csr(rows, cols, lam, n, narrow_key=True)
-    csc = to_csr(cols, rows, lam, m, narrow_key=True)
+    if _HAS_TRITON and X.is_cuda:
+        csr = to_csr(rows, cols, lam, n, narrow_key=True)
+        csc = to_csr(cols, rows, lam, m, narrow_key=True)
+    else:
+        csr = csc = None
     return rows, cols, lam, csr, csc
 
 
 def _grad_at(n_iters, X, Y, a, rows, cols, lam, csr, csc):
     """(gradient, max marginal violation) after exactly `n_iters` inner iterations.
 
-    `_run_v5` initialises the potentials to zero, so running it with n_iters=k
-    reproduces the state the solver would be in after k iterations -- no need to
-    checkpoint a single long run.
+    `_run_v5`/`_run_v5_torch` both initialise the potentials to zero, so
+    running with n_iters=k reproduces the state the solver would be in after
+    k iterations -- no need to checkpoint a single long run. Dispatches on
+    whether `_build_support` built CSR/CSC (Triton available and X on CUDA)
+    or not (pure-torch path).
     """
     n, m = X.shape[0], Y.shape[0]
-    r_ptr, r_idx, r_lam, _ = csr
-    c_ptr, c_idx, c_lam, _ = csc
     log_a = a.log()
-    phi, psi, _, _, _ = _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
-                                log_a, log_a, n, m, n_iters, _FixedStop())
+    if csr is not None:
+        r_ptr, r_idx, r_lam, _ = csr
+        c_ptr, c_idx, c_lam, _ = csc
+        phi, psi, _, _, _ = _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
+                                    log_a, log_a, n, m, n_iters)
+    else:
+        phi, psi, _, _, _ = _run_v5_torch(rows, cols, lam, log_a, log_a, n, m, n_iters)
 
     T_vals = (phi[rows] + psi[cols] + lam).exp()
     # The solver's own stopping statistic: after the column half-step the column
@@ -101,15 +117,15 @@ def _grad_at(n_iters, X, Y, a, rows, cols, lam, csr, csc):
 
 
 def main():
-    if not torch.cuda.is_available():
-        raise RuntimeError("needs a CUDA GPU: the SinkSLOT kernels are Triton, "
-                           "which has no CPU backend.")
+    if DEVICE != "cuda":
+        print("gradient_flow/stopping.py: no CUDA GPU found, running on CPU "
+              "(pure torch throughout -- much slower, same algorithm).")
 
     # Same rng draw order as run.py's main(), so X0/Y are the identical clouds.
     rng = torch.Generator(device="cpu").manual_seed(1)
-    X = draw_samples(DATA_DIR / "density_a.png", N, rng, device="cuda").float()
-    Y = draw_samples(DATA_DIR / "density_b.png", N, rng, device="cuda").float()
-    a = torch.full((N,), 1.0 / N, dtype=torch.float32, device="cuda")
+    X = draw_samples(DATA_DIR / "density_a.png", N, rng, device=DEVICE).float()
+    Y = draw_samples(DATA_DIR / "density_b.png", N, rng, device=DEVICE).float()
+    a = torch.full((N,), 1.0 / N, dtype=torch.float32, device=DEVICE)
 
     rows, cols, lam, csr, csc = _build_support(X, Y, a, EPS, L, SEED)
     print(f"support: nnz={rows.numel()}  N={N}  L={L}  eps={EPS}")

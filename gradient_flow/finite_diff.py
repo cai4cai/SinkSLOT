@@ -72,15 +72,16 @@ import argparse
 
 import torch
 
-from sinkslot.solver import _ot_1d_coo_batched_cuda, sot_plan_coo
+from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo
 from gradient_flow.config import L, LR, N, N_STEPS
 from gradient_flow.estimators import EPS, SEED, seg_lse
-from gradient_flow.run import DATA_DIR, draw_samples
+from gradient_flow.run import DATA_DIR, DEVICE, draw_samples
 
 
 def build_support(X, Y, a, n_proj, seed=SEED):
+    ot1d = _ot_1d_coo_batched_cuda if X.is_cuda else _ot_1d_coo_batched
     rows, cols, S = sot_plan_coo(X.float(), Y.float(), a.float(), a.float(),
-                                 L=n_proj, seed=seed, ot1d=_ot_1d_coo_batched_cuda)
+                                 L=n_proj, seed=seed, ot1d=ot1d)
     return rows, cols, S.double().clamp_min(1e-300).log()
 
 
@@ -155,15 +156,16 @@ def main():
                    help="flow steps to probe")
     args = p.parse_args()
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("needs a CUDA GPU: the support builder is Triton-only")
+    if DEVICE != "cuda":
+        print("gradient_flow/finite_diff.py: no CUDA GPU found, running on CPU "
+              "(pure torch throughout -- much slower, same algorithm).")
 
     n = args.n
     rng = torch.Generator(device="cpu").manual_seed(1)
-    X = draw_samples(DATA_DIR / "density_a.png", n, rng, device="cuda").double()
-    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device="cuda").double()
-    a = torch.full((n,), 1.0 / n, dtype=torch.float64, device="cuda")
-    gen = torch.Generator(device="cuda").manual_seed(0)
+    X = draw_samples(DATA_DIR / "density_a.png", n, rng, device=DEVICE).double()
+    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device=DEVICE).double()
+    a = torch.full((n,), 1.0 / n, dtype=torch.float64, device=DEVICE)
+    gen = torch.Generator(device=DEVICE).manual_seed(0)
 
     print(f"N={n}  L={L}  eps={args.eps:g}  iters={args.iters}  h={args.h:g}  "
           f"dirs={args.dirs}  float64")
@@ -177,7 +179,7 @@ def main():
             an, fd, jp, mv = [], [], [], []
             F = slot_value(X, Y, a, *base, args.iters, args.eps)
             for _ in range(args.dirs):
-                v = torch.randn(n, 2, generator=gen, device="cuda", dtype=torch.float64)
+                v = torch.randn(n, 2, generator=gen, device=DEVICE, dtype=torch.float64)
                 v /= v.norm()
                 r = probe(X, Y, a, v, args.h, args.iters, args.eps, L, base=base)
                 for lst, val in zip((an, fd, jp, mv), r):

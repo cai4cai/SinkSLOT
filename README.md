@@ -5,7 +5,10 @@ restricted to the support of a sliced-OT reference plan and solved with fused
 Triton kernels. SinkSLOT-CUDA is the same method with a CUDA-optimised setup
 path (2.1 to 3.1× faster plan build), benchmarked as a peer method.
 
-Needs a CUDA GPU. The solver is Triton-only, with no CPU fallback.
+The benchmarked numbers below are all from the fused Triton kernels on a CUDA
+GPU. `sinkslot.sinkslot_solve` also runs on CPU (or CUDA without Triton
+installed) via a pure-torch fallback -- same algorithm, no fused kernels, so
+noticeably slower, not a substitute for the reported throughput.
 
 ## Quick start
 
@@ -49,10 +52,11 @@ follows the authors' formula, `s = k·s₀(n)` with `s₀(n) = 1e-3·n·log⁴(n
 ## Layout
 
 `torch-ext/sinkslot/solver.py` is the method: sliced-plan builder, Triton
-kernels, v5 loop, and the SinkSLOT-CUDA setup path (`_ot_1d_coo_batched_cuda`,
-`sparse_sqeuclidean_cost`, int32-key `to_csr`). It sits in its own package
+kernels, v5 loop, the SinkSLOT-CUDA setup path (`_ot_1d_coo_batched_cuda`,
+`sparse_sqeuclidean_cost`, int32-key `to_csr`), and the envelope-theorem
+gradient (`slot_grad`, `plan_barycentric_sparse`). It sits in its own package
 because it is a different algorithm from the dense fused kernel it builds on,
-and is used outside benchmarking (see `gradient_flow/solver.py`).
+and is used outside benchmarking, by `gradient_flow/` below.
 
 `gradient_flow/` produces Figure 3 and investigates the gradient itself:
 
@@ -63,10 +67,11 @@ python -m gradient_flow.finite_diff        # is the dropped term really zero?
 python -m gradient_flow.closed_form_check  # is the closed form an artefact?
 ```
 
-Each module's docstring carries its own results table. `solver.py` holds the
-envelope projection `∇_X SLOT_ε(X,Y) = 2 diag(a)(X - T_ε(X))`,
-`vendor/sinkhorn_methods.py` the dense differentiable SOT/EOT/SROT baselines,
-and `data/` the two densities (blob to crescent) sampled into point clouds.
+Each module's docstring carries its own results table. `torch-ext/sinkslot/
+solver.py` holds the envelope projection `∇_X SLOT_ε(X,Y) = 2 diag(a)(X - T_ε(X))`
+(`slot_grad`), `vendor/sinkhorn_methods.py` the dense differentiable SOT/EOT/SROT
+baselines, and `data/` the two densities (blob to crescent) sampled into point
+clouds.
 
 `torch-ext/flash_sinkhorn/` is the underlying package: `samples_loss.py`
 (GeomLoss-compatible entry point), `sinkhorn_solvers.py`, `kernels/` (fused
