@@ -432,6 +432,30 @@ def seg_lse_online(indptr, colidx, lam, phi, psi, n, block=None, num_warps=None,
 # --------------------------------------------------------------------------
 
 
+_STOP_MODES = ("fixed", "marginal", "potential", "potential_linf")
+
+
+def _resolve_stop_mode(stop):
+    """Shared by `_run_v5` and `_run_v5_torch`: resolve `stop.mode` (or "fixed"
+    if `stop` is None) and validate it against `_STOP_MODES` upfront, so the
+    four valid modes stay one source of truth instead of two independently
+    -maintained checks. They drifted out of sync once already -- `_run_v5_torch`
+    validated from the start, `_run_v5` didn't, so a typo'd mode used to behave
+    differently depending on which backend happened to run it (fixed alongside
+    this helper, not by it: the old inline check ran only after the "fixed"
+    and "potential_linf" branches had already been ruled out, but for an
+    invalid mode neither of those branches matches anyway, so validating here
+    instead, before any branch runs, raises in the exact same cases as before).
+    """
+    mode = getattr(stop, "mode", "fixed") if stop is not None else "fixed"
+    if mode not in _STOP_MODES:
+        raise ValueError(
+            f"unknown stop.mode {mode!r}; expected one of "
+            f"'fixed', 'marginal', 'potential', 'potential_linf'"
+        )
+    return mode
+
+
 def _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
             n_iters, stop=None, eps=None):
     """v5: alternating fused half-steps over prebuilt CSR/CSC.
@@ -467,7 +491,7 @@ def _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
     phi, psi = torch.zeros_like(log_a), torch.zeros_like(log_b)
     z_n, z_m = torch.zeros_like(log_a), torch.zeros_like(log_b)
 
-    mode = getattr(stop, "mode", "fixed") if stop is not None else "fixed"
+    mode = _resolve_stop_mode(stop)
 
     if mode == "fixed":
         for _ in range(n_iters):
@@ -496,12 +520,7 @@ def _run_v5(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
                 prev_psi.copy_(psi)
         return phi, psi, it, converged, change
 
-    if mode not in ("marginal", "potential"):
-        raise ValueError(
-            f"unknown stop.mode {mode!r}; expected one of "
-            f"'fixed', 'marginal', 'potential', 'potential_linf'"
-        )
-
+    # mode in {"marginal", "potential"} -- the only two left after _resolve_stop_mode.
     a = log_a.exp()
     phi_next = torch.empty_like(log_a)
     it = 0
@@ -566,7 +585,7 @@ def _run_v5_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=None, eps=N
     testing/test_sinkslot_bench.py.
     """
     phi, psi = torch.zeros_like(log_a), torch.zeros_like(log_b)
-    mode = getattr(stop, "mode", "fixed") if stop is not None else "fixed"
+    mode = _resolve_stop_mode(stop)
 
     if mode == "fixed":
         for _ in range(n_iters):
@@ -595,12 +614,7 @@ def _run_v5_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=None, eps=N
                 prev_psi.copy_(psi)
         return phi, psi, it, converged, change
 
-    if mode not in ("marginal", "potential"):
-        raise ValueError(
-            f"unknown stop.mode {mode!r}; expected one of "
-            f"'fixed', 'marginal', 'potential', 'potential_linf'"
-        )
-
+    # mode in {"marginal", "potential"} -- the only two left after _resolve_stop_mode.
     a = log_a.exp()
     it = 0
     converged = False
