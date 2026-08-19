@@ -30,9 +30,7 @@ def get_random_projections(d: int, L: int, seed: int) -> torch.Tensor:
     """L random directions, drawn uniformly from the unit sphere in R^d.
 
     Standard-normal draws, L2-normalised -- the standard way to sample
-    uniformly on the sphere. Same role as POT's own
-    `ot.sliced.get_random_projections`, which this is named to match; see
-    https://pythonot.github.io/gen_modules/ot.sliced.html#ot.sliced.get_random_projections.
+    uniformly on the sphere. Named to match POT's `ot.sliced.get_random_projections`.
 
     Same construction as vendor/sinkhorn_methods.py's build_sot_plan, but on
     torch's own RNG rather than numpy's, so the two no longer agree bit-for-bit
@@ -179,14 +177,8 @@ def expected_sliced_plan(
 ):
     """Unsmoothed SOT plan as COO: (rows, cols, vals), nnz <= L(N+M).
 
-    Named to match POT's own `ot.sliced.expected_sliced_plan` (same role: the
-    plan induced by averaging L 1-D OT couplings over random projections,
-    before any entropic smoothing); see
-    https://pythonot.github.io/_modules/ot/sliced/_sliced_plans.html#expected_sliced_plan.
-    POT's version is dense and works from a full L(N,M) coupling tensor; this
-    one is sparse-native throughout (COO, `chunk`-bounded build) since SinkSLOT
-    is built around the sparse support this returns, not POT's dense one --
-    the shared name reflects matching intent, not a matching implementation.
+    Named to match POT's `ot.sliced.expected_sliced_plan` (POT's version is
+    dense; this one is sparse-native throughout).
 
     Same construction as sot_plan_dense but never allocates N x M. The gamma
     blend is deliberately absent -- gamma * (a (x) b) is rank-one and separable,
