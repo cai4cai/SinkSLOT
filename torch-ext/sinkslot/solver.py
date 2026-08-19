@@ -30,7 +30,7 @@ def get_random_projections(d: int, L: int, seed: int) -> torch.Tensor:
     """L random directions, drawn uniformly from the unit sphere in R^d.
 
     Standard-normal draws, L2-normalised -- the standard way to sample
-    uniformly on the sphere. Named to match POT's `ot.sliced.get_random_projections`.
+    uniformly on the sphere.
 
     Same construction as vendor/sinkhorn_methods.py's build_sot_plan, but on
     torch's own RNG rather than numpy's, so the two no longer agree bit-for-bit
@@ -176,9 +176,6 @@ def sparse_sot_coo(
     L: int, seed: int, chunk: int = None, ot1d=_ot_1d_coo_batched,
 ):
     """Unsmoothed SOT plan as COO: (rows, cols, vals), nnz <= L(N+M).
-
-    Same role as POT's `ot.sliced.expected_sliced_plan(..., dense=False)`,
-    but always sparse -- there's no dense option here.
 
     Same construction as sot_plan_dense but never allocates N x M. The gamma
     blend is deliberately absent -- gamma * (a (x) b) is rank-one and separable,
