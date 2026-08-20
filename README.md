@@ -10,9 +10,12 @@ product `a ⊗ b`. Restricting each Sinkhorn iteration to that plan's support
 reduces the per-iteration cost from `O(N²)` to `O(LN)`, where `L` is the
 number of random slicing directions.
 
+The resulting objective, SLOT, is a divergence: it needs no debiasing, and
+SLOT(x, x) = 0.
+
 By default SinkSLOT runs on fused Triton/CUDA kernels. It's also fully
-usable with plain PyTorch -- on CPU, or on CUDA without Triton installed --
-via an automatic pure-torch fallback: same algorithm, just without the
+usable with plain PyTorch, on CPU or on CUDA without Triton installed,
+through an automatic pure-torch fallback: same algorithm, just without the
 fused-kernel throughput.
 
 ## Install
@@ -31,8 +34,9 @@ it, SinkSLOT runs the pure-torch fallback automatically.
 
 ## Basic Usage
 
-The quickest way to call SinkSLOT is `sinkslot.SamplesLoss`, a GeomLoss-style
-callable loss module (same calling convention as `geomloss.SamplesLoss` /
+The quickest way to call SinkSLOT is `sinkslot.SamplesLoss`, a
+[GeomLoss](https://www.kernel-operations.io/geomloss/)-style callable loss
+module (same calling convention as `geomloss.SamplesLoss` /
 `flash_sinkhorn.SamplesLoss`):
 
 ```python
@@ -184,3 +188,7 @@ validated against them. Changes are confined to this harness: GPU, precision,
 stopping rule and timing instrumentation are fixed across every method, so the
 algorithm is the only difference. The update equations, reference coupling and
 sampling scheme are the authors' own.
+
+## Citation
+
+The arXiv paper isn't public yet. A citation will be added here once it is.
