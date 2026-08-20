@@ -367,3 +367,38 @@ def test_samples_loss_symmetric_option_runs_and_agrees_with_alternating():
     # potentials=True escape hatch under symmetric too.
     phi, psi = loss_sym(x, y, potentials=True)
     assert phi.shape == (n,) and psi.shape == (n,)
+
+
+def test_samples_loss_stop_early_stopping_agrees_with_fixed_iters():
+    """SamplesLoss(stop=...) forwards to sinkslot_solve unchanged: forward
+    value and backward gradient must both be finite, close to a
+    fixed-iteration SamplesLoss run long enough to be near the same fixed
+    point, and potentials=True must still work with stop set.
+    """
+    from sinkslot import SamplesLoss
+
+    n, d = 100, 3
+    g = torch.Generator(device="cpu").manual_seed(0)
+    x = torch.randn(n, d, generator=g)
+    y = torch.randn(n, d, generator=g) + 1.0
+    stop = _Stop(mode="marginal", max_iter=20000, tol=1e-4, check_every=5)
+
+    x_stop = x.clone().requires_grad_(True)
+    loss_stop = SamplesLoss(eps=0.05, L=20, n_iters=200, backend="torch", stop=stop)
+    L_stop = loss_stop(x_stop, y)
+    L_stop.backward()
+    assert torch.isfinite(L_stop) and torch.isfinite(x_stop.grad).all()
+
+    x_fixed = x.clone().requires_grad_(True)
+    loss_fixed = SamplesLoss(eps=0.05, L=20, n_iters=3000, backend="torch")
+    L_fixed = loss_fixed(x_fixed, y)
+    L_fixed.backward()
+
+    loss_relerr = abs(float(L_stop) - float(L_fixed)) / abs(float(L_fixed))
+    grad_relerr = float((x_stop.grad - x_fixed.grad).norm() / x_fixed.grad.norm())
+    assert loss_relerr < 0.01, f"loss disagrees too much: {loss_relerr:.3e}"
+    assert grad_relerr < 0.02, f"grad disagrees too much: {grad_relerr:.3e}"
+
+    # potentials=True escape hatch under stop too.
+    phi, psi = loss_stop(x, y, potentials=True)
+    assert phi.shape == (n,) and psi.shape == (n,)
