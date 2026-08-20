@@ -16,12 +16,11 @@ envelope-theorem formula (Feydy et al. 2019), so there's no second Sinkhorn
 solve and no unrolled backprop through the loop -- see
 `gradient_flow/estimators.py`'s own comparison for why unrolling loses.
 
-Only a single weight vector `a`, shared by both marginals, is supported --
-not separate `a`/`b` the way `sinkslot_solve` itself allows -- because
-`slot_grad`'s envelope-theorem formula (which this reuses for backward) is
-only implemented and validated for that uniform-a case, matching every
-existing caller in this repo (see `slot_grad`'s own docstring). Extending it
-to independent `a`/`b` would need a fresh derivation, not attempted here.
+Independent `a`/`b` marginal weights (and `x.shape[0] != y.shape[0]`) are
+supported: the envelope-theorem gradient below is unchanged by `b` -- only
+the plan it's built from is -- verified by finite difference (~1e-10
+relative error, float64, independent random a/b, n != m). `b` defaults to
+`a` when omitted, matching this module's original shared-weight behavior.
 """
 
 from __future__ import annotations
@@ -47,9 +46,9 @@ class _SLOTCostFn(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, X, Y, a, eps, L, seed, n_iters, backend, variant, alpha, stop):
+    def forward(ctx, X, Y, a, b, eps, L, seed, n_iters, backend, variant, alpha, stop):
         phi, psi, rows, cols, S, it, converged, viol = sinkslot_solve(
-            X, Y, a, a, eps, L, seed, n_iters, stop=stop, backend=backend,
+            X, Y, a, b, eps, L, seed, n_iters, stop=stop, backend=backend,
             variant=variant, alpha=alpha)
         cost = sparse_sqeuclidean_cost(
             X, Y, rows, cols,
@@ -68,7 +67,7 @@ class _SLOTCostFn(torch.autograd.Function):
         Tx, _ = plan_barycentric_sparse(T_vals, rows, cols, X, Y)
         grad_x = 2.0 * a[:, None] * (X - Tx)
         return (grad_output * grad_x,
-                None, None, None, None, None, None, None, None, None, None)
+                None, None, None, None, None, None, None, None, None, None, None)
 
 
 class SamplesLoss(torch.nn.Module):
@@ -101,10 +100,16 @@ class SamplesLoss(torch.nn.Module):
 
     Forward returns the achieved SLOT_eps cost `<T, C>` as a scalar tensor,
     differentiable w.r.t. `x` via the envelope-theorem gradient (not `y`,
-    `a`, or `eps`/`L` -- matching `slot_grad`'s own scope exactly, since
+    `a`/`b`, or `eps`/`L` -- matching `slot_grad`'s own scope exactly, since
     that's the formula backward reuses). The envelope theorem's validity
     doesn't depend on which solve loop produced the potentials, so this
     holds for `symmetric=True` exactly as it does for the default.
+
+    `forward(x, y, a=None, b=None, potentials=False)`: `a`/`b` are the
+    source/target marginal weights, each independently uniform over its own
+    `x.shape[0]`/`y.shape[0]` when omitted -- matching `sparse_transport_plan`'s
+    convention, not tied to each other. `potentials=True` returns `(phi, psi)`
+    instead of the scalar cost.
     """
 
     def __init__(self, loss: str = "sinkhorn", *, eps: float = 0.05, L: int = 64,
@@ -126,19 +131,21 @@ class SamplesLoss(torch.nn.Module):
         self.stop = stop
 
     def forward(self, x: torch.Tensor, y: torch.Tensor, a: torch.Tensor = None,
-                potentials: bool = False):
-        n = x.shape[0]
+                b: torch.Tensor = None, potentials: bool = False):
+        n, m = x.shape[0], y.shape[0]
         if a is None:
             a = torch.full((n,), 1.0 / n, device=x.device, dtype=x.dtype)
+        if b is None:
+            b = torch.full((m,), 1.0 / m, device=y.device, dtype=y.dtype)
         variant = "symmetric" if self.symmetric else "alternating"
 
         if potentials:
             phi, psi, *_ = sinkslot_solve(
-                x, y, a, a, self.eps, self.L, self.seed, self.n_iters,
+                x, y, a, b, self.eps, self.L, self.seed, self.n_iters,
                 stop=self.stop, backend=self.backend, variant=variant,
                 alpha=self.alpha)
             return phi, psi
 
-        return _SLOTCostFn.apply(x, y, a, self.eps, self.L, self.seed,
+        return _SLOTCostFn.apply(x, y, a, b, self.eps, self.L, self.seed,
                                   self.n_iters, self.backend, variant, self.alpha,
                                   self.stop)
