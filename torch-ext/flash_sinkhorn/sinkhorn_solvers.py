@@ -197,8 +197,8 @@ def sinkhorn_flashstyle_alternating(
     f_hat = -alpha.clone()
     g_hat = -beta.clone()
 
-    prev_f_hat = f_hat.clone() if threshold is not None else None
-    prev_g_hat = g_hat.clone() if threshold is not None else None
+    prev_f_hat = f_hat if threshold is not None else None
+    prev_g_hat = g_hat if threshold is not None else None
 
     n_iters_used = 0
 
@@ -274,8 +274,8 @@ def sinkhorn_flashstyle_alternating(
                 g_change = (g_hat[:_mo] - prev_g_hat[:_mo]).abs().max().item()
                 if max(f_change, g_change) < threshold:
                     break
-                prev_f_hat.copy_(f_hat)
-                prev_g_hat.copy_(g_hat)
+                prev_f_hat = f_hat
+                prev_g_hat = g_hat
 
     else:
         # =================================================================
@@ -287,7 +287,10 @@ def sinkhorn_flashstyle_alternating(
         #   bias = g_hat/eps + log_b  (same formula as symmetric kernel)
         # This eliminates Python kernel launch overhead.
         # =================================================================
+        f_hat_old, g_hat_old = f_hat, g_hat
         for i in range(n_iters):
+            f_hat_old = f_hat
+            g_hat_old = g_hat
             # f-update: f̂ = -ε * LSE_j[x·y^T * coord_scale/ε + ĝ/ε + log(b)]
             # FUSED: kernel computes bias = g_hat/eps + log_b in SRAM
             f_hat = flashsinkhorn_lse_fused(
@@ -315,23 +318,10 @@ def sinkhorn_flashstyle_alternating(
                 _no = n_orig if n_orig is not None else len(f_hat)
                 _mo = m_orig if m_orig is not None else len(g_hat)
                 if stop_mode == "marginal":
-                    # g_hat was just computed FROM this f_hat, so the column
-                    # marginal is exactly b by construction (same shortcut
-                    # bench_forward.py's _srot_sinkhorn uses). f_hat is now one
-                    # half-step stale relative to the fresh g_hat, so the row
-                    # marginal needs a genuine recheck: recompute what f_hat WOULD
-                    # be given the current g_hat (the same update, just not applied),
-                    # without overwriting f_hat. This costs one extra reduction call
-                    # per check (not per iteration) -- pricier than potential_linf's
-                    # check here, since alternating's Gauss-Seidel structure doesn't
-                    # give this for free the way SROT's dense in-memory LSE does.
-                    f_hat_check = flashsinkhorn_lse_fused(
-                        x_f32, y_f32, g_hat, log_b, eps, cost_scale=cost_scale,
-                        damping=damp_f, allow_tf32=allow_tf32, use_exp2=use_exp2,
-                        autotune=autotune,
-                    )
-                    row_marg = a[:_no] * ((f_hat[:_no] - f_hat_check[:_no]) / eps).exp()
-                    col_marg = b[:_mo]  # exactly b by construction
+                    # Check both row and column marginal violation, without
+                    # an extra flashsinkhorn_lse_fused call.
+                    row_marg = a[:_no] * ((f_hat_old[:_no] - f_hat[:_no]) / eps).exp()
+                    col_marg = b[:_mo] * ((g_hat_old[:_mo] - g_hat[:_mo]) / eps).exp()
                     viol, mass = _marg_viol(row_marg, col_marg, a[:_no], b[:_mo])
                     if viol <= threshold:
                         break
@@ -340,8 +330,8 @@ def sinkhorn_flashstyle_alternating(
                     g_change = (g_hat[:_mo] - prev_g_hat[:_mo]).abs().max().item()
                     if max(f_change, g_change) < threshold:
                         break
-                    prev_f_hat.copy_(f_hat)
-                    prev_g_hat.copy_(g_hat)
+                    prev_f_hat = f_hat
+                    prev_g_hat = g_hat
 
     # Convert back to standard potentials
     if ott_convention:

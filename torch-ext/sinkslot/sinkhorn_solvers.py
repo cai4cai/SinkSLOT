@@ -185,10 +185,10 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
     Returns (phi, psi, iters_run, converged, final_viol). With `stop` None or
     stop.mode == "fixed" it runs exactly n_iters (converged/final_viol None).
     With stop.mode in {"marginal", "potential"} it runs up to stop.max_iter and
-    stops once a CONSERVATIVE PROXY for the max (L-infinity) row-marginal
-    violation drops below stop.tol (#33; see the check's own comment below for
-    what changed and why -- it no longer computes the exact violation, on
-    purpose, to drop an extra LSE call per check). (potential mode falls back
+    stops once a proxy for the max (L-infinity) row/col marginal violation
+    drops below stop.tol (see the check's own comment below -- it's not the
+    exact violation, traded for one fewer LSE call per side per check).
+    (potential mode falls back
     to the same check here; the u/v-change rule is Spar-Sink's and is applied
     there.) This is max, not a total-variation sum: matches the SLOT repo's
     actual working "marg_viol" rule (bench/solvers/sinkslot.py's
@@ -234,47 +234,34 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
                 if change < stop.tol:
                     converged = True
                     break
-                prev_phi.copy_(phi)
-                prev_psi.copy_(psi)
+                torch.utils.swap_tensors(prev_phi, phi)
+                torch.utils.swap_tensors(prev_psi, psi)
         return phi, psi, it, converged, change
 
     # mode in {"marginal", "potential"} -- the only two left after _resolve_stop_mode.
     #
-    # #33: this used to compute the EXACT row-marginal violation via a
-    # forward-looking phi_next = log_a - LSE_j(lam+psi_NEW), one extra
-    # seg_lse_online call per check (row_marg = a*exp(phi-phi_next), exact by
-    # the same identity as the docstring's r = a*exp(phi-phi_next) -- see
-    # marginal_violation_proof.tex's Section 2 derivation). That call is now
-    # replaced by phi_old, the phi value from BEFORE this iteration's own
-    # update (already available, no extra LSE): row_marg = a*exp(phi-phi_old).
-    #
-    # This is NOT the same quantity. phi_old = log_a - LSE_j(lam+psi_STALE),
-    # using the psi from the PREVIOUS iteration, not the one phi is currently
-    # paired with -- so a*exp(phi-phi_old) is the row marginal of a
-    # (phi, psi) pair the solver never actually holds, not the pair it's
-    # about to return. Verified empirically (marginal_violation_proof.tex's
-    # Table 2, 5 real datasets x 4 iteration counts): this proxy disagrees
-    # with the true violation by up to ~2x at low iteration counts on some
-    # datasets (over- or under-estimating -- neither direction is
-    # guaranteed), converging to match by the time either one would satisfy
-    # a typical tol like 1e-6. Traded deliberately: one fewer seg_lse_online
-    # call per check, in exchange for a coarser (not provably conservative)
-    # read on how converged the solve actually is.
-    a = log_a.exp()
-    phi_old = phi.clone()
+    # Check both row and column marginal violation, without an extra
+    # seg_lse_online call.
+    # swap_tensors below moves phi's data into phi_old in place (no memcpy);
+    # phi's old buffer becomes garbage, which is fine since seg_lse_online
+    # immediately overwrites it via out=phi.
+    a, b = log_a.exp(), log_b.exp()
+    phi_old, psi_old = phi.clone(), psi.clone()
     it = 0
     converged = False
     viol = float("inf")
     while it < stop.max_iter:
-        phi_old.copy_(phi)
+        torch.utils.swap_tensors(phi_old, phi)
         seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi)
+        torch.utils.swap_tensors(psi_old, psi)
         seg_lse_online(c_ptr, c_idx, c_lam, z_m, phi, m, c_blk, c_w, base=log_b, out=psi)
         it += 1
         if it % stop.check_every == 0 or it == stop.max_iter:
-            row_marg = a * (phi - phi_old).exp()
+            row_marg = a * (phi_old - phi).exp()
+            col_marg = b * (psi_old - psi).exp()
             # Not gated on mass_tol either -- SLOT's own working rule doesn't
             # check mass separately; still returned for the diagnostic column.
-            viol = float((row_marg - a).abs().max())
+            viol = max(float((row_marg - a).abs().max()), float((col_marg - b).abs().max()))
             mass = float(row_marg.sum())
             if viol <= stop.tol:
                 converged = True
@@ -444,7 +431,7 @@ def sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, sto
     if mode == "potential_linf":
         if eps is None:
             raise ValueError("eps is required for stop.mode == 'potential_linf'")
-        prev_phi, prev_psi = phi.clone(), psi.clone()
+        prev_phi, prev_psi = phi, psi
         it = 0
         converged = False
         change = float("inf")
@@ -458,28 +445,30 @@ def sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, sto
                 if change < stop.tol:
                     converged = True
                     break
-                prev_phi.copy_(phi)
-                prev_psi.copy_(psi)
+                prev_phi = phi
+                prev_psi = psi
         return phi, psi, it, converged, change
 
     # mode in {"marginal", "potential"} -- the only two left after _resolve_stop_mode.
-    # #33: phi_old proxy instead of the exact one-step-ahead phi_next lookahead
-    # -- see sinkslot_alternating_triton's matching comment for the derivation,
-    # what changed, and the empirically-measured (not merely assumed) gap this
-    # introduces.
-    a = log_a.exp()
-    phi_old = phi.clone()
+    # Check both row and column marginal violation, without an extra
+    # _seg_lse_coo call. No .clone() needed: phi/psi are reassigned to a new
+    # tensor each iteration, never mutated in place, so `phi_old = phi`
+    # before overwriting is already a cheap reference.
+    a, b = log_a.exp(), log_b.exp()
+    phi_old, psi_old = phi, psi
     it = 0
     converged = False
     viol = float("inf")
     while it < stop.max_iter:
         phi_old = phi
+        psi_old = psi
         phi = log_a - _seg_lse_coo(lam + psi[cols], rows, n)
         psi = log_b - _seg_lse_coo(lam + phi[rows], cols, m)
         it += 1
         if it % stop.check_every == 0 or it == stop.max_iter:
-            row_marg = a * (phi - phi_old).exp()
-            viol = float((row_marg - a).abs().max())
+            row_marg = a * (phi_old - phi).exp()
+            col_marg = b * (psi_old - psi).exp()
+            viol = max(float((row_marg - a).abs().max()), float((col_marg - b).abs().max()))
             if viol <= stop.tol:
                 converged = True
                 break

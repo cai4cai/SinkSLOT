@@ -882,7 +882,7 @@ def _srot_sinkhorn(
         return f, g, n_iters, None, None
 
     if mode == "potential_linf":
-        prev_f, prev_g = f.clone(), g.clone()
+        prev_f, prev_g = f, g
         it = 0
         converged = False
         change = float("inf")
@@ -895,20 +895,27 @@ def _srot_sinkhorn(
                 if change < stop.tol:
                     converged = True
                     break
-                prev_f.copy_(f)
-                prev_g.copy_(g)
+                prev_f = f
+                prev_g = g
         return f, g, it, converged, change
 
     a = log_a.exp()
+    b = log_b.exp()
+    f_old, g_old = f, g
     it = 0
     converged = False
     viol = float("inf")
     while it < stop.max_iter:
+        f_old = f
+        g_old = g
         f = eps * (log_a - _row_lse(g))
         g = eps * (log_b - _col_lse(f))
         it += 1
         if it % stop.check_every == 0 or it == stop.max_iter:
-            row_marg = (f / eps + _row_lse(g)).exp()      # col marginal is exactly b
+            # Check both row and column marginal violation, without an extra
+            # _row_lse call.
+            row_marg = a * ((f_old - f) / eps).exp()
+            col_marg = b * ((g_old - g) / eps).exp()
             # max (L-infinity), not sum: matches the SLOT repo's actual working
             # "marg_viol" rule (bench/solvers/sinkslot.py's _violation/_run_v5).
             # A sum over n terms against a fixed absolute tol is unreachable at
@@ -916,7 +923,7 @@ def _srot_sinkhorn(
             # documents max as the n-invariant criterion. Not gated on mass_tol
             # either, matching SLOT exactly -- mass is still returned for the
             # diagnostic column.
-            viol = float((row_marg - a).abs().max())
+            viol = max(float((row_marg - a).abs().max()), float((col_marg - b).abs().max()))
             mass = float(row_marg.sum())
             if viol <= stop.tol:
                 converged = True
@@ -1686,7 +1693,7 @@ def _sparsink_sinkhorn(
         # same rule FlashSinkhorn uses natively) -- just don't assume tol alone
         # bounds solution error here the way it more safely does for SROT/SinkSLOT's
         # denser supports. check_every should span the support's mixing timescale.
-        prev_f, prev_g = f.clone(), g.clone()
+        prev_f, prev_g = f, g
         it = 0
         converged = False
         change = float("inf")
@@ -1699,27 +1706,31 @@ def _sparsink_sinkhorn(
                 if change < stop.tol:
                     converged = True
                     break
-                prev_f.copy_(f)
-                prev_g.copy_(g)
+                prev_f = f
+                prev_g = g
         return f, g, empty, it, converged, change
 
     a = log_a.exp()
+    b = log_b.exp()
     it = 0
     converged = False
     viol = float("inf")
     while it < stop.max_iter:
-        f_prev, g_prev = f, g
+        f_old, g_old = f, g
         f = eps * (log_a - _row_lse(g))
         g = eps * (log_b - _col_lse(f))
         it += 1
         if it % stop.check_every == 0 or it == stop.max_iter:
-            row_marg = (f / eps + _row_lse(g)).exp()
+            # Check both row and column marginal violation, without an extra
+            # _row_lse call.
+            row_marg = a * ((f_old - f) / eps).exp()
+            col_marg = b * ((g_old - g) / eps).exp()
             # max (L-infinity), not sum -- see _srot_sinkhorn's comment: a sum
             # over n terms against a fixed absolute tol is unreachable at
             # n=10,000 regardless of convergence. Matches SLOT's actual
             # working "marg_viol" rule. Not gated on mass_tol either, matching
             # SLOT exactly -- mass is still returned for the diagnostic column.
-            viol = float((row_marg - a).abs().max())
+            viol = max(float((row_marg - a).abs().max()), float((col_marg - b).abs().max()))
             mass = float(row_marg.sum())
             if stop.mode == "potential":
                 # Spar-Sink's rule: max(||du||_inf, ||dv||_inf) on the scaling
@@ -1728,8 +1739,8 @@ def _sparsink_sinkhorn(
                 # implement this mode at all (its own Spar-Sink never early-stops),
                 # so there's no reference to match, but a sum over n+m terms
                 # against a fixed tol has the identical unreachable-at-scale flaw.
-                du = float(((f / eps).exp() - (f_prev / eps).exp()).abs().max())
-                dv = float(((g / eps).exp() - (g_prev / eps).exp()).abs().max())
+                du = float(((f / eps).exp() - (f_old / eps).exp()).abs().max())
+                dv = float(((g / eps).exp() - (g_old / eps).exp()).abs().max())
                 if max(du, dv) <= stop.potential_tol:
                     converged = True
                     break
