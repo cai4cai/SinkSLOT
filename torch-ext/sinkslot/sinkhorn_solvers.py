@@ -1,8 +1,8 @@
 """SinkSLOT's Sinkhorn solver loops and device-agnostic entry point.
 
-This is the v5 variant: v1's alternating scheme with both reductions fused into
-Triton kernels (online-softmax segmented LSE, CSR for the row half-step and CSC
-for the column half-step). Mathematically identical to a plain torch segmented
+The alternating scheme has both reductions fused into Triton kernels
+(online-softmax segmented LSE, CSR for the row half-step and CSC for the
+column half-step). Mathematically identical to a plain torch segmented
 LSE; the point is throughput, not a different algorithm. The CUDA-graph capture
 of the upstream production path is intentionally omitted here.
 
@@ -144,7 +144,7 @@ def seg_lse_online(indptr, colidx, lam, phi, psi, n, block=None, num_warps=None,
 
 
 # --------------------------------------------------------------------------
-# v5 loop and entry point
+# Alternating loop and entry point
 # --------------------------------------------------------------------------
 
 
@@ -384,9 +384,10 @@ def _seg_lse_coo(vals, idx, size):
     """Segmented log-sum-exp over COO-style per-entry indices.
 
     out[i] = logsumexp_{k: idx[k] == i} vals[k]; -inf for an empty group. Same
-    scatter_reduce/index_add pattern as `test_run_v5_matches_plain_torch_
-    segmented_lse` in testing/test_sinkslot_bench.py, which validates this
-    matches `_seg_lse_online_kernel`'s fp32 output on the real Triton path.
+    scatter_reduce/index_add pattern as `test_sinkslot_alternating_triton_
+    matches_plain_torch_segmented_lse` in flash_sinkhorn/testing/test_sinkslot_bench.py,
+    which validates this matches `_seg_lse_online_kernel`'s fp32 output on the
+    real Triton path.
     """
     mx = vals.new_full((size,), float("-inf")).scatter_reduce(
         0, idx, vals, reduce="amax", include_self=True)

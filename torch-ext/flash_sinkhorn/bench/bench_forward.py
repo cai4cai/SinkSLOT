@@ -1946,7 +1946,7 @@ def bench_sinkslot(
     stop: "StopCfg" = None,
     seed: int = 0,
 ) -> TimingResult:
-    """Benchmark SinkSLOT v5 (fused-Triton, gamma=0 sparse SROT).
+    """Benchmark SinkSLOT (fused-Triton, gamma=0 sparse SROT).
 
     Sparse O(L(N+M)): the sliced support and its CSR/CSC layouts are built once in
     setup_ms; the timed loop is the fused-Triton alternating half-steps. fp32 (no
@@ -2049,7 +2049,7 @@ def bench_sinkslotcuda(
     stop: "StopCfg" = None,
     seed: int = 0,
 ) -> TimingResult:
-    """Benchmark SinkSLOT-CUDA: SinkSLOT v5 with the CUDA-optimised setup path.
+    """Benchmark SinkSLOT-CUDA: SinkSLOT with the CUDA-optimised setup path.
 
     Same method and same solve kernels as ``bench_sinkslot`` -- the only difference
     is the plan-build/setup, which is 2.1-3.1x faster end to end:
@@ -2886,7 +2886,7 @@ def run_forward_benchmark(
             elif verbose and include_srot and n > max_dense_size:
                 print(f"  SROT:                  SKIPPED (n > max_dense_size={max_dense_size})")
 
-            # SinkSLOT v5 (fused-Triton, sparse O(L(N+M)) -- not gated on max_dense_size,
+            # SinkSLOT (fused-Triton, sparse O(L(N+M)) -- not gated on max_dense_size,
             # since the support is never densified). One row per L.
             if include_sinkslot:
                 for slices in (sinkslot_slices or [50]):

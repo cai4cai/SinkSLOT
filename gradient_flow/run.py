@@ -13,7 +13,7 @@ Four methods, one figure:
     the analytical gradient.
   * EOT (Feydy et al., 2019): `sinkhorn_divergence_torch_autograd`.
   * SROT (Nguyen 2026): `sr_sinkhorn_divergence_torch_autograd`, delta=1e-8.
-  * SinkSLOT (ours): the native v5 solver (torch-ext/sinkslot/sinkhorn_solvers.py),
+  * SinkSLOT (ours): the native solver (torch-ext/sinkslot/sinkhorn_solvers.py),
     the exact pipeline this repo's own speed benchmarks exercise,
     plus the closed-form envelope-theorem gradient
     grad_X SLOT_eps(X,Y) = 2*diag(a)*(X - T_eps(X)) (see sinkslot/gradient.py).

@@ -104,7 +104,7 @@ this benchmarks against):
   `sparse_sqeuclidean_cost`, int32-key `to_csr`) -- the pieces with no
   FlashSinkhorn equivalent, since sliced-OT support construction is this
   paper's own contribution.
-- `sinkhorn_solvers.py`: the Triton v5 loop and its pure-torch fallback
+- `sinkhorn_solvers.py`: the Triton alternating loop and its pure-torch fallback
   (`sinkslot_alternating_triton`/`_torch`), the symmetric/Jacobi counterpart
   (`sinkslot_symmetric_triton`/`_torch`), and `sinkslot_solve`, the
   device-agnostic entry point that dispatches between backend AND variant.

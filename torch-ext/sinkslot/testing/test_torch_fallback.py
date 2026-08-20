@@ -62,7 +62,7 @@ def test_sparse_sqeuclidean_cost_matches_dense_on_cpu():
     assert torch.allclose(cost, ref)
 
 
-def test_run_v5_torch_fixed_mode_gives_correct_marginals():
+def test_sinkslot_alternating_torch_fixed_mode_gives_correct_marginals():
     # "fixed" mode has no convergence criterion -- it just runs `iters` times --
     # so this needs enough iterations to actually be near the fixed point,
     # unlike the marginal/potential tests below which stop on their own
@@ -87,7 +87,7 @@ def test_run_v5_torch_fixed_mode_gives_correct_marginals():
     assert torch.allclose(row_marg, a, atol=1e-4)
 
 
-def test_run_v5_torch_marginal_and_potential_modes_converge_and_agree():
+def test_sinkslot_alternating_torch_marginal_and_potential_modes_converge_and_agree():
     n, m, eps, L = 300, 250, 0.05, 40
     x, y, a, b = _problem(n, m)
     rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
@@ -106,7 +106,7 @@ def test_run_v5_torch_marginal_and_potential_modes_converge_and_agree():
     assert torch.equal(phi_m, phi_p) and torch.equal(psi_m, psi_p)
 
 
-def test_run_v5_torch_potential_linf_mode_converges():
+def test_sinkslot_alternating_torch_potential_linf_mode_converges():
     n, m, eps, L = 300, 250, 0.05, 40
     x, y, a, b = _problem(n, m)
     rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
@@ -120,7 +120,7 @@ def test_run_v5_torch_potential_linf_mode_converges():
     assert converged and change < 1e-4
 
 
-def test_run_v5_torch_rejects_unknown_mode():
+def test_sinkslot_alternating_torch_rejects_unknown_mode():
     n, m, eps, L = 100, 80, 0.1, 20
     x, y, a, b = _problem(n, m)
     rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
