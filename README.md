@@ -38,7 +38,7 @@ The quickest way to call SinkSLOT is `sinkslot.SamplesLoss`, a
 [GeomLoss](https://www.kernel-operations.io/geomloss/)-style callable loss
 module.
 
-### Triton + GPU
+### GPU
 
 ```python
 import torch
@@ -47,20 +47,9 @@ from sinkslot import SamplesLoss
 x = torch.randn(10000, 2, requires_grad=True, device="cuda")
 y = torch.randn(10000, 2, device="cuda")
 
-loss = SamplesLoss(eps=0.05, L=64, n_iters=200, backend="triton")
+loss = SamplesLoss(eps=0.05, L=64, n_iters=200)  # backend="auto": automatically detects whether Triton is installed
 cost = loss(x, y)                          # achieved SLOT_eps cost, <T, C>
 grad_x, = torch.autograd.grad(cost, [x])   # analytic gradient, no backprop through Sinkhorn
-```
-
-### PyTorch + GPU (no Triton)
-
-```python
-x = torch.randn(10000, 2, requires_grad=True, device="cuda")
-y = torch.randn(10000, 2, device="cuda")
-
-loss = SamplesLoss(eps=0.05, L=64, n_iters=200, backend="torch")
-cost = loss(x, y)
-grad_x, = torch.autograd.grad(cost, [x])
 ```
 
 ### CPU
