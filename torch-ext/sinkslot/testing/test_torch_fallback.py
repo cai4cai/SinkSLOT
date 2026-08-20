@@ -153,6 +153,39 @@ def test_sinkslot_solve_runs_end_to_end_on_cpu():
     assert torch.allclose(col_marg, b, atol=1e-5)
 
 
+def test_sparse_transport_plan_matches_manual_sinkslot_solve_construction():
+    """sparse_transport_plan wraps sinkslot_solve + the standard plan_vals formula;
+    must return a sparse (n, m) COO tensor whose marginals match a/b and
+    whose dense form agrees exactly with building the same plan by hand.
+    """
+    from sinkslot import sparse_transport_plan
+
+    n, m, eps, L = 300, 250, 0.05, 40
+    x, y, a, b = _problem(n, m)
+    stop = _Stop(mode="marginal", max_iter=20000)
+
+    P = sparse_transport_plan(x, y, a, b, eps=eps, L=L, seed=0, n_iters=20000,
+                        stop=stop, backend="torch")
+    assert P.is_sparse and P.shape == (n, m)
+
+    row_marg = torch.sparse.sum(P, dim=1).to_dense()
+    col_marg = torch.sparse.sum(P, dim=0).to_dense()
+    assert torch.allclose(row_marg, a, atol=1e-5)
+    assert torch.allclose(col_marg, b, atol=1e-5)
+
+    phi, psi, rows, cols, S, *_ = sinkslot_solve(
+        x, y, a, b, eps, L, seed=0, n_iters=20000, stop=stop, backend="torch")
+    cost = sparse_sqeuclidean_cost(x, y, rows, cols)
+    log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
+    plan_vals = (phi[rows] + psi[cols] + log_S - cost / eps).exp()
+    manual = torch.zeros(n, m).index_put_((rows, cols), plan_vals, accumulate=True)
+    assert torch.allclose(P.to_dense(), manual, atol=1e-6)
+
+    # a/b default to uniform when omitted.
+    P_default = sparse_transport_plan(x, y, eps=eps, L=L, seed=0, n_iters=200, backend="torch")
+    assert P_default.shape == (n, m)
+
+
 def test_sinkslot_solve_backend_override_on_cpu():
     """backend='torch' and backend='auto' must agree on CPU (both pick torch),
     backend='triton' must raise cleanly (no CUDA here), and a bogus backend
@@ -366,4 +399,39 @@ def test_samples_loss_symmetric_option_runs_and_agrees_with_alternating():
 
     # potentials=True escape hatch under symmetric too.
     phi, psi = loss_sym(x, y, potentials=True)
+    assert phi.shape == (n,) and psi.shape == (n,)
+
+
+def test_samples_loss_stop_early_stopping_agrees_with_fixed_iters():
+    """SamplesLoss(stop=...) forwards to sinkslot_solve unchanged: forward
+    value and backward gradient must both be finite, close to a
+    fixed-iteration SamplesLoss run long enough to be near the same fixed
+    point, and potentials=True must still work with stop set.
+    """
+    from sinkslot import SamplesLoss
+
+    n, d = 100, 3
+    g = torch.Generator(device="cpu").manual_seed(0)
+    x = torch.randn(n, d, generator=g)
+    y = torch.randn(n, d, generator=g) + 1.0
+    stop = _Stop(mode="marginal", max_iter=20000, tol=1e-4, check_every=5)
+
+    x_stop = x.clone().requires_grad_(True)
+    loss_stop = SamplesLoss(eps=0.05, L=20, n_iters=200, backend="torch", stop=stop)
+    L_stop = loss_stop(x_stop, y)
+    L_stop.backward()
+    assert torch.isfinite(L_stop) and torch.isfinite(x_stop.grad).all()
+
+    x_fixed = x.clone().requires_grad_(True)
+    loss_fixed = SamplesLoss(eps=0.05, L=20, n_iters=3000, backend="torch")
+    L_fixed = loss_fixed(x_fixed, y)
+    L_fixed.backward()
+
+    loss_relerr = abs(float(L_stop) - float(L_fixed)) / abs(float(L_fixed))
+    grad_relerr = float((x_stop.grad - x_fixed.grad).norm() / x_fixed.grad.norm())
+    assert loss_relerr < 0.01, f"loss disagrees too much: {loss_relerr:.3e}"
+    assert grad_relerr < 0.02, f"grad disagrees too much: {grad_relerr:.3e}"
+
+    # potentials=True escape hatch under stop too.
+    phi, psi = loss_stop(x, y, potentials=True)
     assert phi.shape == (n,) and psi.shape == (n,)
