@@ -153,6 +153,39 @@ def test_sinkslot_solve_runs_end_to_end_on_cpu():
     assert torch.allclose(col_marg, b, atol=1e-5)
 
 
+def test_sparse_transport_plan_matches_manual_sinkslot_solve_construction():
+    """sparse_transport_plan wraps sinkslot_solve + the standard plan_vals formula;
+    must return a sparse (n, m) COO tensor whose marginals match a/b and
+    whose dense form agrees exactly with building the same plan by hand.
+    """
+    from sinkslot import sparse_transport_plan
+
+    n, m, eps, L = 300, 250, 0.05, 40
+    x, y, a, b = _problem(n, m)
+    stop = _Stop(mode="marginal", max_iter=20000)
+
+    P = sparse_transport_plan(x, y, a, b, eps=eps, L=L, seed=0, n_iters=20000,
+                        stop=stop, backend="torch")
+    assert P.is_sparse and P.shape == (n, m)
+
+    row_marg = torch.sparse.sum(P, dim=1).to_dense()
+    col_marg = torch.sparse.sum(P, dim=0).to_dense()
+    assert torch.allclose(row_marg, a, atol=1e-5)
+    assert torch.allclose(col_marg, b, atol=1e-5)
+
+    phi, psi, rows, cols, S, *_ = sinkslot_solve(
+        x, y, a, b, eps, L, seed=0, n_iters=20000, stop=stop, backend="torch")
+    cost = sparse_sqeuclidean_cost(x, y, rows, cols)
+    log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
+    plan_vals = (phi[rows] + psi[cols] + log_S - cost / eps).exp()
+    manual = torch.zeros(n, m).index_put_((rows, cols), plan_vals, accumulate=True)
+    assert torch.allclose(P.to_dense(), manual, atol=1e-6)
+
+    # a/b default to uniform when omitted.
+    P_default = sparse_transport_plan(x, y, eps=eps, L=L, seed=0, n_iters=200, backend="torch")
+    assert P_default.shape == (n, m)
+
+
 def test_sinkslot_solve_backend_override_on_cpu():
     """backend='torch' and backend='auto' must agree on CPU (both pick torch),
     backend='triton' must raise cleanly (no CUDA here), and a bogus backend
