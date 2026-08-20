@@ -1,22 +1,143 @@
+<p align="center">
+  <img src="assets/overview.png" alt="Overview of the SinkSLOT pipeline" width="100%">
+</p>
+
 # SinkSLOT
 
-Fused-Triton sparse Sinkhorn on the unsmoothed sliced-OT plan. Entropic OT is
-restricted to the support of a sliced-OT reference plan and solved with fused
-Triton kernels. SinkSLOT-CUDA is the same method with a CUDA-optimised setup
-path (2.1 to 3.1× faster plan build), benchmarked as a peer method.
+SinkSLOT computes entropic optimal transport (EOT) using a sparse sliced
+lifted plan as the reference measure, instead of the usual independent
+product `a ⊗ b`. Restricting each Sinkhorn iteration to that plan's support
+reduces the per-iteration cost from `O(N²)` to `O(LN)`, where `L` is the
+number of random slicing directions.
 
-The benchmarked numbers below are all from the fused Triton kernels on a CUDA
-GPU. `sinkslot.sinkslot_solve` also runs on CPU (or CUDA without Triton
-installed) via a pure-torch fallback -- same algorithm, no fused kernels, so
-noticeably slower, not a substitute for the reported throughput.
+By default SinkSLOT runs on fused Triton/CUDA kernels. It's also fully
+usable with plain PyTorch -- on CPU, or on CUDA without Triton installed --
+via an automatic pure-torch fallback: same algorithm, just without the
+fused-kernel throughput.
 
-## Quick start
+## Install
+
+This repo isn't published to PyPI; install from source:
 
 ```bash
-python run.py --dry-run                    # tiny grid from configs/base.py
-python run.py --execute                    # run it -> output/quick
-python -m gradient_flow.run                # the gradient-flow figure
+git clone https://github.com/cai4cai/SinkSLOT
+cd SinkSLOT
+pip install -e .
 ```
+
+**Requirements:** PyTorch >= 2.5. Triton >= 3.1 is optional
+(`pip install -e ".[triton]"`) for the fused Triton/CUDA kernels -- without
+it, SinkSLOT runs the pure-torch fallback automatically.
+
+## Basic Usage
+
+The quickest way to call SinkSLOT is `sinkslot.SamplesLoss`, a GeomLoss-style
+callable loss module (same calling convention as `geomloss.SamplesLoss` /
+`flash_sinkhorn.SamplesLoss`):
+
+```python
+import torch
+from sinkslot import SamplesLoss
+
+x = torch.randn(10000, 2, requires_grad=True, device="cuda")
+y = torch.randn(10000, 2, device="cuda")
+
+loss = SamplesLoss(eps=0.05, L=64, n_iters=200)
+cost = loss(x, y)                          # achieved SLOT_eps cost, <T, C>
+grad_x, = torch.autograd.grad(cost, [x])   # analytic gradient, no backprop through Sinkhorn
+```
+
+### Gradient Flow
+
+For an explicit gradient-descent loop, `slot_grad` gives you the same
+analytic gradient directly, without going through `autograd`:
+
+```python
+from sinkslot import slot_grad
+
+x = torch.randn(1000, 2, device="cuda")
+y = torch.randn(1000, 2, device="cuda") + 3.0
+a = torch.full((1000,), 1.0 / 1000, device="cuda")
+
+lr = 0.1
+for step in range(200):
+    grad = slot_grad(x, y, a, eps=0.01, L=100, seed=0, n_iters=200)
+    x = x - lr * grad
+```
+
+## API Reference
+
+### `SamplesLoss`
+
+```python
+SamplesLoss(
+    loss="sinkhorn",   # only "sinkhorn" is implemented
+    eps=0.05,          # entropic regularisation strength
+    L=64,               # number of random slicing directions
+    seed=0,             # RNG seed for the slicing directions
+    n_iters=200,        # fixed Sinkhorn iteration count (no early stopping)
+    backend="auto",     # "auto" | "triton" | "torch"
+    symmetric=False,    # False: alternating (Gauss-Seidel) update; True: symmetric (Jacobi)
+    alpha=0.5,          # Jacobi blend weight, only used when symmetric=True
+)
+```
+
+Calling `loss(x, y, a=None, potentials=False)`:
+
+- `x`, `y`: point clouds, shape `(n, d)` and `(m, d)`.
+- `a`: shared marginal weights, shape `(n,)`, used for both `x` and `y`
+  (uniform `1/n` if omitted). `SamplesLoss` only supports a single shared
+  weight vector, not independent source/target marginals.
+- `potentials=True` returns the raw dual potentials `(phi, psi)` instead of
+  the scalar cost.
+- Returns the achieved cost `⟨T, C⟩`, differentiable w.r.t. `x` only (not
+  `y`, `a`, `eps`, or `L`) via the analytic envelope-theorem gradient --
+  no backprop through the Sinkhorn loop, no second solve.
+
+`backend="auto"` (default) picks the fused Triton kernels when Triton is
+installed and the input is on CUDA, and falls back to plain PyTorch
+otherwise. Pass `"triton"` or `"torch"` to force one explicitly.
+
+`symmetric=False` (default) uses the alternating (Gauss-Seidel) Sinkhorn
+update; `symmetric=True` uses the symmetric (Jacobi) update instead, blended
+every iteration by `alpha`. Both converge to the same transport plan via
+different iterative paths.
+
+### `sinkslot_solve`
+
+Early stopping isn't exposed on `SamplesLoss`; for that, call the
+lower-level `sinkslot_solve` directly and pass a `stop` object (any object
+with these four attributes -- a small `dataclass` is the easiest way):
+
+```python
+from dataclasses import dataclass
+from sinkslot import sinkslot_solve
+
+@dataclass
+class Stop:
+    mode: str = "fixed"     # "fixed" | "marginal" | "potential" | "potential_linf"
+    max_iter: int = 20000   # iteration cap when mode != "fixed"
+    tol: float = 1e-6       # convergence threshold
+    check_every: int = 5    # check convergence every N iterations
+
+phi, psi, rows, cols, S, iters_run, converged, final_viol = sinkslot_solve(
+    x, y, a, b, eps=0.05, L=64, seed=0, n_iters=200, stop=Stop(mode="marginal"),
+)
+```
+
+Unlike `SamplesLoss`, `sinkslot_solve` takes independent source/target
+weights `a`/`b`.
+
+`stop.mode`:
+
+- `"fixed"` (default when `stop=None`): ignore the rest of `stop` and run
+  exactly `n_iters` iterations.
+- `"marginal"` / `"potential"`: run up to `stop.max_iter`, checking every
+  `stop.check_every` iterations, and stop once the max (L-infinity) marginal
+  violation drops below `stop.tol`.
+- `"potential_linf"`: stop once the dual potentials themselves stop moving,
+  `max(|Δphi|, |Δpsi|) < stop.tol` (in the potentials' physical scale, not
+  the absorbed `phi = f/eps` form used internally).
 
 ## Reproducing the paper
 
@@ -33,6 +154,7 @@ python -m gradient_flow.run                # the gradient-flow figure
 
 ```bash
 python run.py --config speedup --execute   # a published sweep
+python -m gradient_flow.run                # the gradient-flow figure
 python scripts/scalability.py              # print every scalability command
 python scripts/scalability.py --execute    # run them
 ```
@@ -50,94 +172,6 @@ from that experiment: it cannot reach N=50,000 without an int32 index overflow
 in `torch.nonzero()` during sampling. In `configs/speedup*.py` its sample budget
 follows the authors' formula, `s = k·s₀(n)` with `s₀(n) = 1e-3·n·log⁴(n)` and
 `k` in {5,10,15,20}.
-
-## Using SinkSLOT: `SamplesLoss`
-
-The quickest way to call SinkSLOT from outside this repo is `sinkslot.SamplesLoss`,
-a GeomLoss-style callable loss module (same calling convention as
-`geomloss.SamplesLoss` / `flash_sinkhorn.SamplesLoss`):
-
-```python
-import torch
-from sinkslot import SamplesLoss
-
-x = torch.randn(10000, 2, requires_grad=True).cuda()
-y = torch.randn(10000, 2).cuda()
-
-loss = SamplesLoss(eps=0.05, L=64, n_iters=200)   # eps: regularisation, L: slices
-L = loss(x, y)                                     # achieved SLOT_eps cost, <T, C>
-g_x, = torch.autograd.grad(L, [x])                 # envelope-theorem gradient
-```
-
-Runs on CPU or CUDA-without-Triton too (`backend="auto"` picks the fused
-Triton path when available, a pure-torch fallback otherwise -- see
-`torch-ext/sinkslot/sinkhorn_solvers.py`'s own docstring). `backward()`'s
-gradient is `slot_grad`'s analytic envelope-theorem formula, not
-backpropagation through the Sinkhorn loop -- no second solve, no unrolled
-gradient (see `gradient_flow/estimators.py` for why unrolling is the wrong
-choice here: it loses to the envelope form by 2-3 orders of magnitude under
-early stopping). Pass `symmetric=True` for the Jacobi (simultaneous
-phi/psi-update) solve loop instead of the default Gauss-Seidel one, with
-`alpha` as its blend weight -- see `sinkhorn_solvers.sinkslot_symmetric_
-triton`'s own docstring for the update rule; both schemes converge to the
-same transport plan, just via different iterative paths. `SamplesLoss`
-doesn't (yet) support GeomLoss's
-`blur`/epsilon-scheduling, debiasing, unbalanced OT, or double-backward/HVP
--- pass `potentials=True` for the raw dual potentials `(phi, psi)` instead of
-the scalar cost, and see `torch-ext/sinkslot/hvp.py`'s `hvp_x_sqeuclid` for
-the (separately callable, not yet wired into `.backward()` twice)
-Hessian-vector product.
-
-For direct access to the lower-level pieces `SamplesLoss` wraps --
-`sinkslot_solve` (potentials + the sliced support), `slot_grad` (just the
-gradient), `hvp_x_sqeuclid` -- see the Layout section below.
-
-## Layout
-
-`torch-ext/sinkslot/` is the method, split across five files (mirroring
-`flash_sinkhorn`'s own `{sinkhorn_solvers,implicit_grad,hvp,samples_loss}.py`
-layout):
-
-- `solver.py`: sliced-plan builder (`sot_plan_coo`, `_ot_1d_coo_batched[_cuda]`),
-  the SinkSLOT-CUDA setup path, and the sparse cost (`sparse_sqeuclidean_cost`,
-  `to_csr`).
-- `sinkhorn_solvers.py`: the alternating (Gauss-Seidel) and symmetric (Jacobi)
-  Sinkhorn loops, each with a Triton and a pure-torch variant, and
-  `sinkslot_solve`, the device-agnostic entry point.
-- `gradient.py`: the envelope-theorem gradient (`slot_grad`,
-  `plan_barycentric_sparse`).
-- `hvp.py`: the Hessian-vector product (`hvp_x_sqeuclid`).
-- `samples_loss.py`: `SamplesLoss`, see above.
-
-`gradient_flow/` produces Figure 3 and the two gradient-decomposition results
-in the appendix:
-
-```bash
-python -m gradient_flow.run          # Figure 3: blob -> crescent, SOT/EOT/SROT/SinkSLOT
-python -m gradient_flow.term_norms   # appendix figure: split the gradient into two terms
-python -m gradient_flow.finite_diff  # appendix table: is the dropped term really zero?
-```
-
-`gradient_flow/appendix_checks/` holds the remaining appendix controls:
-
-```bash
-python -m gradient_flow.appendix_checks.stopping           # how early the inner solve can stop
-python -m gradient_flow.appendix_checks.closed_form_check  # is the closed form an artefact?
-python -m gradient_flow.appendix_checks.step_size          # is the cosine decay a discretisation artefact?
-python -m gradient_flow.appendix_checks.projection_noise   # is the small-L wiggle sampling noise?
-python -m gradient_flow.appendix_checks.flow_qualitative   # does the gap change the flow you see?
-python -m gradient_flow.appendix_checks.figure             # 6-panel summary of the sweep above
-```
-
-Each module's docstring carries its own results table. `vendor/sinkhorn_methods.py`
-holds the dense differentiable SOT/EOT/SROT baselines, and `data/` the two
-densities (blob to crescent) sampled into point clouds.
-
-`torch-ext/flash_sinkhorn/` is the vendored underlying package this method
-builds its Triton kernels on and benchmarks against.
-
-At the repo root: `configs/` holds the benchmark sweep definitions, `run.py`
-is the sweep driver, and `scripts/scalability.py` drives the scalability sweep.
 
 ## Baselines
 
