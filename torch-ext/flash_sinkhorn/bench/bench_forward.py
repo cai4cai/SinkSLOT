@@ -923,7 +923,7 @@ def _srot_sinkhorn(
             # documents max as the n-invariant criterion. Not gated on mass_tol
             # either, matching SLOT exactly -- mass is still returned for the
             # diagnostic column.
-            viol = max(float((row_marg - a).abs().max()), float((col_marg - b).abs().max()))
+            viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
             mass = float(row_marg.sum())
             if viol <= stop.tol:
                 converged = True
@@ -1730,7 +1730,7 @@ def _sparsink_sinkhorn(
             # n=10,000 regardless of convergence. Matches SLOT's actual
             # working "marg_viol" rule. Not gated on mass_tol either, matching
             # SLOT exactly -- mass is still returned for the diagnostic column.
-            viol = max(float((row_marg - a).abs().max()), float((col_marg - b).abs().max()))
+            viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
             mass = float(row_marg.sum())
             if stop.mode == "potential":
                 # Spar-Sink's rule: max(||du||_inf, ||dv||_inf) on the scaling

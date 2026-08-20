@@ -259,10 +259,9 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
         if it % stop.check_every == 0 or it == stop.max_iter:
             row_marg = a * (phi_old - phi).exp()
             col_marg = b * (psi_old - psi).exp()
-            # Not gated on mass_tol either -- SLOT's own working rule doesn't
-            # check mass separately; still returned for the diagnostic column.
-            viol = max(float((row_marg - a).abs().max()), float((col_marg - b).abs().max()))
-            mass = float(row_marg.sum())
+            # One sync (float() at the end), not two: the max itself runs on
+            # device first.
+            viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
             if viol <= stop.tol:
                 converged = True
                 break
@@ -468,7 +467,7 @@ def sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, sto
         if it % stop.check_every == 0 or it == stop.max_iter:
             row_marg = a * (phi_old - phi).exp()
             col_marg = b * (psi_old - psi).exp()
-            viol = max(float((row_marg - a).abs().max()), float((col_marg - b).abs().max()))
+            viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
             if viol <= stop.tol:
                 converged = True
                 break

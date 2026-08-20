@@ -48,7 +48,8 @@ def _marg_viol(
     not part of the convergence decision -- SLOT's own working rule doesn't
     gate on it either.
     """
-    viol = max(float((row_marg - a).abs().max()), float((col_marg - b).abs().max()))
+    # One sync (float() at the end), not two: the max itself runs on device first.
+    viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
     mass = float(row_marg.sum())
     return viol, mass
 
