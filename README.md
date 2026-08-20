@@ -144,12 +144,6 @@ phi, psi, rows, cols, S, iters_run, converged, final_viol = sinkslot_solve(
 Unlike `SamplesLoss`, `sinkslot_solve` takes independent source/target
 weights `a`/`b`.
 
-| `stop.mode` | Behavior |
-|---|---|
-| `"fixed"` (default) | Ignore the rest of `stop`; run exactly `n_iters` iterations. |
-| `"marginal"` / `"potential"` | Run up to `stop.max_iter`, checking every `stop.check_every` iterations; stop once the max (L-infinity) marginal violation drops below `stop.tol`. |
-| `"potential_linf"` | Stop once the dual potentials themselves stop moving: `max(\|Δphi\|, \|Δpsi\|) < stop.tol` (physical scale, not the absorbed `phi = f/eps` form used internally). |
-
 ## Reproducing the paper
 
 | Result | Config | Grid |
