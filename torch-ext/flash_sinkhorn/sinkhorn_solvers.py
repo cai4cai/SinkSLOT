@@ -29,8 +29,8 @@ from .kernels.sinkhorn_flashstyle_sqeuclid import (
 
 def _marg_viol(
     row_marg: torch.Tensor, col_marg: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
-) -> Tuple[float, float]:
-    """Max (L-infinity) marginal violation + achieved mass.
+) -> float:
+    """Max (L-infinity) marginal violation.
 
     max(max|row_marg-a|, max|col_marg-b|) -- matches the SLOT repo's actual
     working "marg_viol" stopping rule exactly (bench/solvers/sinkslot.py's
@@ -44,14 +44,10 @@ def _marg_viol(
     both failed to converge here: only potential-change genuinely doesn't fit
     this regime; marginal-violation was just measured wrong. max is what SLOT
     actually runs and is the n-invariant criterion its own ConvergenceCfg
-    documents. Mass is still returned for the `mass` diagnostic column, but is
-    not part of the convergence decision -- SLOT's own working rule doesn't
-    gate on it either.
+    documents.
     """
     # One sync (float() at the end), not two: the max itself runs on device first.
-    viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
-    mass = float(row_marg.sum())
-    return viol, mass
+    return float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
 
 
 def sinkhorn_flashstyle_alternating(
@@ -121,8 +117,7 @@ def sinkhorn_flashstyle_alternating(
             NotImplementedError otherwise.
         mass_tol: Unused -- kept for call-site symmetry with StopCfg/bench_forward.py.
             SLOT's own working "marginal" rule doesn't gate on mass either; only
-            max marginal violation decides convergence. `mass` is still computed
-            and returned for the CSV's diagnostic column.
+            max marginal violation decides convergence.
         return_n_iters: If True, also return number of iterations used
         ott_convention: If True, return potentials in OTT convention where
             log marginals are absorbed into potentials:
@@ -323,7 +318,7 @@ def sinkhorn_flashstyle_alternating(
                     # an extra flashsinkhorn_lse_fused call.
                     row_marg = a[:_no] * ((f_hat_old[:_no] - f_hat[:_no]) / eps).exp()
                     col_marg = b[:_mo] * ((g_hat_old[:_mo] - g_hat[:_mo]) / eps).exp()
-                    viol, mass = _marg_viol(row_marg, col_marg, a[:_no], b[:_mo])
+                    viol = _marg_viol(row_marg, col_marg, a[:_no], b[:_mo])
                     if viol <= threshold:
                         break
                 else:
@@ -441,8 +436,7 @@ def sinkhorn_flashstyle_symmetric(
             so both need a fresh check.
         mass_tol: Unused -- kept for call-site symmetry with StopCfg/bench_forward.py.
             SLOT's own working "marginal" rule doesn't gate on mass either; only
-            max marginal violation decides convergence. `mass` is still computed
-            and returned for the CSV's diagnostic column.
+            max marginal violation decides convergence.
         return_n_iters: If True, also return number of iterations used
         return_prelast: If True, also return pre-extrapolation potentials
         f_init: Initial f potential for warm-start (standard form, not shifted)
@@ -617,7 +611,7 @@ def sinkhorn_flashstyle_symmetric(
                     g_cand = 2.0 * g_hat - g_before
                     row_marg = a[:_no] * ((f_before[:_no] - f_cand[:_no]) / step_eps).exp()
                     col_marg = b[:_mo] * ((g_before[:_mo] - g_cand[:_mo]) / step_eps).exp()
-                    viol, mass = _marg_viol(row_marg, col_marg, a[:_no], b[:_mo])
+                    viol = _marg_viol(row_marg, col_marg, a[:_no], b[:_mo])
                     if viol <= threshold:
                         break
                 elif prev_f is None:
@@ -757,7 +751,7 @@ def sinkhorn_flashstyle_symmetric(
                     # the blended value, satisfies its own marginal exactly.
                     row_marg = a[:_no] * ((f_old[:_no] - f_cand[:_no]) / step_eps).exp()
                     col_marg = b[:_mo] * ((g_old[:_mo] - g_cand[:_mo]) / step_eps).exp()
-                    viol, mass = _marg_viol(row_marg, col_marg, a[:_no], b[:_mo])
+                    viol = _marg_viol(row_marg, col_marg, a[:_no], b[:_mo])
                     if viol <= threshold:
                         break
                 elif prev_f is None:

@@ -921,10 +921,8 @@ def _srot_sinkhorn(
             # A sum over n terms against a fixed absolute tol is unreachable at
             # n=10,000 regardless of convergence -- SLOT's own ConvergenceCfg
             # documents max as the n-invariant criterion. Not gated on mass_tol
-            # either, matching SLOT exactly -- mass is still returned for the
-            # diagnostic column.
+            # either, matching SLOT exactly.
             viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
-            mass = float(row_marg.sum())
             if viol <= stop.tol:
                 converged = True
                 break
@@ -1729,9 +1727,8 @@ def _sparsink_sinkhorn(
             # over n terms against a fixed absolute tol is unreachable at
             # n=10,000 regardless of convergence. Matches SLOT's actual
             # working "marg_viol" rule. Not gated on mass_tol either, matching
-            # SLOT exactly -- mass is still returned for the diagnostic column.
+            # SLOT exactly.
             viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
-            mass = float(row_marg.sum())
             if stop.mode == "potential":
                 # Spar-Sink's rule: max(||du||_inf, ||dv||_inf) on the scaling
                 # vectors u=exp(f/eps). Also switched from sum to max: same
