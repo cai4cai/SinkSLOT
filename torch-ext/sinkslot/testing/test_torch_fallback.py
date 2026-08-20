@@ -1,4 +1,4 @@
-"""Tests for the pure-torch fallback (`sinkslot_alternating_torch`, `sinkslot_solve`), #10.
+"""Tests for the pure-torch fallback (`sinkslot_alternating_torch`, `sinkslot_solve`).
 
 Every test here except one is deliberately unmarked -- no
 `skipif(not torch.cuda.is_available())`, no `pytest.importorskip("triton")` --
@@ -134,7 +134,7 @@ def test_sinkslot_alternating_torch_rejects_unknown_mode():
 
 
 def test_sinkslot_solve_runs_end_to_end_on_cpu():
-    """The actual #10 ask: one call, no CUDA, no Triton, correct answer."""
+    """One call, no CUDA, no Triton, correct answer."""
     n, m, eps, L = 300, 250, 0.05, 40
     x, y, a, b = _problem(n, m)
     assert not x.is_cuda
@@ -174,8 +174,8 @@ def test_sinkslot_solve_backend_override_on_cpu():
 
 def test_sinkslot_solve_variant_default_matches_explicit_alternating():
     """variant='alternating' is the default -- omitting it must be identical
-    to passing it explicitly, not just "close" (#34 added the parameter;
-    every existing caller omits it, so this is the compatibility guarantee).
+    to passing it explicitly, not just "close" (every existing caller omits
+    it, so this is the compatibility guarantee).
     """
     n, m, eps, L = 300, 250, 0.05, 40
     x, y, a, b = _problem(n, m)
@@ -282,7 +282,7 @@ def test_sinkslot_symmetric_converges_to_the_same_plan_as_alternating():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 def test_sinkslot_solve_all_three_settings_agree_on_cuda():
-    """The actual #22 ask: Triton, pure-torch-on-CPU, and pure-torch-on-CUDA
+    """Triton, pure-torch-on-CPU, and pure-torch-on-CUDA
     must all solve the same problem and agree. Triton and torch-on-CPU are
     covered elsewhere; this is the one that needs a GPU to even attempt --
     backend='torch' forced on a CUDA tensor, previously never exercised
@@ -329,7 +329,7 @@ def test_seg_lse_coo_matches_brute_force():
 
 
 def test_samples_loss_symmetric_option_runs_and_agrees_with_alternating():
-    """SamplesLoss(symmetric=True) (#34): forward value and backward gradient
+    """SamplesLoss(symmetric=True): forward value and backward gradient
     must both be finite, and -- given enough iterations for both schemes to
     be near their (shared, see test_sinkslot_symmetric_converges_to_the_same
     _plan_as_alternating above) fixed point -- close to the default

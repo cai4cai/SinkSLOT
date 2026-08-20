@@ -85,7 +85,7 @@ class SamplesLoss(torch.nn.Module):
     early-stopping `stop` config exposed here; use `sinkslot_solve` directly
     for that). `backend`: "auto" / "triton" / "torch", see `sinkslot_solve`.
 
-    `symmetric` (#34): False (default) uses the alternating (Gauss-Seidel)
+    `symmetric`: False (default) uses the alternating (Gauss-Seidel)
     solve loop, same as every other SinkSLOT entry point so far. True uses
     the symmetric (Jacobi) loop instead (`sinkslot_solve`'s `variant=
     "symmetric"`) -- see `sinkhorn_solvers.sinkslot_symmetric_triton`'s own

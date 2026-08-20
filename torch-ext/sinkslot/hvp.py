@@ -1,4 +1,4 @@
-"""Hessian-vector product (#18) via implicit differentiation of the sliced-OT
+"""Hessian-vector product via implicit differentiation of the sliced-OT
 Sinkhorn fixed point.
 
 Split out from solver.py, and named to match flash_sinkhorn's own hvp.py:
@@ -15,8 +15,8 @@ below goes through `torchsparsegradutils.utils.minres`, which runs a fixed
 solution tensor -- there is no convergence/residual data available to
 surface. Fabricating an always-"converged" info object would misrepresent
 what the solver actually reports. A real `HvpInfo` here would need computing
-the residual `||M @ sol - rhs||` explicitly after the solve; not done in this
-pass (mechanical rename + split only), left as a follow-up.
+the residual `||M @ sol - rhs||` explicitly after the solve; left as a
+follow-up.
 """
 
 from __future__ import annotations
@@ -67,8 +67,8 @@ def hvp_x_sqeuclid_from_potentials(X, Y, a, v, rows, cols, T_vals, eps, *,
                 P_ij*(u_i + w_j + d(lam_ij)/dt) * Y_j
 
     Solved via `torchsparsegradutils.sparse_generic_solve` on the sparse (n+m)
-    system directly (MINRES, since M is symmetric but only PSD, not PD) --
-    per #18, rather than materialising the dense n x n Schur complement
+    system directly (MINRES, since M is symmetric but only PSD, not PD),
+    rather than materialising the dense n x n Schur complement
     P @ diag(1/a) @ P^T the way the dense case can afford to.
     """
     try:
@@ -130,8 +130,7 @@ def hvp_x_sqeuclid(X, Y, a, eps, L, seed, n_iters, v, tau2=3e-7, solve_tol=1e-11
     O(1/h) rank-flip jump artifacts unrelated to the real signal. On a frozen
     support, matches to ~2% relative error at the tuned defaults, stable across
     3 orders of magnitude in h (i.e. not a finite-difference truncation
-    artifact) -- see the module's own history for the tau2 sweep this default
-    was picked from. n_iters affects accuracy the same way it affects
+    artifact). n_iters affects accuracy the same way it affects
     slot_grad's: too few inner Sinkhorn iterations leaves phi, psi (and hence
     the linear system's own P, rhs) short of the true fixed point.
 
@@ -159,7 +158,7 @@ def hvp_x_sqeuclid(X, Y, a, eps, L, seed, n_iters, v, tau2=3e-7, solve_tol=1e-11
     two small synthetic problems (testing/test_hvp.py's `_problem()`,
     n<=300, d=3) -- not on any of the paper's five real datasets at their
     actual n=10000 scale, and not on `sinkslot_alternating_torch` at all.
-    `backend="torch"` is offered for portability (#10) the same way
+    `backend="torch"` is offered for portability the same way
     `sinkslot_solve`'s is, not because the 2%/3e-7 pairing has been
     re-confirmed on that path; matrix conditioning depends on the actual data
     (via `a`, `T_vals`), so a real distribution shift (dataset or scale)

@@ -8,24 +8,22 @@ outside benchmarking too (see slot_grad, used by gradient_flow/), not
 benchmark-only code.
 
 Layout mirrors flash_sinkhorn's own {sinkhorn_solvers,implicit_grad,hvp,
-samples_loss}.py split (#14, #30): solver.py holds the sliced-OT support
-construction with no FlashSinkhorn equivalent; sinkhorn_solvers.py the
-Sinkhorn iteration loops and device-agnostic entry point; gradient.py the
-envelope-theorem gradient (deliberately not named implicit_grad.py -- see
-that file's own docstring for why); hvp.py the Hessian-vector product;
-samples_loss.py the GeomLoss-style `SamplesLoss` callable -- unlike
-flash_sinkhorn's own, with no `_autograd.py`-style Function family behind
-it, just one `torch.autograd.Function` reusing `slot_grad`'s formula (see
-that module's own docstring).
+samples_loss}.py split: solver.py holds the sliced-OT support construction
+with no FlashSinkhorn equivalent; sinkhorn_solvers.py the Sinkhorn iteration
+loops and device-agnostic entry point; gradient.py the envelope-theorem
+gradient (see that file's own docstring for why it isn't named
+implicit_grad.py); hvp.py the Hessian-vector product; samples_loss.py the
+GeomLoss-style `SamplesLoss` callable -- unlike flash_sinkhorn's own, with no
+`_autograd.py`-style Function family behind it, just one
+`torch.autograd.Function` reusing `slot_grad`'s formula.
 
 Package name: sinkslot
 """
 
-# sinkslot_alternating_triton/_torch are deliberately not exported here
-# (fixes #14): they're the low-level solve loops sinkslot_solve already wraps
-# and dispatches between, not something a caller should reach for directly.
-# Re-exporting an internal name at the package's top level was the actual bug
-# -- `sinkslot.sinkhorn_solvers.sinkslot_alternating_triton` still works for
+# sinkslot_alternating_triton/_torch are deliberately not exported here:
+# they're the low-level solve loops sinkslot_solve already wraps and
+# dispatches between, not something a caller should reach for directly.
+# `sinkslot.sinkhorn_solvers.sinkslot_alternating_triton` still works for
 # anyone who genuinely needs it (the benchmark harness and
 # gradient_flow/stopping.py do, since they need the raw CSR/CSC-based loop,
 # not the whole build-plan-then-solve pipeline sinkslot_solve wraps it in),

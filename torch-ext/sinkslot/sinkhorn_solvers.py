@@ -17,9 +17,7 @@ that module's `sinkhorn_flashstyle_alternating`/`_symmetric` are the FlashSinkho
 equivalent of the two loops below, and neither module underscore-prefixes its
 solver loops even though they're not the top-level entry point (a plain,
 descriptive name plus leaving it out of `__init__.py`'s exports is how both
-packages mark "internal, but not hidden behind Python's underscore convention"
--- see `_resolve_stop_mode`'s own docstring for the #14 bug this fixes: the
-problem was the package-level re-export, not the lack of a leading underscore).
+packages mark "internal, but not hidden behind Python's underscore convention").
 """
 
 from __future__ import annotations
@@ -155,14 +153,7 @@ def _resolve_stop_mode(stop):
     """Shared by `sinkslot_alternating_triton` and `sinkslot_alternating_torch`:
     resolve `stop.mode` (or "fixed" if `stop` is None) and validate it against
     `_STOP_MODES` upfront, so the four valid modes stay one source of truth
-    instead of two independently-maintained checks. They drifted out of sync
-    once already -- the torch path validated from the start, the Triton path
-    didn't, so a typo'd mode used to behave differently depending on which
-    backend happened to run it (fixed alongside this helper, not by it: the
-    old inline check ran only after the "fixed" and "potential_linf" branches
-    had already been ruled out, but for an invalid mode neither of those
-    branches matches anyway, so validating here instead, before any branch
-    runs, raises in the exact same cases as before).
+    instead of two independently-maintained checks.
     """
     mode = getattr(stop, "mode", "fixed") if stop is not None else "fixed"
     if mode not in _STOP_MODES:
@@ -193,8 +184,7 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
     total-variation sum: matches the SLOT repo's actual working "marg_viol" rule
     (bench/solvers/sinkslot.py's `_violation`/`_run_v5` there) -- a sum over n
     terms against a fixed absolute tol is unreachable at n=10,000 regardless of
-    convergence, which is why an earlier version of this function (sum-based)
-    looked like marginal-violation stopping didn't work here either.
+    convergence.
 
     stop.mode == "potential_linf" reproduces FlashSinkhorn's own native rule:
     stop once the dual potentials stop moving, max(|Δf|, |Δg|) < stop.tol since
@@ -272,7 +262,7 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
 
 def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
             n_iters, stop=None, eps=None, alpha=0.5):
-    """Symmetric (Jacobi) Sinkhorn over prebuilt CSR/CSC, fused Triton half-steps (#34).
+    """Symmetric (Jacobi) Sinkhorn over prebuilt CSR/CSC, fused Triton half-steps.
 
     Both half-steps read the SAME (phi, psi) pair -- unlike
     `sinkslot_alternating_triton`'s Gauss-Seidel scheme, where the column
@@ -376,7 +366,7 @@ def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, l
 
 
 # --------------------------------------------------------------------------
-# Pure-torch fallback (#10) -- no Triton, works on CPU or a non-CUDA device.
+# Pure-torch fallback -- no Triton, works on CPU or a non-CUDA device.
 # --------------------------------------------------------------------------
 
 
@@ -463,7 +453,7 @@ def sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, sto
 
 def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=None,
                               eps=None, alpha=0.5):
-    """Pure-torch counterpart to `sinkslot_symmetric_triton` (#34) -- see its
+    """Pure-torch counterpart to `sinkslot_symmetric_triton` -- see its
     docstring for the update rule and stop-mode semantics; the logic here
     mirrors it exactly, substituting `_seg_lse_coo(...)` for
     `seg_lse_online(...)`, matching `sinkslot_alternating_torch`'s own
@@ -540,7 +530,7 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None,
     `_ot_1d_coo_batched`) otherwise. Same algorithm and stopping semantics
     either way -- the two are cross-checked in testing/test_sinkslot_bench.py --
     so this is the one call that works whether or not the caller has a CUDA GPU
-    or Triton installed (#10). The pure-torch path is meaningfully slower (no
+    or Triton installed. The pure-torch path is meaningfully slower (no
     fused kernels, no CSR launch-config tuning): use it for
     correctness/portability, not for reproducing the paper's own throughput
     numbers, which are all measured on the Triton path.
@@ -559,7 +549,7 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None,
 
     `variant`: "alternating" (default, unchanged behavior) picks the
     Gauss-Seidel loop (`sinkslot_alternating_triton`/`_torch`); "symmetric"
-    (#34) picks the Jacobi loop (`sinkslot_symmetric_triton`/`_torch`) instead,
+    picks the Jacobi loop (`sinkslot_symmetric_triton`/`_torch`) instead,
     which updates phi and psi simultaneously from the same prior state rather
     than sequentially -- see that function's own docstring for the update
     rule and why its marginal-violation check costs more than alternating's.

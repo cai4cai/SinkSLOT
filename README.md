@@ -96,31 +96,21 @@ gradient), `hvp_x_sqeuclid` -- see the Layout section below.
 
 `torch-ext/sinkslot/` is the method, split across five files (mirroring
 `flash_sinkhorn`'s own `{sinkhorn_solvers,implicit_grad,hvp,samples_loss}.py`
-layout, since flash_sinkhorn is vendored in this exact repo as the method
-this benchmarks against):
+layout):
 
 - `solver.py`: sliced-plan builder (`sot_plan_coo`, `_ot_1d_coo_batched[_cuda]`),
-  the SinkSLOT-CUDA setup path (`_ot_1d_coo_batched_cuda`,
-  `sparse_sqeuclidean_cost`, int32-key `to_csr`) -- the pieces with no
-  FlashSinkhorn equivalent, since sliced-OT support construction is this
-  paper's own contribution.
-- `sinkhorn_solvers.py`: the Triton alternating loop and its pure-torch fallback
-  (`sinkslot_alternating_triton`/`_torch`), the symmetric/Jacobi counterpart
-  (`sinkslot_symmetric_triton`/`_torch`), and `sinkslot_solve`, the
-  device-agnostic entry point that dispatches between backend AND variant.
+  the SinkSLOT-CUDA setup path, and the sparse cost (`sparse_sqeuclidean_cost`,
+  `to_csr`).
+- `sinkhorn_solvers.py`: the alternating (Gauss-Seidel) and symmetric (Jacobi)
+  Sinkhorn loops, each with a Triton and a pure-torch variant, and
+  `sinkslot_solve`, the device-agnostic entry point.
 - `gradient.py`: the envelope-theorem gradient (`slot_grad`,
   `plan_barycentric_sparse`).
-- `hvp.py`: the Hessian-vector product (`hvp_x_sqeuclid`), by implicit
-  differentiation of the Sinkhorn fixed point.
+- `hvp.py`: the Hessian-vector product (`hvp_x_sqeuclid`).
 - `samples_loss.py`: `SamplesLoss`, see above.
 
-It sits in its own package because it is a different algorithm from the dense
-fused kernel it builds on, and is used outside benchmarking, by
-`gradient_flow/` below.
-
 `gradient_flow/` produces Figure 3 and the two gradient-decomposition results
-quoted in the appendix (the `fig:gradient_terms` figure and the `tab:fd_check`
-table):
+in the appendix:
 
 ```bash
 python -m gradient_flow.run          # Figure 3: blob -> crescent, SOT/EOT/SROT/SinkSLOT
@@ -128,16 +118,7 @@ python -m gradient_flow.term_norms   # appendix figure: split the gradient into 
 python -m gradient_flow.finite_diff  # appendix table: is the dropped term really zero?
 ```
 
-`along_flow.py`, `estimators.py`, `sweep_along_flow.py` and `config.py` are
-shared infrastructure underneath those three (the trajectory/`three_gradients`
-helpers), not standalone results.
-
-`gradient_flow/appendix_checks/` holds the controls behind specific appendix
-claims that don't have a directly-embedded figure of their own -- each answers
-one worry about the result above (is the closed form an artefact? is the
-cosine decay a discretisation artefact rather than the flow converging? does
-the small-`L` wiggle in the sweep wash out as sampling noise? does the gap
-actually change the flow you'd see?):
+`gradient_flow/appendix_checks/` holds the remaining appendix controls:
 
 ```bash
 python -m gradient_flow.appendix_checks.stopping           # how early the inner solve can stop
@@ -148,28 +129,15 @@ python -m gradient_flow.appendix_checks.flow_qualitative   # does the gap change
 python -m gradient_flow.appendix_checks.figure             # 6-panel summary of the sweep above
 ```
 
-Each module's docstring carries its own results table. `torch-ext/sinkslot/
-gradient.py` holds the envelope projection `∇_X SLOT_ε(X,Y) = 2 diag(a)(X - T_ε(X))`
-(`slot_grad`), `vendor/sinkhorn_methods.py` the dense differentiable SOT/EOT/SROT
-baselines, and `data/` the two densities (blob to crescent) sampled into point
-clouds.
+Each module's docstring carries its own results table. `vendor/sinkhorn_methods.py`
+holds the dense differentiable SOT/EOT/SROT baselines, and `data/` the two
+densities (blob to crescent) sampled into point clouds.
 
-`torch-ext/flash_sinkhorn/` is the underlying package: `samples_loss.py`
-(GeomLoss-compatible entry point), `sinkhorn_solvers.py`, `kernels/` (fused
-Triton kernels), `_autograd.py` and `implicit_grad.py` (analytic gradients, no
-backprop through iterations), `hvp.py` and `cg.py` (Hessian-vector products via
-streaming CG), `c_transform.py`. Its `bench/` holds `bench_forward.py` (forward
-sweep, every baseline adapter and its RMAE reference).
+`torch-ext/flash_sinkhorn/` is the vendored underlying package this method
+builds its Triton kernels on and benchmarks against.
 
-At the repo root: `configs/base.py` (`BenchConfig` plus a quick grid, not used
-for any reported number), `run.py` (sweep driver, one subprocess per
-measurement, appended to one CSV), `scripts/scalability.py`.
-
-`scripts/memory_audit/` is a closed audit, not a reproduction path: it checked
-whether the sweep's `gpu_memory_mb` column (used for `tab:accuracy_memory`) is
-comparable across methods, and confirmed it is (`memory.md`'s status note has
-the full reasoning). It doesn't produce anything the paper cites and isn't run
-as part of reproducing any result above.
+At the repo root: `configs/` holds the benchmark sweep definitions, `run.py`
+is the sweep driver, and `scripts/scalability.py` drives the scalability sweep.
 
 ## Baselines
 

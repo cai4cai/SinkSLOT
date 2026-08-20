@@ -1,4 +1,4 @@
-"""Validate hvp_x_sqeuclid against a FROZEN-SUPPORT central finite difference, #18.
+"""Validate hvp_x_sqeuclid against a FROZEN-SUPPORT central finite difference.
 
 hvp_x_sqeuclid differentiates grad_X SLOT_eps treating the sliced-OT support (S,
 rows, cols) as fixed -- it only differentiates the cost-dependent lam_ij =

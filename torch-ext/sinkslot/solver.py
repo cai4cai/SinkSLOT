@@ -327,7 +327,7 @@ def sparse_sqeuclidean_cost(x, y, rows, cols, block: int = 1024, use_triton=None
     same formula, just three (nnz, d) intermediates instead of one fused pass.
     Only the fused path was ever measured for speed; the fallback exists so the
     function (and everything built on it) also works without a CUDA GPU or
-    without Triton installed at all, per #10.
+    without Triton installed at all.
 
     `use_triton`: None (default) auto-detects from `_HAS_TRITON and x.is_cuda`.
     Pass explicitly to override -- e.g. `False` to force the torch fallback on
