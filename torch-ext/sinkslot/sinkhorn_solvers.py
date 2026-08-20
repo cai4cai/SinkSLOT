@@ -9,7 +9,7 @@ of the upstream production path is intentionally omitted here.
 `sinkslot_solve` is the device-agnostic entry point: `sinkslot_alternating_triton`
 above when Triton is installed and the input is CUDA, the pure-torch fallback
 (`sinkslot_alternating_torch`) otherwise -- same algorithm, cross-checked in
-testing/test_sinkslot_bench.py, so a CPU machine or a machine without Triton
+testing/test_torch_fallback.py, so a CPU machine or a machine without Triton
 installed can still run SinkSLOT, just without the fused-kernel throughput.
 
 Split out from solver.py to mirror flash_sinkhorn's own sinkhorn_solvers.py:
@@ -150,10 +150,11 @@ _STOP_MODES = ("fixed", "marginal", "potential", "potential_linf")
 
 
 def _resolve_stop_mode(stop):
-    """Shared by `sinkslot_alternating_triton` and `sinkslot_alternating_torch`:
-    resolve `stop.mode` (or "fixed" if `stop` is None) and validate it against
-    `_STOP_MODES` upfront, so the four valid modes stay one source of truth
-    instead of two independently-maintained checks.
+    """Shared by all four solve loops (`sinkslot_alternating_triton`/`_torch`,
+    `sinkslot_symmetric_triton`/`_torch`): resolve `stop.mode` (or "fixed" if
+    `stop` is None) and validate it against `_STOP_MODES` upfront, so the
+    four valid modes stay one source of truth instead of four independently
+    -maintained checks.
     """
     mode = getattr(stop, "mode", "fixed") if stop is not None else "fixed"
     if mode not in _STOP_MODES:
@@ -397,7 +398,7 @@ def sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, sto
     logic here mirrors it exactly, substituting
     `_seg_lse_coo(lam + other[idx], self_idx, size)` for `seg_lse_online(...)`.
     Cross-checked against `sinkslot_alternating_triton` in
-    testing/test_sinkslot_bench.py.
+    testing/test_torch_fallback.py.
     """
     phi, psi = torch.zeros_like(log_a), torch.zeros_like(log_b)
     mode = _resolve_stop_mode(stop)
@@ -528,7 +529,7 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None,
     Dispatches on X's device and whether Triton is importable: the fused Triton
     kernels when both hold, the pure-torch path (`sinkslot_alternating_torch`,
     `_ot_1d_coo_batched`) otherwise. Same algorithm and stopping semantics
-    either way -- the two are cross-checked in testing/test_sinkslot_bench.py --
+    either way -- the two are cross-checked in testing/test_torch_fallback.py --
     so this is the one call that works whether or not the caller has a CUDA GPU
     or Triton installed. The pure-torch path is meaningfully slower (no
     fused kernels, no CSR launch-config tuning): use it for

@@ -25,8 +25,9 @@ Package name: sinkslot
 # dispatches between, not something a caller should reach for directly.
 # `sinkslot.sinkhorn_solvers.sinkslot_alternating_triton` still works for
 # anyone who genuinely needs it (the benchmark harness and
-# gradient_flow/stopping.py do, since they need the raw CSR/CSC-based loop,
-# not the whole build-plan-then-solve pipeline sinkslot_solve wraps it in),
+# gradient_flow/appendix_checks/stopping.py do, since they need the raw
+# CSR/CSC-based loop, not the whole build-plan-then-solve pipeline
+# sinkslot_solve wraps it in),
 # it just isn't advertised as the public API. Matches flash_sinkhorn's own
 # convention: its sinkhorn_flashstyle_alternating/_symmetric aren't
 # underscore-prefixed either, but aren't re-exported from

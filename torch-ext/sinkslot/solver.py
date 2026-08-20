@@ -124,7 +124,7 @@ def _ot_1d_coo_batched_cuda(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor,
 
     Net: 49.5x on the dominant stage AND a strictly more accurate plan. Because
     the support differs from the naive fp32 scan, SinkSLOT-CUDA keeps its own
-    reference-cache namespace (see bench_forward.py).
+    reference-cache namespace (see flash_sinkhorn/bench/bench_forward.py).
 
     Dtype: the `.double()` upcast below is internal and fixed, not driven by
     the caller's dtype -- `a`, `b`, `PX`, `PY` can be float32 or float64 on the
