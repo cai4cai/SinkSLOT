@@ -38,6 +38,8 @@ The quickest way to call SinkSLOT is `sinkslot.SamplesLoss`, a
 [GeomLoss](https://www.kernel-operations.io/geomloss/)-style callable loss
 module.
 
+### SamplesLoss
+
 ```python
 import torch
 from sinkslot import SamplesLoss
@@ -56,7 +58,7 @@ grad_x, = torch.autograd.grad(cost, [x])   # analytic gradient, no backprop thro
 phi, psi = loss(x, y, potentials=True)
 ```
 
-### Sparse Transport Plan
+### Sparse Transport Plan and Barycentric Map
 
 ```python
 from sinkslot import sparse_transport_plan, sparse_barycentric_map
@@ -66,12 +68,7 @@ rows, cols = P.indices()
 Tx, Ty = sparse_barycentric_map(P.values(), rows, cols, x, y)
 ```
 
-Most entries of `P` are exactly zero -- that's the whole point.
-
-### Gradient Flow
-
-For an explicit gradient-descent loop, `slot_grad` gives you the same
-analytic gradient directly, without going through `autograd`:
+### Gradient Flow (slot_grad, same gradients without autograd)
 
 ```python
 from sinkslot import slot_grad
