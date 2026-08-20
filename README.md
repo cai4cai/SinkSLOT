@@ -108,11 +108,25 @@ loss(x, y, a=None, potentials=False)
 # potentials=True returns (phi, psi) instead of the scalar cost
 ```
 
+### `sparse_transport_plan`
+
+```python
+sparse_transport_plan(
+    x, y, a=None, b=None,   # a/b: uniform if omitted, independent unlike SamplesLoss
+    eps=0.05, L=64, seed=0, n_iters=200, stop=None,
+    backend="auto", variant="alternating", alpha=0.5,
+)
+```
+
+Same arguments as `sinkslot_solve`, but returns the plan itself: a
+`torch.sparse_coo_tensor` of shape `(n, m)`. Non-differentiable, like
+`potentials=True`.
+
 ### `sinkslot_solve`
 
-`stop` (on `SamplesLoss`, or passed directly to `sinkslot_solve` below) is
-any object with these four attributes -- a small `dataclass` is the
-easiest way:
+`stop` (on `SamplesLoss` and `sparse_transport_plan` above, or passed
+directly here) is any object with these four attributes -- a small
+`dataclass` is the easiest way:
 
 ```python
 from dataclasses import dataclass
@@ -133,30 +147,11 @@ phi, psi, rows, cols, S, iters_run, converged, final_viol = sinkslot_solve(
 Unlike `SamplesLoss`, `sinkslot_solve` takes independent source/target
 weights `a`/`b`.
 
-`stop.mode`:
-
-- `"fixed"` (default when `stop=None`): ignore the rest of `stop` and run
-  exactly `n_iters` iterations.
-- `"marginal"` / `"potential"`: run up to `stop.max_iter`, checking every
-  `stop.check_every` iterations, and stop once the max (L-infinity) marginal
-  violation drops below `stop.tol`.
-- `"potential_linf"`: stop once the dual potentials themselves stop moving,
-  `max(|Δphi|, |Δpsi|) < stop.tol` (in the potentials' physical scale, not
-  the absorbed `phi = f/eps` form used internally).
-
-### `sparse_transport_plan`
-
-```python
-sparse_transport_plan(
-    x, y, a=None, b=None,   # a/b: uniform if omitted, independent unlike SamplesLoss
-    eps=0.05, L=64, seed=0, n_iters=200, stop=None,
-    backend="auto", variant="alternating", alpha=0.5,
-)
-```
-
-Same arguments as `sinkslot_solve`, but returns the plan itself: a
-`torch.sparse_coo_tensor` of shape `(n, m)`. Non-differentiable, like
-`potentials=True`.
+| `stop.mode` | Behavior |
+|---|---|
+| `"fixed"` (default) | Ignore the rest of `stop`; run exactly `n_iters` iterations. |
+| `"marginal"` / `"potential"` | Run up to `stop.max_iter`, checking every `stop.check_every` iterations; stop once the max (L-infinity) marginal violation drops below `stop.tol`. |
+| `"potential_linf"` | Stop once the dual potentials themselves stop moving: `max(\|Δphi\|, \|Δpsi\|) < stop.tol` (physical scale, not the absorbed `phi = f/eps` form used internally). |
 
 ## Reproducing the paper
 
