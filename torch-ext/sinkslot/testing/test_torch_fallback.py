@@ -435,3 +435,50 @@ def test_samples_loss_stop_early_stopping_agrees_with_fixed_iters():
     # potentials=True escape hatch under stop too.
     phi, psi = loss_stop(x, y, potentials=True)
     assert phi.shape == (n,) and psi.shape == (n,)
+
+
+def test_samples_loss_and_slot_grad_independent_ab_match_frozen_support_finite_diff():
+    """SamplesLoss/slot_grad's envelope-theorem gradient (grad_x = 2*a*(x-Tx))
+    is unchanged by using independent a/b (and n != m) instead of a shared
+    weight vector -- only the plan it's built from differs. Verified against
+    a FROZEN-SUPPORT central finite difference (same convention as
+    hvp.py/test_hvp.py: freezing rows/cols/phi/psi and letting only the
+    cost-dependent lam term respond to x is what isolates the envelope-
+    theorem formula from the sliced-OT support's own piecewise-constant
+    jumps, which a naive re-solve at x+-h*v would otherwise pick up as noise
+    an order of magnitude larger than this test's tolerance).
+    """
+    from sinkslot import SamplesLoss, slot_grad, sinkslot_solve
+    from sinkslot.solver import sparse_sqeuclidean_cost
+
+    n, m, eps, L = 50, 35, 0.05, 60
+    g = torch.Generator(device="cpu").manual_seed(1)
+    x = (torch.randn(n, 3, generator=g) * 1.0).double()
+    y = (torch.randn(m, 3, generator=g) + 1.0).double()
+    a = torch.rand(n, generator=g).double(); a = a / a.sum()
+    b = torch.rand(m, generator=g).double(); b = b / b.sum()
+
+    phi, psi, rows, cols, S, *_ = sinkslot_solve(
+        x, y, a, b, eps, L, seed=0, n_iters=3000, backend="torch")
+    cost = sparse_sqeuclidean_cost(x, y, rows, cols, use_triton=False)
+    log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
+    T_vals = (phi[rows] + psi[cols] + log_S - cost / eps).exp()
+
+    def cost_frozen_plan(xp):
+        c = (xp[rows] - y[cols]).square().sum(1)
+        return (T_vals * c).sum()
+
+    h = 1e-4
+    v = torch.randn(n, 3, generator=g).double(); v = v / v.norm()
+    fd = (cost_frozen_plan(x + h * v) - cost_frozen_plan(x - h * v)) / (2 * h)
+
+    g_slot = slot_grad(x, y, a, eps, L, seed=0, n_iters=3000, backend="torch", b=b)
+    relerr_slot_grad = abs(float(fd) - float((g_slot * v).sum())) / abs(float(fd))
+    assert relerr_slot_grad < 1e-6, f"slot_grad(b=...) vs frozen FD: {relerr_slot_grad:.3e}"
+
+    x_req = x.clone().requires_grad_(True)
+    loss = SamplesLoss(eps=eps, L=L, n_iters=3000, backend="torch")
+    cost_sl = loss(x_req, y, a=a, b=b)
+    g_sl, = torch.autograd.grad(cost_sl, [x_req])
+    relerr_samples_loss = abs(float(fd) - float((g_sl * v).sum())) / abs(float(fd))
+    assert relerr_samples_loss < 1e-6, f"SamplesLoss(a,b) vs frozen FD: {relerr_samples_loss:.3e}"
