@@ -100,8 +100,8 @@ SamplesLoss(
     stop=None,          # early stopping config, see sinkslot_solve below
 )
 
-loss(x, y, a=None, potentials=False)
-# a: marginal weights, shape (n,), shared by x and y (uniform 1/n if omitted)
+loss(x, y, a=None, b=None, potentials=False)
+# a/b: source/target marginal weights, independent, uniform if omitted
 # potentials=True returns (phi, psi) instead of the scalar cost
 ```
 
@@ -109,7 +109,7 @@ loss(x, y, a=None, potentials=False)
 
 ```python
 sparse_transport_plan(
-    x, y, a=None, b=None,   # a/b: uniform if omitted, independent unlike SamplesLoss
+    x, y, a=None, b=None,   # a/b: source/target marginal weights, uniform if omitted
     eps=0.05, L=64, seed=0, n_iters=200, stop=None,
     backend="auto", variant="alternating", alpha=0.5,
 )
@@ -140,9 +140,6 @@ phi, psi, rows, cols, S, iters_run, converged, final_viol = sinkslot_solve(
     x, y, a, b, eps=0.05, L=64, seed=0, n_iters=200, stop=Stop(mode="marginal"),
 )
 ```
-
-Unlike `SamplesLoss`, `sinkslot_solve` takes independent source/target
-weights `a`/`b`.
 
 ## Reproducing the paper
 
