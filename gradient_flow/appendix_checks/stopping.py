@@ -52,7 +52,7 @@ from sinkslot.sinkhorn_solvers import (  # noqa: E402
     sinkslot_alternating_triton,
     sinkslot_alternating_torch,
 )
-from sinkslot.gradient import plan_barycentric_sparse  # noqa: E402
+from sinkslot.gradient import sparse_barycentric_map  # noqa: E402
 from gradient_flow.config import DATA_SCALE, L, N  # noqa: E402
 from gradient_flow.run import DATA_DIR, DEVICE, OUT_DIR, draw_samples  # noqa: E402
 
@@ -114,7 +114,7 @@ def _grad_at(n_iters, X, Y, a, rows, cols, lam, csr, csc):
     row_marg = torch.zeros(n, device=X.device, dtype=T_vals.dtype).index_add_(0, rows, T_vals)
     viol = float((row_marg - a).abs().max())
 
-    Tx, _ = plan_barycentric_sparse(T_vals, rows, cols, X, Y)
+    Tx, _ = sparse_barycentric_map(T_vals, rows, cols, X, Y)
     return 2.0 * a[:, None] * (X - Tx), viol
 
 

@@ -48,7 +48,7 @@ from .sinkhorn_solvers import (
 )
 from .gradient import (
     slot_grad,
-    plan_barycentric_sparse,
+    sparse_barycentric_map,
 )
 from .hvp import (
     hvp_x_sqeuclid,
@@ -66,7 +66,7 @@ __all__ = [
     "sinkslot_solve",
     "sparse_transport_plan",
     "slot_grad",
-    "plan_barycentric_sparse",
+    "sparse_barycentric_map",
     "hvp_x_sqeuclid",
     "hvp_x_sqeuclid_from_potentials",
     "SamplesLoss",

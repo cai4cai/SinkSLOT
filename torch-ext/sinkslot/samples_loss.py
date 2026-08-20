@@ -30,7 +30,7 @@ import torch
 
 from .solver import sparse_sqeuclidean_cost
 from .sinkhorn_solvers import sinkslot_solve
-from .gradient import plan_barycentric_sparse
+from .gradient import sparse_barycentric_map
 
 
 class _SLOTCostFn(torch.autograd.Function):
@@ -65,7 +65,7 @@ class _SLOTCostFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         X, Y, a, T_vals, rows, cols = ctx.saved_tensors
-        Tx, _ = plan_barycentric_sparse(T_vals, rows, cols, X, Y)
+        Tx, _ = sparse_barycentric_map(T_vals, rows, cols, X, Y)
         grad_x = 2.0 * a[:, None] * (X - Tx)
         return (grad_output * grad_x,
                 None, None, None, None, None, None, None, None, None, None)

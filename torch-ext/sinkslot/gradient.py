@@ -20,7 +20,7 @@ from .solver import sparse_sqeuclidean_cost
 from .sinkhorn_solvers import sinkslot_solve
 
 
-def plan_barycentric_sparse(T_vals, rows, cols, x, y):
+def sparse_barycentric_map(T_vals, rows, cols, x, y):
     """Barycentric projections (Tx, Ty) of a sparse plan given as (rows, cols, T_vals).
 
     Normalizes by the plan's own achieved marginals (scatter-summed from
@@ -66,5 +66,5 @@ def slot_grad(X, Y, a, eps, L, seed, n_iters, backend="auto"):
     lam = log_S - cost / eps
 
     T_vals = (phi[rows] + psi[cols] + lam).exp()
-    Tx, _ = plan_barycentric_sparse(T_vals, rows, cols, X, Y)
+    Tx, _ = sparse_barycentric_map(T_vals, rows, cols, X, Y)
     return 2.0 * a[:, None] * (X - Tx)

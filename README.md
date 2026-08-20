@@ -59,14 +59,14 @@ phi, psi = loss(x, y, potentials=True)
 ### Sparse Transport Plan
 
 ```python
-from sinkslot import sparse_transport_plan
+from sinkslot import sparse_transport_plan, sparse_barycentric_map
 
-P = sparse_transport_plan(x, y, eps=0.05, L=64, seed=0, n_iters=200)
+P = sparse_transport_plan(x, y, eps=0.05, L=64, seed=0, n_iters=200)  # torch.sparse_coo_tensor (10000, 10000): P[i, j] = mass moved x[i] -> y[j]
+rows, cols = P.indices()
+Tx, Ty = sparse_barycentric_map(P.values(), rows, cols, x, y)
 ```
 
-`P` is a `torch.sparse_coo_tensor` of shape `(10000, 10000)`: `P[i, j]` is
-the mass moved between `x[i]` and `y[j]`. Most entries are exactly zero --
-that's the whole point.
+Most entries of `P` are exactly zero -- that's the whole point.
 
 ### Gradient Flow
 
@@ -86,23 +86,6 @@ for step in range(200):
     x = x - lr * grad
 ```
 
-### Barycentric Map
-
-`plan_barycentric_sparse` gives the barycentric projection of `x` (and `y`)
-under the plan -- where each point moves to under the transport, the same
-`T_eps(X)` term `slot_grad`'s gradient is built from:
-
-```python
-from sinkslot import sparse_transport_plan, plan_barycentric_sparse
-
-x = torch.randn(10000, 2, device="cuda")
-y = torch.randn(10000, 2, device="cuda")
-
-P = sparse_transport_plan(x, y, eps=0.05, L=64, seed=0, n_iters=200)
-rows, cols = P.indices()
-Tx, Ty = plan_barycentric_sparse(P.values(), rows, cols, x, y)
-```
-
 ## API Reference
 
 ### `SamplesLoss`
@@ -119,6 +102,10 @@ SamplesLoss(
     alpha=0.5,          # Jacobi blend weight, only used when symmetric=True
     stop=None,          # early stopping config, see sinkslot_solve below
 )
+
+loss(x, y, a=None, potentials=False)
+# a: marginal weights, shape (n,), shared by x and y (uniform 1/n if omitted)
+# potentials=True returns (phi, psi) instead of the scalar cost
 ```
 
 ### `sinkslot_solve`

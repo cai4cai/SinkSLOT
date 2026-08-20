@@ -30,7 +30,7 @@ from sinkslot.solver import (  # noqa: E402
     _ot_1d_coo_batched_cuda,
 )
 from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton  # noqa: E402
-from sinkslot.gradient import plan_barycentric_sparse  # noqa: E402
+from sinkslot.gradient import sparse_barycentric_map  # noqa: E402
 from sinkslot.hvp import hvp_x_sqeuclid  # noqa: E402
 
 
@@ -60,7 +60,7 @@ def _frozen_grad(X, Y, a, rows, cols, S, eps, n_iters):
     phi, psi, _, _, _ = sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
                                  log_a, log_a, n, m, n_iters)
     T_vals = (phi[rows] + psi[cols] + lam).exp()
-    Tx, _ = plan_barycentric_sparse(T_vals, rows, cols, X, Y)
+    Tx, _ = sparse_barycentric_map(T_vals, rows, cols, X, Y)
     return 2.0 * a[:, None] * (X - Tx)
 
 
