@@ -85,7 +85,7 @@ for step in range(200):
 
 ## API Reference
 
-### `SamplesLoss`
+### SamplesLoss
 
 ```python
 SamplesLoss(
@@ -105,7 +105,7 @@ loss(x, y, a=None, potentials=False)
 # potentials=True returns (phi, psi) instead of the scalar cost
 ```
 
-### `sparse_transport_plan`
+### sparse_transport_plan
 
 ```python
 sparse_transport_plan(
@@ -119,7 +119,7 @@ Same arguments as `sinkslot_solve`, but returns the plan itself: a
 `torch.sparse_coo_tensor` of shape `(n, m)`. Non-differentiable, like
 `potentials=True`.
 
-### `sinkslot_solve`
+### sinkslot_solve
 
 `stop` (on `SamplesLoss` and `sparse_transport_plan` above, or passed
 directly here) is any object with these four attributes -- a small
