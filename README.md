@@ -170,31 +170,9 @@ python scripts/scalability.py              # print every scalability command
 python scripts/scalability.py --execute    # run them
 ```
 
-All three benchmark configs share one solver policy: marginal stopping on
-`max(‖P1 - a‖∞, ‖Pᵀ1 - b‖∞) < 1e-6`, float32, TF32 off, and the exact LP
-reference plan from POT's network simplex (`ot.emd`, CPU, float64). `max_iter`
-is 10,000 for `speedup.py` and 20,000 for the other two; each file's docstring
-says why.
-
-`configs/scalability.py` sweeps L independently of N and d per method, an axis
-`run.py`'s single-`BenchConfig` sweep cannot express, so
-`scripts/scalability.py` generates its commands directly. Spar-Sink is absent
-from that experiment: it cannot reach N=50,000 without an int32 index overflow
-in `torch.nonzero()` during sampling. In `configs/speedup*.py` its sample budget
-follows the authors' formula, `s = k·s₀(n)` with `s₀(n) = 1e-3·n·log⁴(n)` and
-`k` in {5,10,15,20}.
-
-## Baselines
-
-Built on [FlashSinkhorn](https://github.com/ot-triton-lab/flash-sinkhorn), and
-compared against [SROT](https://github.com/khainb/SROT) (Nguyen),
-[Spar-Sink](https://github.com/Mengyu8042/Spar-Sink) (Li, Yu, Li, Meng).
-
-SROT and Spar-Sink are adapted from the authors' released implementations and
-validated against them. Changes are confined to this harness: GPU, precision,
-stopping rule and timing instrumentation are fixed across every method, so the
-algorithm is the only difference. The update equations, reference coupling and
-sampling scheme are the authors' own.
+Benchmarked against [FlashSinkhorn](https://github.com/ot-triton-lab/flash-sinkhorn),
+[SROT](https://github.com/khainb/SROT), and
+[Spar-Sink](https://github.com/Mengyu8042/Spar-Sink).
 
 ## Citation
 
