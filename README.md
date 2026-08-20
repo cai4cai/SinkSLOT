@@ -38,29 +38,16 @@ The quickest way to call SinkSLOT is `sinkslot.SamplesLoss`, a
 [GeomLoss](https://www.kernel-operations.io/geomloss/)-style callable loss
 module.
 
-### GPU
-
 ```python
 import torch
 from sinkslot import SamplesLoss
 
-x = torch.randn(10000, 2, requires_grad=True, device="cuda")
+x = torch.randn(10000, 2, requires_grad=True, device="cuda")  # also works on CPU, drop device="cuda"
 y = torch.randn(10000, 2, device="cuda")
 
 loss = SamplesLoss(eps=0.05, L=64, n_iters=200)  # backend="auto": automatically detects whether Triton is installed
 cost = loss(x, y)                          # achieved SLOT_eps cost, <T, C>
 grad_x, = torch.autograd.grad(cost, [x])   # analytic gradient, no backprop through Sinkhorn
-```
-
-### CPU
-
-```python
-x = torch.randn(10000, 2, requires_grad=True)
-y = torch.randn(10000, 2)
-
-loss = SamplesLoss(eps=0.05, L=64, n_iters=200)
-cost = loss(x, y)
-grad_x, = torch.autograd.grad(cost, [x])
 ```
 
 ### Potentials
@@ -72,22 +59,14 @@ phi, psi = loss(x, y, potentials=True)
 ### Sparse Transport Plan
 
 ```python
-from sinkslot import sinkslot_solve
+from sinkslot import sparse_transport_plan
 
-a = torch.full((10000,), 1.0 / 10000)
-eps = 0.05
-phi, psi, rows, cols, S, iters_run, converged, final_viol = sinkslot_solve(
-    x, y, a, a, eps=eps, L=64, seed=0, n_iters=200,
-)
-
-cost = (x[rows] - y[cols]).square().sum(1)
-log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
-plan_vals = (phi[rows] + psi[cols] + log_S - cost / eps).exp()
+P = sparse_transport_plan(x, y, eps=0.05, L=64, seed=0, n_iters=200)
 ```
 
-`(rows[k], cols[k], plan_vals[k])` is the transport plan in sparse COO form:
-`plan_vals[k]` is the mass moved between `x[rows[k]]` and `y[cols[k]]`. Most
-`(i, j)` pairs never appear at all.
+`P` is a `torch.sparse_coo_tensor` of shape `(10000, 10000)`: `P[i, j]` is
+the mass moved between `x[i]` and `y[j]`. Most entries are exactly zero --
+that's the whole point.
 
 ### Gradient Flow
 
@@ -107,6 +86,23 @@ for step in range(200):
     x = x - lr * grad
 ```
 
+### Barycentric Map
+
+`plan_barycentric_sparse` gives the barycentric projection of `x` (and `y`)
+under the plan -- where each point moves to under the transport, the same
+`T_eps(X)` term `slot_grad`'s gradient is built from:
+
+```python
+from sinkslot import sparse_transport_plan, plan_barycentric_sparse
+
+x = torch.randn(10000, 2, device="cuda")
+y = torch.randn(10000, 2, device="cuda")
+
+P = sparse_transport_plan(x, y, eps=0.05, L=64, seed=0, n_iters=200)
+rows, cols = P.indices()
+Tx, Ty = plan_barycentric_sparse(P.values(), rows, cols, x, y)
+```
+
 ## API Reference
 
 ### `SamplesLoss`
@@ -117,18 +113,19 @@ SamplesLoss(
     eps=0.05,          # entropic regularisation strength
     L=64,               # number of random slicing directions
     seed=0,             # RNG seed for the slicing directions
-    n_iters=200,        # fixed Sinkhorn iteration count (no early stopping)
+    n_iters=200,        # Sinkhorn iteration cap (exact count unless stop overrides it)
     backend="auto",     # "auto" | "triton" | "torch"
     symmetric=False,    # False: alternating (Gauss-Seidel) update; True: symmetric (Jacobi)
     alpha=0.5,          # Jacobi blend weight, only used when symmetric=True
+    stop=None,          # early stopping config, see sinkslot_solve below
 )
 ```
 
 ### `sinkslot_solve`
 
-Early stopping isn't exposed on `SamplesLoss`; for that, call the
-lower-level `sinkslot_solve` directly and pass a `stop` object (any object
-with these four attributes -- a small `dataclass` is the easiest way):
+`stop` (on `SamplesLoss`, or passed directly to `sinkslot_solve` below) is
+any object with these four attributes -- a small `dataclass` is the
+easiest way:
 
 ```python
 from dataclasses import dataclass
@@ -159,6 +156,20 @@ weights `a`/`b`.
 - `"potential_linf"`: stop once the dual potentials themselves stop moving,
   `max(|Δphi|, |Δpsi|) < stop.tol` (in the potentials' physical scale, not
   the absorbed `phi = f/eps` form used internally).
+
+### `sparse_transport_plan`
+
+```python
+sparse_transport_plan(
+    x, y, a=None, b=None,   # a/b: uniform if omitted, independent unlike SamplesLoss
+    eps=0.05, L=64, seed=0, n_iters=200, stop=None,
+    backend="auto", variant="alternating", alpha=0.5,
+)
+```
+
+Same arguments as `sinkslot_solve`, but returns the plan itself: a
+`torch.sparse_coo_tensor` of shape `(n, m)`. Non-differentiable, like
+`potentials=True`.
 
 ## Reproducing the paper
 
