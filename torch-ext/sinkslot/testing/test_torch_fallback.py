@@ -153,18 +153,18 @@ def test_sinkslot_solve_runs_end_to_end_on_cpu():
     assert torch.allclose(col_marg, b, atol=1e-5)
 
 
-def test_transport_plan_matches_manual_sinkslot_solve_construction():
-    """transport_plan wraps sinkslot_solve + the standard plan_vals formula;
+def test_sparse_transport_plan_matches_manual_sinkslot_solve_construction():
+    """sparse_transport_plan wraps sinkslot_solve + the standard plan_vals formula;
     must return a sparse (n, m) COO tensor whose marginals match a/b and
     whose dense form agrees exactly with building the same plan by hand.
     """
-    from sinkslot import transport_plan
+    from sinkslot import sparse_transport_plan
 
     n, m, eps, L = 300, 250, 0.05, 40
     x, y, a, b = _problem(n, m)
     stop = _Stop(mode="marginal", max_iter=20000)
 
-    P = transport_plan(x, y, a, b, eps=eps, L=L, seed=0, n_iters=20000,
+    P = sparse_transport_plan(x, y, a, b, eps=eps, L=L, seed=0, n_iters=20000,
                         stop=stop, backend="torch")
     assert P.is_sparse and P.shape == (n, m)
 
@@ -182,7 +182,7 @@ def test_transport_plan_matches_manual_sinkslot_solve_construction():
     assert torch.allclose(P.to_dense(), manual, atol=1e-6)
 
     # a/b default to uniform when omitted.
-    P_default = transport_plan(x, y, eps=eps, L=L, seed=0, n_iters=200, backend="torch")
+    P_default = sparse_transport_plan(x, y, eps=eps, L=L, seed=0, n_iters=200, backend="torch")
     assert P_default.shape == (n, m)
 
 

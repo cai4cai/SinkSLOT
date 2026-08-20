@@ -611,8 +611,9 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None,
     return phi, psi, rows, cols, S, it, converged, viol
 
 
-def transport_plan(x, y, a=None, b=None, *, eps=0.05, L=64, seed=0, n_iters=200,
-                    stop=None, backend="auto", variant="alternating", alpha=0.5):
+def sparse_transport_plan(x, y, a=None, b=None, *, eps=0.05, L=64, seed=0,
+                           n_iters=200, stop=None, backend="auto",
+                           variant="alternating", alpha=0.5):
     """SinkSLOT's transport plan as a sparse `(n, m)` COO tensor.
 
     Wraps `sinkslot_solve`, then materialises its solved potentials into
