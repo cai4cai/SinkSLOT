@@ -86,27 +86,6 @@ SamplesLoss(
 )
 ```
 
-Calling `loss(x, y, a=None, potentials=False)`:
-
-- `x`, `y`: point clouds, shape `(n, d)` and `(m, d)`.
-- `a`: shared marginal weights, shape `(n,)`, used for both `x` and `y`
-  (uniform `1/n` if omitted). `SamplesLoss` only supports a single shared
-  weight vector, not independent source/target marginals.
-- `potentials=True` returns the raw dual potentials `(phi, psi)` instead of
-  the scalar cost.
-- Returns the achieved cost `⟨T, C⟩`, differentiable w.r.t. `x` only (not
-  `y`, `a`, `eps`, or `L`) via the analytic envelope-theorem gradient --
-  no backprop through the Sinkhorn loop, no second solve.
-
-`backend="auto"` (default) picks the fused Triton kernels when Triton is
-installed and the input is on CUDA, and falls back to plain PyTorch
-otherwise. Pass `"triton"` or `"torch"` to force one explicitly.
-
-`symmetric=False` (default) uses the alternating (Gauss-Seidel) Sinkhorn
-update; `symmetric=True` uses the symmetric (Jacobi) update instead, blended
-every iteration by `alpha`. Both converge to the same transport plan via
-different iterative paths.
-
 ### `sinkslot_solve`
 
 Early stopping isn't exposed on `SamplesLoss`; for that, call the
