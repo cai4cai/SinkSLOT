@@ -51,6 +51,19 @@ cost = loss(x, y)                          # achieved SLOT_eps cost, <T, C>
 grad_x, = torch.autograd.grad(cost, [x])   # analytic gradient, no backprop through Sinkhorn
 ```
 
+This picks the fused Triton kernels automatically, since Triton is installed
+and the tensors are on CUDA. Without Triton, or on CPU, the exact same code
+runs through the pure-torch fallback instead, no changes needed:
+
+```python
+x = torch.randn(10000, 2, requires_grad=True)   # CPU, no Triton needed
+y = torch.randn(10000, 2)
+
+loss = SamplesLoss(eps=0.05, L=64, n_iters=200)
+cost = loss(x, y)
+grad_x, = torch.autograd.grad(cost, [x])
+```
+
 ### Gradient Flow
 
 For an explicit gradient-descent loop, `slot_grad` gives you the same
@@ -68,6 +81,37 @@ for step in range(200):
     grad = slot_grad(x, y, a, eps=0.01, L=100, seed=0, n_iters=200)
     x = x - lr * grad
 ```
+
+### Potentials and the Transport Plan
+
+`potentials=True` returns the converged dual potentials `(phi, psi)`
+instead of the scalar cost:
+
+```python
+phi, psi = loss(x, y, potentials=True)
+```
+
+For the transport plan itself, call `sinkslot_solve` directly. It returns
+the potentials together with the sparse support (`rows`, `cols`) they were
+solved on, from which the plan's nonzero values follow directly:
+
+```python
+from sinkslot import sinkslot_solve
+
+a = torch.full((10000,), 1.0 / 10000)
+eps = 0.05
+phi, psi, rows, cols, S, iters_run, converged, final_viol = sinkslot_solve(
+    x, y, a, a, eps=eps, L=64, seed=0, n_iters=200,
+)
+
+cost = (x[rows] - y[cols]).square().sum(1)
+log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
+plan_vals = (phi[rows] + psi[cols] + log_S - cost / eps).exp()
+```
+
+`(rows[k], cols[k], plan_vals[k])` is the transport plan in sparse COO form:
+`plan_vals[k]` is the mass moved between `x[rows[k]]` and `y[cols[k]]`. Most
+`(i, j)` pairs never appear at all -- that sparsity is the whole point.
 
 ## API Reference
 
