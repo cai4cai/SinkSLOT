@@ -609,3 +609,41 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None,
                 rows, cols, lam, log_a, log_b, n, m, n_iters, stop, eps)
 
     return phi, psi, rows, cols, S, it, converged, viol
+
+
+def transport_plan(x, y, a=None, b=None, *, eps=0.05, L=64, seed=0, n_iters=200,
+                    stop=None, backend="auto", variant="alternating", alpha=0.5):
+    """SinkSLOT's transport plan as a sparse `(n, m)` COO tensor.
+
+    Wraps `sinkslot_solve`, then materialises its solved potentials into
+    the plan's nonzero values on the sliced-OT support (`rows`, `cols`) --
+    the same `(phi[rows] + psi[cols] + log_S - cost/eps).exp()` formula
+    `slot_grad`, `_SLOTCostFn` and `hvp_x_sqeuclid` all use internally.
+
+    Non-differentiable, like `SamplesLoss(potentials=True)`: this calls
+    `sinkslot_solve` directly, not through `SamplesLoss`'s autograd
+    Function.
+
+    `a`, `b`: marginal weights, uniform if omitted. Independent, unlike
+    `SamplesLoss`, which only supports a single weight vector shared by
+    both marginals.
+    """
+    n, m = x.shape[0], y.shape[0]
+    if a is None:
+        a = torch.full((n,), 1.0 / n, device=x.device, dtype=x.dtype)
+    if b is None:
+        b = torch.full((m,), 1.0 / m, device=y.device, dtype=y.dtype)
+
+    phi, psi, rows, cols, S, it, converged, viol = sinkslot_solve(
+        x, y, a, b, eps, L, seed, n_iters, stop=stop, backend=backend,
+        variant=variant, alpha=alpha)
+    cost = sparse_sqeuclidean_cost(
+        x, y, rows, cols,
+        use_triton=(backend == "triton") if backend != "auto" else None,
+    )
+    log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
+    plan_vals = (phi[rows] + psi[cols] + log_S - cost / eps).exp()
+
+    return torch.sparse_coo_tensor(
+        torch.stack([rows, cols]), plan_vals, size=(n, m)
+    ).coalesce()
