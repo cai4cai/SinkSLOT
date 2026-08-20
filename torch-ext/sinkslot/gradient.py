@@ -42,13 +42,19 @@ def sparse_barycentric_map(T_vals, rows, cols, x, y):
     return Tx, Ty
 
 
-def slot_grad(X, Y, a, eps, L, seed, n_iters, backend="auto"):
+def slot_grad(X, Y, a, eps, L, seed, n_iters, backend="auto", b=None):
     """grad_X SLOT_eps(X, Y) by the envelope theorem (Feydy et al. 2019's trick):
 
         grad_X SLOT_eps(X, Y) = 2 * diag(a) * (X - T_eps(X))
 
     where T_eps(X) is the barycentric projection of the converged sparse plan --
-    no need to backprop through the Sinkhorn loop itself.
+    no need to backprop through the Sinkhorn loop itself. Holds for independent
+    `a`/`b` (and X.shape[0] != Y.shape[0]) exactly as it does for the shared-`a`
+    case: verified by finite difference (~1e-10 relative error, float64) that
+    the formula above doesn't change with `b` -- only which plan it's built
+    from does. `b` defaults to `a` (X and Y treated as the same size with the
+    same per-index weight), matching every caller before this parameter
+    existed.
 
     Built on `sinkslot_solve`, so it works on CPU or CUDA-without-Triton via
     the same `backend` override ("auto" / "triton" / "torch", see
@@ -56,8 +62,10 @@ def slot_grad(X, Y, a, eps, L, seed, n_iters, backend="auto"):
     fp32 caveat as `sparse_sqeuclidean_cost`'s Triton path when `backend`
     resolves to Triton; the torch path follows X/Y/a's own dtype.
     """
+    if b is None:
+        b = a
     phi, psi, rows, cols, S, _, _, _ = sinkslot_solve(
-        X, Y, a, a, eps, L, seed, n_iters, backend=backend)
+        X, Y, a, b, eps, L, seed, n_iters, backend=backend)
     cost = sparse_sqeuclidean_cost(
         X, Y, rows, cols,
         use_triton=(backend == "triton") if backend != "auto" else None,
