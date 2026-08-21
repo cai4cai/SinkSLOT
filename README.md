@@ -45,8 +45,8 @@ marginals you want. `sum(a)` must equal `sum(b)` for a well-posed problem;
 this is checked, raising `ValueError` on mismatch. Zero entries are legal,
 a zero-weight point just receives/sends zero mass.
 
-Ground cost is squared Euclidean: `C_ij = |x_i - y_j|^2`, which sets the
-scale `eps` is measured against.
+Ground cost is squared Euclidean, $C_{ij} = \|x_i - y_j\|^2$, which sets
+the scale `eps` is measured against.
 
 `seed` controls the random slicing directions: the same `(x.shape[-1], L,
 seed)` always gives the same directions, from a generator local to that
@@ -84,6 +84,15 @@ grad_x, = torch.autograd.grad(cost, [x])   # analytic gradient of SLOT_eps itsel
 (which adds `eps * KL(T, P^SOT)`); `grad_x` above is still the true
 SLOT_eps gradient, since the KL term's gradient vanishes at the
 converged plan.
+
+`stop_mode` (on `SamplesLoss`, `sparse_transport_plan`, and `sinkslot_solve`
+below):
+
+- `"fixed"`: runs exactly `n_iters`, no convergence check.
+- `"marginal"`: stop once $\max_i |P\mathbf{1} - a|_i \le$ `stop_tol` (the
+  achieved row marginal's $L_\infty$ deviation from `a`).
+- `"potential"`: stop once $\varepsilon \max(|\Delta\phi|, |\Delta\psi|) <$
+  `stop_tol` (change in the dual potentials since the last check).
 
 ### Gradient Flow
 
