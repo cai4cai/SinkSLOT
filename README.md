@@ -32,6 +32,26 @@ pip install -e .
 (`pip install -e ".[triton]"`) for the fused Triton/CUDA kernels -- without
 it, SinkSLOT runs the pure-torch fallback automatically.
 
+## Tensor Contract
+
+- `x`: `(N, d)`, `y`: `(M, d)`.
+- `a`: `(N,)`, `b`: `(M,)` -- nonnegative weights. **Not normalized
+  internally**: used exactly as given, so `a`/`b` must already be the
+  marginals you want (typically each summing to 1). `sum(a)` must equal
+  `sum(b)` for a well-posed problem; if they don't, nothing raises, but the
+  result is silently wrong (verified: row marginals disagree with the
+  input, no exception). Zero entries are legal -- a zero-weight point just
+  receives/sends zero mass.
+
+| | Supported |
+|---|---|
+| `N != M` | Yes |
+| `float32` | Yes, on every backend |
+| `float64` | Yes on `backend="torch"`; **no** on `backend="triton"` (raises `ValueError` -- the Triton kernels are float32-only) |
+| CPU | Yes (`backend="torch"`; Triton requires CUDA) |
+| CUDA | Yes (`backend="torch"` or `"triton"`) |
+| Batched inputs, `(..., N, d)` | No -- `x`/`y` must be exactly 2D |
+
 ## Basic Usage
 
 The quickest way to call SinkSLOT is `sinkslot.SamplesLoss`, a
@@ -52,6 +72,38 @@ cost = loss(x, y)                          # achieved SLOT_eps cost, <T, C>
 grad_x, = torch.autograd.grad(cost, [x])   # analytic gradient, no backprop through Sinkhorn
 ```
 
+### Gradient Flow
+
+An explicit gradient-descent loop works either through `autograd`
+(`SamplesLoss`) or directly via `slot_grad` -- same analytic gradient
+either way, just with or without building an autograd graph:
+
+```python
+x_flow = torch.randn(1000, 2, device="cuda")
+y_flow = torch.randn(1000, 2, device="cuda") + 3.0
+loss_flow = SamplesLoss(eps=0.01, L=100, n_iters=200)
+
+lr = 0.1
+for step in range(200):
+    x_flow = x_flow.detach().requires_grad_(True)
+    cost = loss_flow(x_flow, y_flow)
+    grad, = torch.autograd.grad(cost, [x_flow])
+    x_flow = x_flow - lr * grad
+```
+
+```python
+from sinkslot import slot_grad
+
+x_flow = torch.randn(1000, 2, device="cuda")
+y_flow = torch.randn(1000, 2, device="cuda") + 3.0
+a_flow = torch.full((1000,), 1.0 / 1000, device="cuda")
+
+lr = 0.1
+for step in range(200):
+    grad = slot_grad(x_flow, y_flow, a_flow, eps=0.01, L=100, seed=0, n_iters=200)
+    x_flow = x_flow - lr * grad
+```
+
 ### Potentials
 
 ```python
@@ -68,36 +120,24 @@ rows, cols = P.indices()
 Tx, Ty = sparse_barycentric_map(P.values(), rows, cols, x, y)
 ```
 
-### Gradient Flow (slot_grad, same gradients without autograd)
-
-```python
-from sinkslot import slot_grad
-
-x = torch.randn(1000, 2, device="cuda")
-y = torch.randn(1000, 2, device="cuda") + 3.0
-a = torch.full((1000,), 1.0 / 1000, device="cuda")
-
-lr = 0.1
-for step in range(200):
-    grad = slot_grad(x, y, a, eps=0.01, L=100, seed=0, n_iters=200)
-    x = x - lr * grad
-```
-
 ## API Reference
 
 ### SamplesLoss
 
 ```python
 SamplesLoss(
-    loss="sinkhorn",   # only "sinkhorn" is implemented
-    eps=0.05,          # entropic regularisation strength
-    L=64,               # number of random slicing directions
-    seed=0,             # RNG seed for the slicing directions
-    n_iters=200,        # Sinkhorn iteration cap (exact count unless stop overrides it)
-    backend="auto",     # "auto" | "triton" | "torch"
-    symmetric=False,    # False: alternating (Gauss-Seidel) update; True: symmetric (Jacobi)
-    alpha=0.5,          # Jacobi blend weight, only used when symmetric=True
-    stop=None,          # "fixed" | "marginal" | "potential" | "potential_linf"
+    loss="sinkhorn",         # only "sinkhorn" is implemented
+    eps=0.05,                # entropic regularisation strength
+    L=64,                    # number of random slicing directions
+    seed=0,                  # RNG seed for the slicing directions
+    n_iters=200,             # exact iteration count when stop_mode="fixed" (the default)
+    backend="auto",          # "auto" | "triton" | "torch"
+    symmetric=False,         # False: alternating (Gauss-Seidel) update; True: symmetric (Jacobi)
+    alpha=0.5,                # Jacobi blend weight, only used when symmetric=True
+    stop_mode="fixed",       # "fixed" | "marginal" | "potential" | "potential_linf"
+    stop_max_iter=20000,     # iteration cap when stop_mode != "fixed" (n_iters is then unused)
+    stop_tol=1e-6,           # convergence threshold
+    stop_check_every=5,      # check convergence every N iterations
 )
 
 loss(x, y, a=None, b=None, potentials=False)
@@ -109,33 +149,42 @@ loss(x, y, a=None, b=None, potentials=False)
 
 ```python
 sparse_transport_plan(
-    x, y, a=None, b=None,   # a/b: source/target marginal weights, uniform if omitted
-    eps=0.05, L=64, seed=0, n_iters=200, stop=None,
+    x, y, a=None, b=None,      # a/b: source/target marginal weights, uniform if omitted
+    eps=0.05, L=64, seed=0, n_iters=200,
+    stop_mode="fixed", stop_max_iter=20000, stop_tol=1e-6, stop_check_every=5,
     backend="auto", variant="alternating", alpha=0.5,
 )
 ```
 
-Same arguments as `sinkslot_solve`, but returns the plan itself: a
+Same arguments as the low-level solver below, but returns the plan itself: a
 `torch.sparse_coo_tensor` of shape `(n, m)`. Non-differentiable, like
 `potentials=True`.
 
-### sinkslot_solve
+## Low-Level Solver API
+
+`sinkslot_solve` is what `SamplesLoss` and `sparse_transport_plan` are both
+built on -- same arguments, but it returns the raw solve state as an
+8-value tuple instead of a scalar cost or a plan tensor. Reach for it only
+if you need the dual potentials and sliced support directly; most callers
+want one of the two functions above instead.
 
 ```python
-from dataclasses import dataclass
 from sinkslot import sinkslot_solve
 
-@dataclass
-class Stop:
-    mode: str = "fixed"     # "fixed" | "marginal" | "potential" | "potential_linf"
-    max_iter: int = 20000   # iteration cap when mode != "fixed"
-    tol: float = 1e-6       # convergence threshold
-    check_every: int = 5    # check convergence every N iterations
-
 phi, psi, rows, cols, S, iters_run, converged, final_viol = sinkslot_solve(
-    x, y, a, b, eps=0.05, L=64, seed=0, n_iters=200, stop=Stop(mode="marginal"),
+    x, y, a, b, eps=0.05, L=64, seed=0, n_iters=200,
+    stop_mode="marginal", stop_max_iter=20000, stop_tol=1e-6, stop_check_every=5,
 )
 ```
+
+`phi`/`psi`: converged dual potentials, absorbed (`phi = f/eps`). `rows`/
+`cols`/`S`: the sliced-OT support and reference plan -- `S[k]` is the
+reference mass on `(rows[k], cols[k])`; the achieved plan's own value there
+is `(phi[rows] + psi[cols] + S.log() - cost/eps).exp()` (this is exactly
+what `sparse_transport_plan` computes for you). `iters_run`/`converged`/
+`final_viol`: `None`/`None`/`None` under `stop_mode="fixed"` (ran exactly
+`n_iters`); otherwise the actual iteration count, whether it converged
+within `stop_max_iter`, and the final convergence-check value.
 
 ## Reproducing the paper
 
