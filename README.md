@@ -68,8 +68,8 @@ from sinkslot import SamplesLoss
 x = torch.randn(10000, 2, requires_grad=True, device="cuda")  # also works on CPU, drop device="cuda"
 y = torch.randn(10000, 2, device="cuda")
 
-loss = SamplesLoss(eps=0.05, L=64, n_iters=200)  # backend="auto": automatically detects whether Triton is installed
-cost = loss(x, y)                          # achieved transport cost <T, C> (not the full SLOT_eps divergence, which also adds eps * KL(T, P^SOT))
+loss = SamplesLoss(eps=0.05, L=64, n_iters=200)
+cost = loss(x, y)                          # achieved transport cost <T, C>
 grad_x, = torch.autograd.grad(cost, [x])   # analytic gradient of SLOT_eps itself (the KL term's gradient vanishes here), no backprop through Sinkhorn
 ```
 
