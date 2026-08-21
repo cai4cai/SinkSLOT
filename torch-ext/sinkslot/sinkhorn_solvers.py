@@ -24,6 +24,8 @@ problem was the package-level re-export, not the lack of a leading underscore).
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import torch
 
 from .solver import (
@@ -530,8 +532,9 @@ def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=
     return phi, psi, it, converged, viol
 
 
-def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None,
-                    backend="auto", variant="alternating", alpha=0.5):
+def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop_mode="fixed",
+                    stop_max_iter=20000, stop_tol=1e-6, stop_check_every=5,
+                    chunk=None, backend="auto", variant="alternating", alpha=0.5):
     """SinkSLOT end to end: build the sliced plan, then solve -- on any device.
 
     Dispatches on X's device and whether Triton is importable: the fused Triton
@@ -565,6 +568,14 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None,
     `alpha` is the symmetric update's blend weight (`phi_new = (1-alpha)*phi
     + alpha*phi_cand`); unused when `variant="alternating"`.
 
+    `stop_mode`: "fixed" (default) runs exactly `n_iters` and ignores the
+    other three `stop_*` args entirely. "marginal" / "potential" /
+    "potential_linf" run up to `stop_max_iter` instead, checking every
+    `stop_check_every` iterations against `stop_tol` -- see
+    `_resolve_stop_mode`'s callers for what each mode actually checks.
+    `n_iters` and `stop_max_iter` are never both in effect at once: which
+    one governs the iteration count depends entirely on `stop_mode`.
+
     Returns (phi, psi, rows, cols, S, iters_run, converged, final_viol): phi,
     psi absorbed (phi=f/eps, psi=g/eps); rows/cols/S the sliced support, needed
     by callers building the transport plan or its gradient.
@@ -581,6 +592,10 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None,
         use_triton = False
     else:
         use_triton = _HAS_TRITON and X.is_cuda
+
+    stop = None if stop_mode == "fixed" else SimpleNamespace(
+        mode=stop_mode, max_iter=stop_max_iter, tol=stop_tol,
+        check_every=stop_check_every)
 
     n, m = X.shape[0], Y.shape[0]
     ot1d = _ot_1d_coo_batched_cuda if X.is_cuda else _ot_1d_coo_batched
@@ -612,7 +627,8 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop=None, chunk=None,
 
 
 def sparse_transport_plan(x, y, a=None, b=None, *, eps=0.05, L=64, seed=0,
-                           n_iters=200, stop=None, backend="auto",
+                           n_iters=200, stop_mode="fixed", stop_max_iter=20000,
+                           stop_tol=1e-6, stop_check_every=5, backend="auto",
                            variant="alternating", alpha=0.5):
     """SinkSLOT's transport plan as a sparse `(n, m)` COO tensor.
 
@@ -625,9 +641,9 @@ def sparse_transport_plan(x, y, a=None, b=None, *, eps=0.05, L=64, seed=0,
     `sinkslot_solve` directly, not through `SamplesLoss`'s autograd
     Function.
 
-    `a`, `b`: marginal weights, uniform if omitted. Independent, unlike
-    `SamplesLoss`, which only supports a single weight vector shared by
-    both marginals.
+    `a`, `b`: marginal weights, uniform if omitted. `stop_mode`/`stop_max_iter`/
+    `stop_tol`/`stop_check_every`: forwarded to `sinkslot_solve` unchanged,
+    see its own docstring.
     """
     n, m = x.shape[0], y.shape[0]
     if a is None:
@@ -636,7 +652,9 @@ def sparse_transport_plan(x, y, a=None, b=None, *, eps=0.05, L=64, seed=0,
         b = torch.full((m,), 1.0 / m, device=y.device, dtype=y.dtype)
 
     phi, psi, rows, cols, S, it, converged, viol = sinkslot_solve(
-        x, y, a, b, eps, L, seed, n_iters, stop=stop, backend=backend,
+        x, y, a, b, eps, L, seed, n_iters, stop_mode=stop_mode,
+        stop_max_iter=stop_max_iter, stop_tol=stop_tol,
+        stop_check_every=stop_check_every, backend=backend,
         variant=variant, alpha=alpha)
     cost = sparse_sqeuclidean_cost(
         x, y, rows, cols,
