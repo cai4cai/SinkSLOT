@@ -124,7 +124,7 @@ def _ot_1d_coo_batched_cuda(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor,
 
     Net: 49.5x on the dominant stage AND a strictly more accurate plan. Because
     the support differs from the naive fp32 scan, SinkSLOT-CUDA keeps its own
-    reference-cache namespace (see bench_forward.py).
+    reference-cache namespace (see flash_sinkhorn/bench/bench_forward.py).
 
     Dtype: the `.double()` upcast below is internal and fixed, not driven by
     the caller's dtype -- `a`, `b`, `PX`, `PY` can be float32 or float64 on the
@@ -327,7 +327,7 @@ def sparse_sqeuclidean_cost(x, y, rows, cols, block: int = 1024, use_triton=None
     same formula, just three (nnz, d) intermediates instead of one fused pass.
     Only the fused path was ever measured for speed; the fallback exists so the
     function (and everything built on it) also works without a CUDA GPU or
-    without Triton installed at all, per #10.
+    without Triton installed at all.
 
     `use_triton`: None (default) auto-detects from `_HAS_TRITON and x.is_cuda`.
     Pass explicitly to override -- e.g. `False` to force the torch fallback on

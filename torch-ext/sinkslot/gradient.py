@@ -20,14 +20,31 @@ from .solver import sparse_sqeuclidean_cost
 from .sinkhorn_solvers import sinkslot_solve
 
 
-def plan_barycentric_sparse(T_vals, rows, cols, x, y):
-    """Barycentric projections (Tx, Ty) of a sparse plan given as (rows, cols, T_vals).
+def sparse_barycentric_map(*args):
+    """Barycentric projections (Tx, Ty) of a sparse plan.
+
+    Two call forms: `sparse_barycentric_map(P, x, y)` with `P` a
+    `torch.sparse_coo_tensor` (e.g. from `sparse_transport_plan`), or
+    `sparse_barycentric_map(T_vals, rows, cols, x, y)` with the plan given
+    as separate COO components -- what `slot_grad`/`_SLOTCostFn` pass
+    internally, already having `T_vals`/`rows`/`cols` on hand.
 
     Normalizes by the plan's own achieved marginals (scatter-summed from
     T_vals), not the target a, b -- matters when the solve hasn't fully
     converged. Also lives (independently) in flash_sinkhorn/bench/bench_forward.py,
     which this doesn't import from since that pulls in the whole benchmark harness.
     """
+    if len(args) == 3:
+        P, x, y = args
+        rows, cols = P.indices()
+        T_vals = P.values()
+    elif len(args) == 5:
+        T_vals, rows, cols, x, y = args
+    else:
+        raise TypeError(
+            f"sparse_barycentric_map expects (P, x, y) or "
+            f"(T_vals, rows, cols, x, y), got {len(args)} positional args"
+        )
     n, d = x.shape
     m = y.shape[0]
     tiny = torch.finfo(T_vals.dtype).tiny
@@ -42,7 +59,7 @@ def plan_barycentric_sparse(T_vals, rows, cols, x, y):
     return Tx, Ty
 
 
-def slot_grad(X, Y, a, eps, L, seed, n_iters, backend="auto", b=None):
+def slot_grad(X, Y, a, b, eps, L, seed, n_iters, backend="auto"):
     """grad_X SLOT_eps(X, Y) by the envelope theorem (Feydy et al. 2019's trick):
 
         grad_X SLOT_eps(X, Y) = 2 * diag(a) * (X - T_eps(X))
@@ -52,9 +69,8 @@ def slot_grad(X, Y, a, eps, L, seed, n_iters, backend="auto", b=None):
     `a`/`b` (and X.shape[0] != Y.shape[0]) exactly as it does for the shared-`a`
     case: verified by finite difference (~1e-10 relative error, float64) that
     the formula above doesn't change with `b` -- only which plan it's built
-    from does. `b` defaults to `a` (X and Y treated as the same size with the
-    same per-index weight), matching every caller before this parameter
-    existed.
+    from does. `a`, `b` positional and required, matching `sinkslot_solve`'s
+    own `(X, Y, a, b, ...)` convention.
 
     Built on `sinkslot_solve`, so it works on CPU or CUDA-without-Triton via
     the same `backend` override ("auto" / "triton" / "torch", see
@@ -62,8 +78,6 @@ def slot_grad(X, Y, a, eps, L, seed, n_iters, backend="auto", b=None):
     fp32 caveat as `sparse_sqeuclidean_cost`'s Triton path when `backend`
     resolves to Triton; the torch path follows X/Y/a's own dtype.
     """
-    if b is None:
-        b = a
     phi, psi, rows, cols, S, _, _, _ = sinkslot_solve(
         X, Y, a, b, eps, L, seed, n_iters, backend=backend)
     cost = sparse_sqeuclidean_cost(
@@ -74,5 +88,5 @@ def slot_grad(X, Y, a, eps, L, seed, n_iters, backend="auto", b=None):
     lam = log_S - cost / eps
 
     T_vals = (phi[rows] + psi[cols] + lam).exp()
-    Tx, _ = plan_barycentric_sparse(T_vals, rows, cols, X, Y)
+    Tx, _ = sparse_barycentric_map(T_vals, rows, cols, X, Y)
     return 2.0 * a[:, None] * (X - Tx)

@@ -13,7 +13,7 @@ Four methods, one figure:
     the analytical gradient.
   * EOT (Feydy et al., 2019): `sinkhorn_divergence_torch_autograd`.
   * SROT (Nguyen 2026): `sr_sinkhorn_divergence_torch_autograd`, delta=1e-8.
-  * SinkSLOT (ours): the native v5 solver (torch-ext/sinkslot/sinkhorn_solvers.py),
+  * SinkSLOT (ours): the native solver (torch-ext/sinkslot/sinkhorn_solvers.py),
     the exact pipeline this repo's own speed benchmarks exercise,
     plus the closed-form envelope-theorem gradient
     grad_X SLOT_eps(X,Y) = 2*diag(a)*(X - T_eps(X)) (see sinkslot/gradient.py).
@@ -111,8 +111,8 @@ def run_flow(method, X0, Y, a_t, eps):
     for step in range(N_STEPS + 1):
         if method == "SinkSLOT":
             x_i_d = x_i.detach()
-            g = slot_grad(x_i_d.float(), Y.float(), a_t.float(), eps, L, seed=0,
-                          n_iters=MAX_ITER).double()
+            g = slot_grad(x_i_d.float(), Y.float(), a_t.float(), a_t.float(), eps, L,
+                          seed=0, n_iters=MAX_ITER).double()
         else:
             x_i.requires_grad_(True)
             if method == "SOT":

@@ -1,15 +1,15 @@
 """SinkSLOT's Sinkhorn solver loops and device-agnostic entry point.
 
-This is the v5 variant: v1's alternating scheme with both reductions fused into
-Triton kernels (online-softmax segmented LSE, CSR for the row half-step and CSC
-for the column half-step). Mathematically identical to a plain torch segmented
+The alternating scheme has both reductions fused into Triton kernels
+(online-softmax segmented LSE, CSR for the row half-step and CSC for the
+column half-step). Mathematically identical to a plain torch segmented
 LSE; the point is throughput, not a different algorithm. The CUDA-graph capture
 of the upstream production path is intentionally omitted here.
 
 `sinkslot_solve` is the device-agnostic entry point: `sinkslot_alternating_triton`
 above when Triton is installed and the input is CUDA, the pure-torch fallback
 (`sinkslot_alternating_torch`) otherwise -- same algorithm, cross-checked in
-testing/test_sinkslot_bench.py, so a CPU machine or a machine without Triton
+testing/test_torch_fallback.py, so a CPU machine or a machine without Triton
 installed can still run SinkSLOT, just without the fused-kernel throughput.
 
 Split out from solver.py to mirror flash_sinkhorn's own sinkhorn_solvers.py:
@@ -17,14 +17,13 @@ that module's `sinkhorn_flashstyle_alternating`/`_symmetric` are the FlashSinkho
 equivalent of the two loops below, and neither module underscore-prefixes its
 solver loops even though they're not the top-level entry point (a plain,
 descriptive name plus leaving it out of `__init__.py`'s exports is how both
-packages mark "internal, but not hidden behind Python's underscore convention"
--- see `_resolve_stop_mode`'s own docstring for the #14 bug this fixes: the
-problem was the package-level re-export, not the lack of a leading underscore).
+packages mark "internal, but not hidden behind Python's underscore convention").
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import NamedTuple, Optional
 
 import torch
 
@@ -146,31 +145,47 @@ def seg_lse_online(indptr, colidx, lam, phi, psi, n, block=None, num_warps=None,
 
 
 # --------------------------------------------------------------------------
-# v5 loop and entry point
+# Alternating loop and entry point
 # --------------------------------------------------------------------------
 
 
-_STOP_MODES = ("fixed", "marginal", "potential", "potential_linf")
+class SinkslotSolveResult(NamedTuple):
+    """`sinkslot_solve`'s return value. A real tuple subclass, so every
+    existing `phi, psi, rows, cols, S, it, converged, viol = sinkslot_solve(...)`
+    call site keeps working unchanged; named-field access (`result.phi`) is
+    just an added convenience.
+    """
+    phi: torch.Tensor
+    psi: torch.Tensor
+    rows: torch.Tensor
+    cols: torch.Tensor
+    S: torch.Tensor
+    iters_run: Optional[int]
+    converged: Optional[bool]
+    final_viol: Optional[float]
+
+
+_STOP_MODES = ("fixed", "marginal", "potential")
 
 
 def _resolve_stop_mode(stop):
-    """Shared by `sinkslot_alternating_triton` and `sinkslot_alternating_torch`:
-    resolve `stop.mode` (or "fixed" if `stop` is None) and validate it against
-    `_STOP_MODES` upfront, so the four valid modes stay one source of truth
-    instead of two independently-maintained checks. They drifted out of sync
-    once already -- the torch path validated from the start, the Triton path
-    didn't, so a typo'd mode used to behave differently depending on which
-    backend happened to run it (fixed alongside this helper, not by it: the
-    old inline check ran only after the "fixed" and "potential_linf" branches
-    had already been ruled out, but for an invalid mode neither of those
-    branches matches anyway, so validating here instead, before any branch
-    runs, raises in the exact same cases as before).
+    """Shared by all four solve loops (`sinkslot_alternating_triton`/`_torch`,
+    `sinkslot_symmetric_triton`/`_torch`): resolve `stop.mode` (or "fixed" if
+    `stop` is None) and validate it against `_STOP_MODES` upfront, so the
+    three valid modes stay one source of truth instead of four independently
+    -maintained checks.
+
+    "potential" was "potential_linf" until the redundant old "potential"
+    (byte-for-byte identical to "marginal", see git history) was dropped and
+    this name freed up for it -- a max L-infinity change in the dual
+    potentials, matching FlashSinkhorn's own native rule; see each loop's
+    own docstring.
     """
     mode = getattr(stop, "mode", "fixed") if stop is not None else "fixed"
     if mode not in _STOP_MODES:
         raise ValueError(
             f"unknown stop.mode {mode!r}; expected one of "
-            f"'fixed', 'marginal', 'potential', 'potential_linf'"
+            f"'fixed', 'marginal', 'potential'"
         )
     return mode
 
@@ -186,24 +201,25 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
 
     Returns (phi, psi, iters_run, converged, final_viol). With `stop` None or
     stop.mode == "fixed" it runs exactly n_iters (converged/final_viol None).
-    With stop.mode in {"marginal", "potential"} it runs up to stop.max_iter and
-    stops on the max (L-infinity) marginal violation: after the column half-step
-    the column marginals are exactly b, so only the row marginal deviates, and
+    With stop.mode == "marginal" it runs up to stop.max_iter and stops on the
+    max (L-infinity) marginal violation: after the column half-step the
+    column marginals are exactly b, so only the row marginal deviates, and
     r = a * exp(phi - phi_next) where phi_next is the next row LSE -- one extra
-    LSE, no O(nnz) work. (potential mode falls back to the marginal check here;
-    the u/v-change rule is Spar-Sink's and is applied there.) This is max, not a
-    total-variation sum: matches the SLOT repo's actual working "marg_viol" rule
-    (bench/solvers/sinkslot.py's `_violation`/`_run_v5` there) -- a sum over n
-    terms against a fixed absolute tol is unreachable at n=10,000 regardless of
-    convergence, which is why an earlier version of this function (sum-based)
-    looked like marginal-violation stopping didn't work here either.
+    LSE, no O(nnz) work. This is max, not a total-variation sum: matches the
+    SLOT repo's actual working "marg_viol" rule (bench/solvers/sinkslot.py's
+    `_violation`/`_run_v5` there) -- a sum over n terms against a fixed
+    absolute tol is unreachable at n=10,000 regardless of convergence.
 
-    stop.mode == "potential_linf" reproduces FlashSinkhorn's own native rule:
+    stop.mode == "potential" reproduces FlashSinkhorn's own native rule:
     stop once the dual potentials stop moving, max(|Δf|, |Δg|) < stop.tol since
     the last check, with no extra LSE call (unlike marginal mode). Since phi, psi
     are absorbed (phi=f/eps), the raw phi/psi change is rescaled by `eps`
     (required in this mode) so stop.tol compares on the same physical scale as
-    FlashSinkhorn's and SROT's unabsorbed f, g.
+    FlashSinkhorn's and SROT's unabsorbed f, g. Not to be confused with
+    Spar-Sink's own, differently-defined "potential" mode (a change in the
+    scaling vectors u=exp(f/eps), not in f/g themselves) in
+    flash_sinkhorn/bench/bench_forward.py -- that's a distinct rule for a
+    distinct solver, unrelated to this one.
     """
     r_blk, r_w = launch_cfg(r_idx.numel(), n)
     c_blk, c_w = launch_cfg(c_idx.numel(), m)
@@ -218,9 +234,9 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
             seg_lse_online(c_ptr, c_idx, c_lam, z_m, phi, m, c_blk, c_w, base=log_b, out=psi)
         return phi, psi, n_iters, None, None
 
-    if mode == "potential_linf":
+    if mode == "potential":
         if eps is None:
-            raise ValueError("eps is required for stop.mode == 'potential_linf'")
+            raise ValueError("eps is required for stop.mode == 'potential'")
         prev_phi, prev_psi = phi.clone(), psi.clone()
         it = 0
         converged = False
@@ -239,7 +255,7 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
                 prev_psi.copy_(psi)
         return phi, psi, it, converged, change
 
-    # mode in {"marginal", "potential"} -- the only two left after _resolve_stop_mode.
+    # mode == "marginal" -- the only mode left after _resolve_stop_mode.
     a = log_a.exp()
     phi_next = torch.empty_like(log_a)
     it = 0
@@ -274,7 +290,7 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
 
 def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
             n_iters, stop=None, eps=None, alpha=0.5):
-    """Symmetric (Jacobi) Sinkhorn over prebuilt CSR/CSC, fused Triton half-steps (#34).
+    """Symmetric (Jacobi) Sinkhorn over prebuilt CSR/CSC, fused Triton half-steps.
 
     Both half-steps read the SAME (phi, psi) pair -- unlike
     `sinkslot_alternating_triton`'s Gauss-Seidel scheme, where the column
@@ -294,8 +310,8 @@ def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, l
     values, still order-independent unlike Gauss-Seidel).
 
     Returns (phi, psi, iters_run, converged, final_viol), same contract as
-    `sinkslot_alternating_triton`. With stop.mode in {"marginal", "potential"}:
-    unlike alternating, NEITHER marginal is exact after a blended update --
+    `sinkslot_alternating_triton`. With stop.mode == "marginal": unlike
+    alternating, NEITHER marginal is exact after a blended update --
     the column marginal being exact right after the column half-step is a
     Gauss-Seidel property this scheme doesn't have (both `phi` and `psi` move
     on every iteration, and by less than a full half-step whenever
@@ -329,9 +345,9 @@ def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, l
             psi.mul_(1.0 - alpha).add_(psi_cand, alpha=alpha)
         return phi, psi, n_iters, None, None
 
-    if mode == "potential_linf":
+    if mode == "potential":
         if eps is None:
-            raise ValueError("eps is required for stop.mode == 'potential_linf'")
+            raise ValueError("eps is required for stop.mode == 'potential'")
         prev_phi, prev_psi = phi.clone(), psi.clone()
         it = 0
         converged = False
@@ -351,7 +367,7 @@ def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, l
                 prev_psi.copy_(psi)
         return phi, psi, it, converged, change
 
-    # mode in {"marginal", "potential"} -- the only two left after _resolve_stop_mode.
+    # mode == "marginal" -- the only mode left after _resolve_stop_mode.
     a = log_a.exp()
     b = log_b.exp()
     it = 0
@@ -378,7 +394,7 @@ def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, l
 
 
 # --------------------------------------------------------------------------
-# Pure-torch fallback (#10) -- no Triton, works on CPU or a non-CUDA device.
+# Pure-torch fallback -- no Triton, works on CPU or a non-CUDA device.
 # --------------------------------------------------------------------------
 
 
@@ -386,9 +402,10 @@ def _seg_lse_coo(vals, idx, size):
     """Segmented log-sum-exp over COO-style per-entry indices.
 
     out[i] = logsumexp_{k: idx[k] == i} vals[k]; -inf for an empty group. Same
-    scatter_reduce/index_add pattern as `test_run_v5_matches_plain_torch_
-    segmented_lse` in testing/test_sinkslot_bench.py, which validates this
-    matches `_seg_lse_online_kernel`'s fp32 output on the real Triton path.
+    scatter_reduce/index_add pattern as `test_sinkslot_alternating_triton_
+    matches_plain_torch_segmented_lse` in flash_sinkhorn/testing/test_sinkslot_bench.py,
+    which validates this matches `_seg_lse_online_kernel`'s fp32 output on the
+    real Triton path.
     """
     mx = vals.new_full((size,), float("-inf")).scatter_reduce(
         0, idx, vals, reduce="amax", include_self=True)
@@ -398,7 +415,7 @@ def _seg_lse_coo(vals, idx, size):
 
 
 def sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=None, eps=None):
-    """Pure-torch counterpart to `sinkslot_alternating_triton` -- same four
+    """Pure-torch counterpart to `sinkslot_alternating_triton` -- same three
     `stop.mode` semantics, no Triton, no CSR/CSC (operates directly on the COO
     `sot_plan_coo` returns, since `index_add_`/`scatter_reduce_` don't need
     sorted input the way the Triton kernel's one-program-per-row parallelism
@@ -408,7 +425,7 @@ def sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, sto
     logic here mirrors it exactly, substituting
     `_seg_lse_coo(lam + other[idx], self_idx, size)` for `seg_lse_online(...)`.
     Cross-checked against `sinkslot_alternating_triton` in
-    testing/test_sinkslot_bench.py.
+    testing/test_torch_fallback.py.
     """
     phi, psi = torch.zeros_like(log_a), torch.zeros_like(log_b)
     mode = _resolve_stop_mode(stop)
@@ -419,9 +436,9 @@ def sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, sto
             psi = log_b - _seg_lse_coo(lam + phi[rows], cols, m)
         return phi, psi, n_iters, None, None
 
-    if mode == "potential_linf":
+    if mode == "potential":
         if eps is None:
-            raise ValueError("eps is required for stop.mode == 'potential_linf'")
+            raise ValueError("eps is required for stop.mode == 'potential'")
         prev_phi, prev_psi = phi.clone(), psi.clone()
         it = 0
         converged = False
@@ -440,7 +457,7 @@ def sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, sto
                 prev_psi.copy_(psi)
         return phi, psi, it, converged, change
 
-    # mode in {"marginal", "potential"} -- the only two left after _resolve_stop_mode.
+    # mode == "marginal" -- the only mode left after _resolve_stop_mode.
     a = log_a.exp()
     it = 0
     converged = False
@@ -464,7 +481,7 @@ def sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, sto
 
 def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=None,
                               eps=None, alpha=0.5):
-    """Pure-torch counterpart to `sinkslot_symmetric_triton` (#34) -- see its
+    """Pure-torch counterpart to `sinkslot_symmetric_triton` -- see its
     docstring for the update rule and stop-mode semantics; the logic here
     mirrors it exactly, substituting `_seg_lse_coo(...)` for
     `seg_lse_online(...)`, matching `sinkslot_alternating_torch`'s own
@@ -485,9 +502,9 @@ def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=
             psi = (1.0 - alpha) * psi + alpha * psi_cand
         return phi, psi, n_iters, None, None
 
-    if mode == "potential_linf":
+    if mode == "potential":
         if eps is None:
-            raise ValueError("eps is required for stop.mode == 'potential_linf'")
+            raise ValueError("eps is required for stop.mode == 'potential'")
         prev_phi, prev_psi = phi.clone(), psi.clone()
         it = 0
         converged = False
@@ -507,7 +524,7 @@ def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=
                 prev_psi.copy_(psi)
         return phi, psi, it, converged, change
 
-    # mode in {"marginal", "potential"} -- the only two left after _resolve_stop_mode.
+    # mode == "marginal" -- the only mode left after _resolve_stop_mode.
     a = log_a.exp()
     b = log_b.exp()
     it = 0
@@ -532,17 +549,18 @@ def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=
     return phi, psi, it, converged, viol
 
 
-def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop_mode="fixed",
-                    stop_max_iter=20000, stop_tol=1e-6, stop_check_every=5,
-                    chunk=None, backend="auto", variant="alternating", alpha=0.5):
+def sinkslot_solve(X, Y, a=None, b=None, eps=0.05, L=64, seed=0, n_iters=200,
+                    stop_mode="fixed", stop_max_iter=20000, stop_tol=1e-6,
+                    stop_check_every=5, chunk=None, backend="auto",
+                    variant="alternating", alpha=0.5):
     """SinkSLOT end to end: build the sliced plan, then solve -- on any device.
 
     Dispatches on X's device and whether Triton is importable: the fused Triton
     kernels when both hold, the pure-torch path (`sinkslot_alternating_torch`,
     `_ot_1d_coo_batched`) otherwise. Same algorithm and stopping semantics
-    either way -- the two are cross-checked in testing/test_sinkslot_bench.py --
+    either way -- the two are cross-checked in testing/test_torch_fallback.py --
     so this is the one call that works whether or not the caller has a CUDA GPU
-    or Triton installed (#10). The pure-torch path is meaningfully slower (no
+    or Triton installed. The pure-torch path is meaningfully slower (no
     fused kernels, no CSR launch-config tuning): use it for
     correctness/portability, not for reproducing the paper's own throughput
     numbers, which are all measured on the Triton path.
@@ -561,7 +579,7 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop_mode="fixed",
 
     `variant`: "alternating" (default, unchanged behavior) picks the
     Gauss-Seidel loop (`sinkslot_alternating_triton`/`_torch`); "symmetric"
-    (#34) picks the Jacobi loop (`sinkslot_symmetric_triton`/`_torch`) instead,
+    picks the Jacobi loop (`sinkslot_symmetric_triton`/`_torch`) instead,
     which updates phi and psi simultaneously from the same prior state rather
     than sequentially -- see that function's own docstring for the update
     rule and why its marginal-violation check costs more than alternating's.
@@ -569,21 +587,40 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop_mode="fixed",
     + alpha*phi_cand`); unused when `variant="alternating"`.
 
     `stop_mode`: "fixed" (default) runs exactly `n_iters` and ignores the
-    other three `stop_*` args entirely. "marginal" / "potential" /
-    "potential_linf" run up to `stop_max_iter` instead, checking every
-    `stop_check_every` iterations against `stop_tol` -- see
-    `_resolve_stop_mode`'s callers for what each mode actually checks.
+    other three `stop_*` args entirely. "marginal" / "potential" run up to
+    `stop_max_iter` instead, checking every `stop_check_every` iterations
+    against `stop_tol` -- see `_resolve_stop_mode`'s callers for what each
+    mode actually checks.
     `n_iters` and `stop_max_iter` are never both in effect at once: which
     one governs the iteration count depends entirely on `stop_mode`.
 
-    Returns (phi, psi, rows, cols, S, iters_run, converged, final_viol): phi,
-    psi absorbed (phi=f/eps, psi=g/eps); rows/cols/S the sliced support, needed
-    by callers building the transport plan or its gradient.
+    Returns a `SinkslotSolveResult` NamedTuple (phi, psi, rows, cols, S,
+    iters_run, converged, final_viol) -- unpacks and indexes like a plain
+    tuple, plus named-field access. phi, psi absorbed (phi=f/eps, psi=g/eps);
+    rows/cols/S the sliced support, needed by callers building the transport
+    plan or its gradient.
+
+    Raises `ValueError` if `a.sum()` and `b.sum()` disagree: a and b must
+    carry equal total mass for a well-posed transport problem, and the
+    solve loops silently produce a wrong plan otherwise rather than raising.
+
+    `a`, `b`: source/target weights, each independently uniform over
+    `X.shape[0]`/`Y.shape[0]` when omitted, matching `SamplesLoss`'s and
+    `sparse_transport_plan`'s own convention.
     """
+    if a is None:
+        a = torch.full((X.shape[0],), 1.0 / X.shape[0], device=X.device, dtype=X.dtype)
+    if b is None:
+        b = torch.full((Y.shape[0],), 1.0 / Y.shape[0], device=Y.device, dtype=Y.dtype)
     if backend not in ("auto", "triton", "torch"):
         raise ValueError(f"backend must be 'auto', 'triton', or 'torch', got {backend!r}")
     if variant not in ("alternating", "symmetric"):
         raise ValueError(f"variant must be 'alternating' or 'symmetric', got {variant!r}")
+    if not torch.allclose(a.sum(), b.sum().to(a.dtype), rtol=1e-4, atol=1e-4):
+        raise ValueError(
+            f"a and b must have equal total mass, got sum(a)={a.sum().item():.6g} "
+            f"!= sum(b)={b.sum().item():.6g}"
+        )
     if backend == "triton":
         if not (_HAS_TRITON and X.is_cuda):
             raise ValueError("backend='triton' requires Triton installed and X on CUDA")
@@ -623,7 +660,7 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop_mode="fixed",
             phi, psi, it, converged, viol = sinkslot_alternating_torch(
                 rows, cols, lam, log_a, log_b, n, m, n_iters, stop, eps)
 
-    return phi, psi, rows, cols, S, it, converged, viol
+    return SinkslotSolveResult(phi, psi, rows, cols, S, it, converged, viol)
 
 
 def sparse_transport_plan(x, y, a=None, b=None, *, eps=0.05, L=64, seed=0,
@@ -641,16 +678,12 @@ def sparse_transport_plan(x, y, a=None, b=None, *, eps=0.05, L=64, seed=0,
     `sinkslot_solve` directly, not through `SamplesLoss`'s autograd
     Function.
 
-    `a`, `b`: marginal weights, uniform if omitted. `stop_mode`/`stop_max_iter`/
-    `stop_tol`/`stop_check_every`: forwarded to `sinkslot_solve` unchanged,
-    see its own docstring.
+    `a`, `b`: marginal weights, uniform if omitted (forwarded to
+    `sinkslot_solve`, which resolves the default itself). `stop_mode`/
+    `stop_max_iter`/`stop_tol`/`stop_check_every`: forwarded to
+    `sinkslot_solve` unchanged, see its own docstring.
     """
     n, m = x.shape[0], y.shape[0]
-    if a is None:
-        a = torch.full((n,), 1.0 / n, device=x.device, dtype=x.dtype)
-    if b is None:
-        b = torch.full((m,), 1.0 / m, device=y.device, dtype=y.dtype)
-
     phi, psi, rows, cols, S, it, converged, viol = sinkslot_solve(
         x, y, a, b, eps, L, seed, n_iters, stop_mode=stop_mode,
         stop_max_iter=stop_max_iter, stop_tol=stop_tol,

@@ -41,12 +41,12 @@ Issues = "https://github.com/cai4cai/SinkSLOT/issues"
 UpstreamFlashSinkhorn = "https://github.com/ot-triton-lab/flash-sinkhorn"
 
 [project.optional-dependencies]
-# Triton is its own extra, not a core dependency (fixes #10's install-time
-# half of "works without Triton"): sinkslot.sinkslot_solve already falls back
-# to pure torch at runtime when Triton isn't importable, but `pip install
-# sinkslot` was still forcing it in regardless, which also breaks a plain
-# install on a platform without a Triton wheel (e.g. macOS). `dev` still
-# pulls it in, since benchmarking/development wants the fused kernels.
+# Triton is its own extra, not a core dependency: sinkslot.sinkslot_solve
+# already falls back to pure torch at runtime when Triton isn't importable,
+# but making it a hard dependency would still force `pip install sinkslot`
+# to require it, which also breaks a plain install on a platform without a
+# Triton wheel (e.g. macOS). `dev` still pulls it in, since
+# benchmarking/development wants the fused kernels.
 triton = [
   "triton>=3.1",
 ]
@@ -70,6 +70,13 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["torch-ext"]
+
+[tool.setuptools.package-data]
+# flash_sinkhorn's own LICENSE (MIT, distinct copyright -- see the file
+# itself) doesn't travel into the sdist/wheel by default, since it isn't a
+# .py file and there's no MANIFEST.in; without this, `pip install sinkslot`
+# ships the vendored code without the license MIT requires alongside it.
+flash_sinkhorn = ["LICENSE"]
 
 [tool.setuptools.dynamic]
 version = {attr = "flash_sinkhorn.__version__"}
