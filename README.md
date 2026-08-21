@@ -29,7 +29,7 @@ pip install -e .
 ```
 
 **Requirements:** PyTorch >= 2.5. Triton >= 3.1 is optional
-(`pip install -e ".[triton]"`) for the fused Triton/CUDA kernels -- without
+(`pip install -e ".[triton]"`) for the fused Triton/CUDA kernels. Without
 it, SinkSLOT runs the pure-torch fallback automatically.
 
 ## Tensor Contract
@@ -76,8 +76,7 @@ grad_x, = torch.autograd.grad(cost, [x])   # analytic gradient, no backprop thro
 ### Gradient Flow
 
 An explicit gradient-descent loop works either through `autograd`
-(`SamplesLoss`) or directly via `slot_grad` -- same analytic gradient
-either way, just with or without building an autograd graph:
+(`SamplesLoss`) or directly via `slot_grad`:
 
 ```python
 x_flow = torch.randn(1000, 2, device="cuda")
@@ -164,7 +163,7 @@ Same arguments as the low-level solver below, but returns the plan itself: a
 ## Low-Level Solver API
 
 `sinkslot_solve` is what `SamplesLoss` and `sparse_transport_plan` are both
-built on -- same arguments, but it returns the raw solve state as an
+built on. Same arguments, but it returns the raw solve state as an
 8-value tuple instead of a scalar cost or a plan tensor. Reach for it only
 if you need the dual potentials and sliced support directly; most callers
 want one of the two functions above instead.
@@ -179,7 +178,7 @@ phi, psi, rows, cols, S, iters_run, converged, final_viol = sinkslot_solve(
 ```
 
 `phi`/`psi`: converged dual potentials, absorbed (`phi = f/eps`). `rows`/
-`cols`/`S`: the sliced-OT support and reference plan -- `S[k]` is the
+`cols`/`S`: the sliced-OT support and reference plan. `S[k]` is the
 reference mass on `(rows[k], cols[k])`; the achieved plan's own value there
 is `(phi[rows] + psi[cols] + S.log() - cost/eps).exp()` (this is exactly
 what `sparse_transport_plan` computes for you). `iters_run`/`converged`/
