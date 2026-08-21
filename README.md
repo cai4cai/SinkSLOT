@@ -35,22 +35,23 @@ it, SinkSLOT runs the pure-torch fallback automatically.
 ## Tensor Contract
 
 - `x`: `(N, d)`, `y`: `(M, d)`.
-- `a`: `(N,)`, `b`: `(M,)` -- nonnegative weights. **Not normalized
+- `a`: `(N,)`, `b`: `(M,)`, nonnegative weights. **Not normalized
   internally**: used exactly as given, so `a`/`b` must already be the
   marginals you want (typically each summing to 1). `sum(a)` must equal
   `sum(b)` for a well-posed problem; if they don't, nothing raises, but the
   result is silently wrong (verified: row marginals disagree with the
-  input, no exception). Zero entries are legal -- a zero-weight point just
+  input, no exception). Zero entries are legal, a zero-weight point just
   receives/sends zero mass.
+- `float64`:
+  - Yes on `backend="torch"`.
+  - No on `backend="triton"`. Raises `ValueError`: the Triton kernels are float32-only.
 
 | | Supported |
 |---|---|
 | `N != M` | Yes |
 | `float32` | Yes, on every backend |
-| `float64` | Yes on `backend="torch"`; **no** on `backend="triton"` (raises `ValueError` -- the Triton kernels are float32-only) |
 | CPU | Yes (`backend="torch"`; Triton requires CUDA) |
 | CUDA | Yes (`backend="torch"` or `"triton"`) |
-| Batched inputs, `(..., N, d)` | No -- `x`/`y` must be exactly 2D |
 
 ## Basic Usage
 
