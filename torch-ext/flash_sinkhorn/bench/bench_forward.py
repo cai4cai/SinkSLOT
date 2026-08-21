@@ -1994,12 +1994,23 @@ def bench_sinkslot(
                             seed=seed)
 
     _stop = stop or StopCfg.fixed()
+    # sinkslot's own _STOP_MODES dropped "potential" (it was byte-for-byte
+    # identical to "marginal") and renamed "potential_linf" -> "potential"
+    # (see torch-ext/sinkslot/sinkhorn_solvers.py, issue #47) -- this CLI's
+    # --stop-mode vocabulary is unchanged (still shared with srot/spar_sink/
+    # rand_sink, where the old distinction still matters), so translate here
+    # rather than propagate the old names into sinkslot's own solve loop.
+    _sinkslot_stop_mode = {"potential": "marginal", "potential_linf": "potential"}.get(
+        _stop.mode, _stop.mode)
+    _sinkslot_stop = StopCfg(mode=_sinkslot_stop_mode, max_iter=_stop.max_iter,
+                              tol=_stop.tol, potential_tol=_stop.potential_tol,
+                              mass_tol=_stop.mass_tol, check_every=_stop.check_every)
 
     def run():
-        sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
+        sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
 
     phi, psi, iters_run, converged, final_viol = sinkslot_alternating_triton(
-        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
+        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
     cost_gap_pct = None
     bary = None
     if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
@@ -2106,12 +2117,19 @@ def bench_sinkslotcuda(
                             seed=seed)
 
     _stop = stop or StopCfg.fixed()
+    # See bench_sinkslot's matching comment: translates this CLI's stop-mode
+    # vocabulary to sinkslot's own (now 3-value) _STOP_MODES.
+    _sinkslot_stop_mode = {"potential": "marginal", "potential_linf": "potential"}.get(
+        _stop.mode, _stop.mode)
+    _sinkslot_stop = StopCfg(mode=_sinkslot_stop_mode, max_iter=_stop.max_iter,
+                              tol=_stop.tol, potential_tol=_stop.potential_tol,
+                              mass_tol=_stop.mass_tol, check_every=_stop.check_every)
 
     def run():
-        sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
+        sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
 
     phi, psi, iters_run, converged, final_viol = sinkslot_alternating_triton(
-        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
+        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
     cost_gap_pct = None
     bary = None
     if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
