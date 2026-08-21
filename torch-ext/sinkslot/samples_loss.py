@@ -46,9 +46,12 @@ class _SLOTCostFn(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, X, Y, a, b, eps, L, seed, n_iters, backend, variant, alpha, stop):
+    def forward(ctx, X, Y, a, b, eps, L, seed, n_iters, backend, variant, alpha,
+                stop_mode, stop_max_iter, stop_tol, stop_check_every):
         phi, psi, rows, cols, S, it, converged, viol = sinkslot_solve(
-            X, Y, a, b, eps, L, seed, n_iters, stop=stop, backend=backend,
+            X, Y, a, b, eps, L, seed, n_iters, stop_mode=stop_mode,
+            stop_max_iter=stop_max_iter, stop_tol=stop_tol,
+            stop_check_every=stop_check_every, backend=backend,
             variant=variant, alpha=alpha)
         cost = sparse_sqeuclidean_cost(
             X, Y, rows, cols,
@@ -67,7 +70,8 @@ class _SLOTCostFn(torch.autograd.Function):
         Tx, _ = sparse_barycentric_map(T_vals, rows, cols, X, Y)
         grad_x = 2.0 * a[:, None] * (X - Tx)
         return (grad_output * grad_x,
-                None, None, None, None, None, None, None, None, None, None, None)
+                None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None)
 
 
 class SamplesLoss(torch.nn.Module):
@@ -80,15 +84,15 @@ class SamplesLoss(torch.nn.Module):
     `eps`: entropic regularisation (SinkSLOT's own `eps`, not GeomLoss's
     `blur` -- there is no `blur**p = eps` conversion here; pass `eps`
     directly). `L`: number of slicing directions. `seed`: `sot_plan_coo`'s
-    projection RNG seed. `n_iters`: Sinkhorn iteration cap -- the exact count
-    run when `stop` is None or `stop.mode == "fixed"`, the upper bound
-    otherwise. `stop`: forwarded to `sinkslot_solve` unchanged (`None` for
-    the default fixed-iteration behavior; see `sinkslot_solve`'s own
-    docstring for `stop.mode`/`max_iter`/`tol`/`check_every`). Early
-    stopping only changes how many iterations `forward` runs -- `backward`
-    reuses whatever potentials it converged to either way, since the
-    envelope theorem holds at any fixed point regardless of how it was
-    reached. `backend`: "auto" / "triton" / "torch", see `sinkslot_solve`.
+    projection RNG seed. `n_iters`: exact iteration count when
+    `stop_mode == "fixed"` (the default); ignored otherwise, in favor of
+    `stop_max_iter`. `stop_mode`/`stop_max_iter`/`stop_tol`/`stop_check_every`:
+    forwarded to `sinkslot_solve` unchanged, see its own docstring for what
+    each `stop_mode` value checks. Early stopping only changes how many
+    iterations `forward` runs -- `backward` reuses whatever potentials it
+    converged to either way, since the envelope theorem holds at any fixed
+    point regardless of how it was reached. `backend`: "auto" / "triton" /
+    "torch", see `sinkslot_solve`.
 
     `symmetric`: False (default) uses the alternating (Gauss-Seidel)
     solve loop, same as every other SinkSLOT entry point so far. True uses
@@ -114,7 +118,9 @@ class SamplesLoss(torch.nn.Module):
 
     def __init__(self, loss: str = "sinkhorn", *, eps: float = 0.05, L: int = 64,
                  seed: int = 0, n_iters: int = 200, backend: str = "auto",
-                 symmetric: bool = False, alpha: float = 0.5, stop=None):
+                 symmetric: bool = False, alpha: float = 0.5,
+                 stop_mode: str = "fixed", stop_max_iter: int = 20000,
+                 stop_tol: float = 1e-6, stop_check_every: int = 5):
         super().__init__()
         if loss != "sinkhorn":
             raise ValueError(
@@ -128,7 +134,10 @@ class SamplesLoss(torch.nn.Module):
         self.backend = backend
         self.symmetric = symmetric
         self.alpha = alpha
-        self.stop = stop
+        self.stop_mode = stop_mode
+        self.stop_max_iter = stop_max_iter
+        self.stop_tol = stop_tol
+        self.stop_check_every = stop_check_every
 
     def forward(self, x: torch.Tensor, y: torch.Tensor, a: torch.Tensor = None,
                 b: torch.Tensor = None, potentials: bool = False):
@@ -142,10 +151,12 @@ class SamplesLoss(torch.nn.Module):
         if potentials:
             phi, psi, *_ = sinkslot_solve(
                 x, y, a, b, self.eps, self.L, self.seed, self.n_iters,
-                stop=self.stop, backend=self.backend, variant=variant,
-                alpha=self.alpha)
+                stop_mode=self.stop_mode, stop_max_iter=self.stop_max_iter,
+                stop_tol=self.stop_tol, stop_check_every=self.stop_check_every,
+                backend=self.backend, variant=variant, alpha=self.alpha)
             return phi, psi
 
         return _SLOTCostFn.apply(x, y, a, b, self.eps, self.L, self.seed,
                                   self.n_iters, self.backend, variant, self.alpha,
-                                  self.stop)
+                                  self.stop_mode, self.stop_max_iter, self.stop_tol,
+                                  self.stop_check_every)

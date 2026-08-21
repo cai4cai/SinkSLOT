@@ -141,7 +141,7 @@ def test_sinkslot_solve_runs_end_to_end_on_cpu():
 
     phi, psi, rows, cols, S, it, converged, viol = sinkslot_solve(
         x, y, a, b, eps, L, seed=0, n_iters=20000,
-        stop=_Stop(mode="marginal", max_iter=20000))
+        stop_mode="marginal", stop_max_iter=20000)
     assert converged and viol <= 1e-6
 
     P = (phi[rows] + psi[cols] +
@@ -162,10 +162,9 @@ def test_sparse_transport_plan_matches_manual_sinkslot_solve_construction():
 
     n, m, eps, L = 300, 250, 0.05, 40
     x, y, a, b = _problem(n, m)
-    stop = _Stop(mode="marginal", max_iter=20000)
 
     P = sparse_transport_plan(x, y, a, b, eps=eps, L=L, seed=0, n_iters=20000,
-                        stop=stop, backend="torch")
+                        stop_mode="marginal", stop_max_iter=20000, backend="torch")
     assert P.is_sparse and P.shape == (n, m)
 
     row_marg = torch.sparse.sum(P, dim=1).to_dense()
@@ -174,7 +173,8 @@ def test_sparse_transport_plan_matches_manual_sinkslot_solve_construction():
     assert torch.allclose(col_marg, b, atol=1e-5)
 
     phi, psi, rows, cols, S, *_ = sinkslot_solve(
-        x, y, a, b, eps, L, seed=0, n_iters=20000, stop=stop, backend="torch")
+        x, y, a, b, eps, L, seed=0, n_iters=20000,
+        stop_mode="marginal", stop_max_iter=20000, backend="torch")
     cost = sparse_sqeuclidean_cost(x, y, rows, cols)
     log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
     plan_vals = (phi[rows] + psi[cols] + log_S - cost / eps).exp()
@@ -193,10 +193,11 @@ def test_sinkslot_solve_backend_override_on_cpu():
     """
     n, m, eps, L = 300, 250, 0.05, 40
     x, y, a, b = _problem(n, m)
-    stop = _Stop(mode="marginal", max_iter=20000)
 
-    auto = sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=20000, stop=stop, backend="auto")
-    torch_backend = sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=20000, stop=stop, backend="torch")
+    auto = sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=20000,
+                           stop_mode="marginal", stop_max_iter=20000, backend="auto")
+    torch_backend = sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=20000,
+                                    stop_mode="marginal", stop_max_iter=20000, backend="torch")
     assert torch.equal(auto[0], torch_backend[0]) and torch.equal(auto[1], torch_backend[1])
 
     with pytest.raises(ValueError, match="backend='triton'"):
@@ -295,11 +296,11 @@ def test_sinkslot_symmetric_converges_to_the_same_plan_as_alternating():
     """
     n, m, eps, L = 300, 250, 0.05, 40
     x, y, a, b = _problem(n, m)
-    stop = _Stop(mode="marginal", max_iter=20000, tol=1e-8)
+    stop_kwargs = dict(stop_mode="marginal", stop_max_iter=20000, stop_tol=1e-8)
 
-    r_alt = sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=20000, stop=stop,
+    r_alt = sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=20000, **stop_kwargs,
                             backend="torch", variant="alternating")
-    r_sym = sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=20000, stop=stop,
+    r_sym = sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=20000, **stop_kwargs,
                             backend="torch", variant="symmetric")
     phi_a, psi_a, rows_a, cols_a, S_a = r_alt[:5]
     phi_s, psi_s, rows_s, cols_s, S_s = r_sym[:5]
@@ -326,14 +327,14 @@ def test_sinkslot_solve_all_three_settings_agree_on_cuda():
     n, m, eps, L = 300, 250, 0.05, 40
     x, y, a, b = _problem(n, m)
     x, y, a, b = x.cuda(), y.cuda(), a.cuda(), b.cuda()
-    stop = _Stop(mode="marginal", max_iter=20000)
+    stop_kwargs = dict(stop_mode="marginal", stop_max_iter=20000)
 
     phi_triton, psi_triton, *_, conv_t, viol_t = sinkslot_solve(
-        x, y, a, b, eps, L, seed=0, n_iters=20000, stop=stop, backend="triton")
+        x, y, a, b, eps, L, seed=0, n_iters=20000, **stop_kwargs, backend="triton")
     phi_torch, psi_torch, *_, conv_g, viol_g = sinkslot_solve(
-        x, y, a, b, eps, L, seed=0, n_iters=20000, stop=stop, backend="torch")
+        x, y, a, b, eps, L, seed=0, n_iters=20000, **stop_kwargs, backend="torch")
     phi_auto, psi_auto, *_ = sinkslot_solve(
-        x, y, a, b, eps, L, seed=0, n_iters=20000, stop=stop, backend="auto")
+        x, y, a, b, eps, L, seed=0, n_iters=20000, **stop_kwargs, backend="auto")
 
     assert conv_t and viol_t <= 1e-6
     assert conv_g and viol_g <= 1e-6
@@ -403,7 +404,7 @@ def test_samples_loss_symmetric_option_runs_and_agrees_with_alternating():
 
 
 def test_samples_loss_stop_early_stopping_agrees_with_fixed_iters():
-    """SamplesLoss(stop=...) forwards to sinkslot_solve unchanged: forward
+    """SamplesLoss(stop_mode=...) forwards to sinkslot_solve unchanged: forward
     value and backward gradient must both be finite, close to a
     fixed-iteration SamplesLoss run long enough to be near the same fixed
     point, and potentials=True must still work with stop set.
@@ -414,10 +415,11 @@ def test_samples_loss_stop_early_stopping_agrees_with_fixed_iters():
     g = torch.Generator(device="cpu").manual_seed(0)
     x = torch.randn(n, d, generator=g)
     y = torch.randn(n, d, generator=g) + 1.0
-    stop = _Stop(mode="marginal", max_iter=20000, tol=1e-4, check_every=5)
 
     x_stop = x.clone().requires_grad_(True)
-    loss_stop = SamplesLoss(eps=0.05, L=20, n_iters=200, backend="torch", stop=stop)
+    loss_stop = SamplesLoss(eps=0.05, L=20, n_iters=200, backend="torch",
+                             stop_mode="marginal", stop_max_iter=20000,
+                             stop_tol=1e-4, stop_check_every=5)
     L_stop = loss_stop(x_stop, y)
     L_stop.backward()
     assert torch.isfinite(L_stop) and torch.isfinite(x_stop.grad).all()
