@@ -186,8 +186,11 @@ loss(x, y, a=None, b=None, potentials=False)
 `sinkslot_solve` below):
 
 - `"fixed"`: runs exactly `n_iters`, no convergence check.
-- `"marginal"`: stop once $\|P\mathbf{1} - a\|_\infty \le$ `stop_tol` (the
-  achieved row marginal's max deviation from `a`).
+- `"marginal"`: stop once both marginals are within tolerance,
+  $\max(\|P\mathbf{1} - a\|_\infty, \|P^T\mathbf{1} - b\|_\infty) \le$
+  `stop_tol` (`variant="alternating"`'s column marginal is exact by
+  construction, so only the row is actually checked there;
+  `variant="symmetric"` checks both).
 - `"potential"`: stop once $\varepsilon \max(|\Delta\phi|, |\Delta\psi|) <$
   `stop_tol` (change in the dual potentials since the last check).
 
