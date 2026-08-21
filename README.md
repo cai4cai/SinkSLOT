@@ -39,9 +39,9 @@ it, SinkSLOT runs the pure-torch fallback automatically.
 - `a`: `(N,)` nonnegative weights summing to 1.
 - `b`: `(M,)` nonnegative weights summing to 1.
 
-`x`/`y` and `a`/`b` must each share dtype and device. `a`/`b` are used
-exactly as given, not normalized; `sum(a)` must equal `sum(b)` or
-`sinkslot_solve` raises `ValueError`. Zero entries are legal.
+`x`, `y`, `a`, `b` must all share the same dtype and device. `a`/`b` are
+used exactly as given, not normalized; `sum(a)` must equal `sum(b)`, which
+is checked and raises `ValueError` on mismatch. Zero entries are legal.
 
 Ground cost is squared Euclidean, $C_{ij} = \|x_i - y_j\|^2$, which sets
 the scale `eps` is measured against.
@@ -143,6 +143,9 @@ phi, psi = loss(x, y, potentials=True)
 
 ```python
 from sinkslot import sparse_transport_plan, sparse_barycentric_map
+
+x = torch.randn(10000, 2, device="cuda")
+y = torch.randn(10000, 2, device="cuda")
 
 P = sparse_transport_plan(x, y, eps=0.05, L=64, seed=0, n_iters=200)  # torch.sparse_coo_tensor (10000, 10000): P[i, j] = mass moved x[i] -> y[j]
 rows, cols = P.indices()
