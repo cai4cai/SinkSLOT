@@ -84,37 +84,40 @@ way, the loops differ only in how `grad` gets computed.
 <tr>
 <td>
 
-```python
-x = torch.randn(1000, 2, device="cuda")
-y = torch.randn(1000, 2, device="cuda") + 3.0
-a = torch.full((1000,), 1.0 / 1000, device="cuda")
-b = torch.full((1000,), 1.0 / 1000, device="cuda")
-loss = SamplesLoss(eps=0.01, L=100, n_iters=200)
+```diff
+ n = 1000
+ x = torch.randn(n, 2, device="cuda")
+ y = torch.randn(n, 2, device="cuda") + 3.0
+ a = torch.full((n,), 1.0 / n, device="cuda")
+ b = torch.full((n,), 1.0 / n, device="cuda")
+ loss = SamplesLoss(eps=0.01, L=100, n_iters=200)
 
-lr = 0.1
-for step in range(200):
-    x = x.detach().requires_grad_(True)
-    cost = loss(x, y, a=a, b=b)
-    grad, = torch.autograd.grad(cost, [x])  # <-- differs
-    x = x - lr * grad
+ lr = 0.1
+ for step in range(200):
+     x = x.detach().requires_grad_(True)
+     cost = loss(x, y, a=a, b=b)
++    grad, = torch.autograd.grad(cost, [x])
+     x = x - lr * grad
 ```
 
 </td>
 <td>
 
-```python
-from sinkslot import slot_grad
+```diff
+ from sinkslot import slot_grad
 
-x = torch.randn(1000, 2, device="cuda")
-y = torch.randn(1000, 2, device="cuda") + 3.0
-a = torch.full((1000,), 1.0 / 1000, device="cuda")
-b = torch.full((1000,), 1.0 / 1000, device="cuda")
+ n = 1000
+ x = torch.randn(n, 2, device="cuda")
+ y = torch.randn(n, 2, device="cuda") + 3.0
+ a = torch.full((n,), 1.0 / n, device="cuda")
+ b = torch.full((n,), 1.0 / n, device="cuda")
 
-lr = 0.1
-for step in range(200):
-    grad = slot_grad(x, y, a, eps=0.01, L=100,   # <-- differs
-                      seed=0, n_iters=200, b=b)
-    x = x - lr * grad
+ lr = 0.1
+ for step in range(200):
++    grad = slot_grad(
++        x, y, a, eps=0.01, L=100,
++        seed=0, n_iters=200, b=b)
+     x = x - lr * grad
 ```
 
 </td>
@@ -199,8 +202,8 @@ phi, psi, rows, cols, S, iters_run, converged, final_viol = sinkslot_solve(
 - `phi`/`psi`: converged dual potentials, absorbed (`phi = f/eps`).
 - `rows`/`cols`/`S`: the sliced-OT support and reference plan. `S[k]` is
   the reference mass on `(rows[k], cols[k])`; the achieved plan's own
-  value there is `(phi[rows] + psi[cols] + S.log() - cost/eps).exp()`
-  (this is exactly what `sparse_transport_plan` computes for you).
+  value there is `(phi[rows] + psi[cols] + S.log() - cost/eps).exp()`,
+  what `sparse_transport_plan` returns.
 - `iters_run`/`converged`/`final_viol`: `None`/`None`/`None` under
   `stop_mode="fixed"` (ran exactly `n_iters`); otherwise the actual
   iteration count, whether it converged within `stop_max_iter`, and the
