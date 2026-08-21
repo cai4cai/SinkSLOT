@@ -76,14 +76,9 @@ x = torch.randn(10000, 2, requires_grad=True, device="cuda")  # also works on CP
 y = torch.randn(10000, 2, device="cuda")
 
 loss = SamplesLoss(eps=0.05, L=64, n_iters=200)
-cost = loss(x, y)                          # achieved transport cost <T, C>
-grad_x, = torch.autograd.grad(cost, [x])   # analytic gradient of SLOT_eps itself (the KL term's gradient vanishes here), no backprop through Sinkhorn
+cost = loss(x, y)                          # achieved SLOT_eps divergence
+grad_x, = torch.autograd.grad(cost, [x])   # analytic gradient, no backprop through Sinkhorn
 ```
-
-`loss(x, y)` returns `<T, C>` only, not the full SLOT_eps divergence
-(which adds `eps * KL(T, P^SOT)`); `grad_x` above is still the true
-SLOT_eps gradient, since the KL term's gradient vanishes at the
-converged plan.
 
 ### Gradient Flow
 
@@ -163,7 +158,6 @@ Tx, Ty = sparse_barycentric_map(P, x, y)
 
 ```python
 SamplesLoss(
-    loss="sinkhorn",
     eps=0.05,                # entropic regularisation strength
     L=64,                    # number of random slicing directions
     seed=0,                  # RNG seed for the slicing directions
@@ -179,7 +173,7 @@ SamplesLoss(
 
 loss(x, y, a=None, b=None, potentials=False)
 # a/b: source/target marginal weights, independent, uniform if omitted
-# potentials=True returns (phi, psi) instead of the scalar cost
+# potentials=True returns (phi, psi) instead of the SLOT_eps divergence
 ```
 
 `stop_mode` (shared by `SamplesLoss`, `sparse_transport_plan`, and

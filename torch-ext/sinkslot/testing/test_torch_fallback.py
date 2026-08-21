@@ -492,6 +492,38 @@ def test_samples_loss_stop_early_stopping_agrees_with_fixed_iters():
     assert phi.shape == (n,) and psi.shape == (n,)
 
 
+def test_samples_loss_forward_matches_primal_slot_eps_at_convergence():
+    """SamplesLoss returns the dual objective eps*(<phi,a>+<psi,b>), not the
+    transport-only <T,C> term -- at a tightly-converged fixed point this must
+    equal the primal <T,C> + eps*KL(T, P^SOT) (strong duality), same
+    convention flash_sinkhorn/geomloss use for their own Sinkhorn cost.
+    """
+    from sinkslot import SamplesLoss, sinkslot_solve
+    from sinkslot.solver import sparse_sqeuclidean_cost
+
+    n, m, eps, L = 300, 250, 0.03, 40
+    x, y, a, b = _problem(n, m)
+    x, y, a, b = x.double(), y.double(), a.double(), b.double()
+
+    loss = SamplesLoss(eps=eps, L=L, n_iters=20000, backend="torch",
+                        stop_mode="marginal", stop_max_iter=20000,
+                        stop_tol=1e-10, stop_check_every=5)
+    dual = loss(x, y, a=a, b=b)
+
+    result = sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=20000,
+                             backend="torch", stop_mode="marginal",
+                             stop_max_iter=20000, stop_tol=1e-10, stop_check_every=5)
+    assert result.final_viol < 1e-9, f"not tightly converged: {result.final_viol:.3e}"
+    cost = sparse_sqeuclidean_cost(x, y, result.rows, result.cols, use_triton=False)
+    log_S = result.S.clamp_min(torch.finfo(result.S.dtype).tiny).log()
+    T_vals = (result.phi[result.rows] + result.psi[result.cols] + log_S - cost / eps).exp()
+    primal = (T_vals * cost).sum() + eps * (
+        T_vals * (T_vals.clamp_min(1e-300).log() - log_S)).sum()
+
+    relerr = abs(float(dual) - float(primal)) / abs(float(primal))
+    assert relerr < 1e-6, f"dual vs primal SLOT_eps disagree: {relerr:.3e}"
+
+
 def test_samples_loss_and_slot_grad_independent_ab_match_frozen_support_finite_diff():
     """SamplesLoss/slot_grad's envelope-theorem gradient (grad_x = 2*a*(x-Tx))
     is unchanged by using independent a/b (and n != m) instead of a shared

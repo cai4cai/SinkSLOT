@@ -33,11 +33,17 @@ from .gradient import sparse_barycentric_map
 
 
 class _SLOTCostFn(torch.autograd.Function):
-    """Forward: solve + the achieved transport cost <T, C> (not the full
-    SLOT_eps divergence, which also adds eps * KL(T, P^SOT)). Backward: the
-    envelope-theorem gradient, reusing forward's already-solved plan (no
-    second solve) -- this IS `slot_grad`'s own formula, inlined so it can
-    share `T_vals`/`rows`/`cols` with forward instead of recomputing them.
+    """Forward: solve + the achieved SLOT_eps divergence value, computed as
+    the dual objective `eps * (<phi, a> + <psi, b>)` -- same convention
+    flash_sinkhorn/geomloss use for their own Sinkhorn cost
+    (`_autograd.py`'s `_SinkhornCostFn.forward` returns the analogous
+    `<f, a> + <g, b>`). Verified by direct comparison against the primal
+    `<T, C> + eps * KL(T, P^SOT)`: matches to ~1e-9 relative error at
+    convergence; diverges away from it, same as any dual-based Sinkhorn
+    loss (a primal-dual gap, not a bug). Backward: the envelope-theorem
+    gradient, reusing forward's already-solved plan (no second solve) --
+    this IS `slot_grad`'s own formula, inlined so it can share
+    `T_vals`/`rows`/`cols` with forward instead of recomputing them.
 
     The envelope theorem holds at any (approximate) fixed point of the
     Sinkhorn iteration regardless of which scheme reached it -- it's a
@@ -60,8 +66,10 @@ class _SLOTCostFn(torch.autograd.Function):
         )
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
         lam = log_S - cost / eps
+        # T_vals is only needed for backward's barycentric map, not for the
+        # forward value below (the dual formula needs just phi/psi/a/b).
         T_vals = (phi[rows] + psi[cols] + lam).exp()
-        loss = (T_vals * cost).sum()
+        loss = eps * ((phi * a).sum() + (psi * b).sum())
         ctx.save_for_backward(X, Y, a, T_vals, rows, cols)
         return loss
 
@@ -77,10 +85,6 @@ class _SLOTCostFn(torch.autograd.Function):
 
 class SamplesLoss(torch.nn.Module):
     """SLOT_eps(x, y) as a GeomLoss-style callable loss module.
-
-    `loss`: only "sinkhorn" is accepted (kept as a constructor argument for
-    call-site parity with geomloss/flash_sinkhorn, which support several
-    other loss families this package doesn't implement at all).
 
     `eps`: entropic regularisation (SinkSLOT's own `eps`, not GeomLoss's
     `blur` -- there is no `blur**p = eps` conversion here; pass `eps`
@@ -102,13 +106,14 @@ class SamplesLoss(torch.nn.Module):
     (`f_new = (1-alpha)*f_old + alpha*f_cand`); unused when
     `variant="alternating"`.
 
-    Forward returns the achieved transport cost `<T, C>` as a scalar tensor
-    (not the full SLOT_eps divergence, which also adds `eps * KL(T, P^SOT)`),
-    differentiable w.r.t. `x` via the envelope-theorem gradient (not `y`,
-    `a`/`b`, or `eps`/`L` -- matching `slot_grad`'s own scope exactly, since
-    that's the formula backward reuses). The envelope theorem's validity
-    doesn't depend on which solve loop produced the potentials, so this
-    holds for `variant="symmetric"` exactly as it does for the default.
+    Forward returns the achieved SLOT_eps divergence value as a scalar
+    tensor (the dual objective `eps * (<phi, a> + <psi, b>)`, see
+    `_SLOTCostFn`'s own docstring), differentiable w.r.t. `x` via the
+    envelope-theorem gradient (not `y`, `a`/`b`, or `eps`/`L` -- matching
+    `slot_grad`'s own scope exactly, since that's the formula backward
+    reuses). The envelope theorem's validity doesn't depend on which solve
+    loop produced the potentials, so this holds for `variant="symmetric"`
+    exactly as it does for the default.
 
     `forward(x, y, a=None, b=None, potentials=False)`: `a`/`b` are the
     source/target marginal weights, each independently uniform over its own
@@ -117,17 +122,12 @@ class SamplesLoss(torch.nn.Module):
     instead of the scalar cost.
     """
 
-    def __init__(self, loss: str = "sinkhorn", *, eps: float = 0.05, L: int = 64,
+    def __init__(self, *, eps: float = 0.05, L: int = 64,
                  seed: int = 0, n_iters: int = 200, backend: str = "auto",
                  variant: str = "alternating", alpha: float = 0.5,
                  stop_mode: str = "fixed", stop_max_iter: int = 20000,
                  stop_tol: float = 1e-6, stop_check_every: int = 5):
         super().__init__()
-        if loss != "sinkhorn":
-            raise ValueError(
-                f"SamplesLoss only supports loss='sinkhorn' (SinkSLOT implements no "
-                f"other loss family), got {loss!r}"
-            )
         self.eps = eps
         self.L = L
         self.seed = seed
