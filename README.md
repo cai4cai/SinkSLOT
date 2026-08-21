@@ -186,7 +186,7 @@ loss(x, y, a=None, b=None, potentials=False)
 `sinkslot_solve` below):
 
 - `"fixed"`: runs exactly `n_iters`, no convergence check.
-- `"marginal"`: stop once both marginals are within tolerance: $\max(\|P\mathbf{1} - a\|_\infty, \|P^\top \mathbf{1} - b\|_\infty) \le$ `stop_tol`.
+- `"marginal"`: stop once both marginals' max deviation is within tolerance: $\max(\|P\mathbf{1} - a\|, \|P^\top \mathbf{1} - b\|) \le$ `stop_tol`.
 - `"potential"`: stop once $\varepsilon \max(|\Delta\phi|, |\Delta\psi|) <$
   `stop_tol` (change in the dual potentials since the last check).
 
