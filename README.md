@@ -39,11 +39,9 @@ it, SinkSLOT runs the pure-torch fallback automatically.
 - `a`: `(N,)` nonnegative weights summing to 1.
 - `b`: `(M,)` nonnegative weights summing to 1.
 
-`x`/`y` must share dtype and device; same for `a`/`b`. Not normalized
-internally: `a`/`b` are used exactly as given, so they must already be the
-marginals you want. `sum(a)` must equal `sum(b)` for a well-posed problem;
-this is checked, raising `ValueError` on mismatch. Zero entries are legal,
-a zero-weight point just receives/sends zero mass.
+`x`/`y` and `a`/`b` must each share dtype and device. `a`/`b` are used
+exactly as given, not normalized; `sum(a)` must equal `sum(b)` or
+`sinkslot_solve` raises `ValueError`. Zero entries are legal.
 
 Ground cost is squared Euclidean, $C_{ij} = \|x_i - y_j\|^2$, which sets
 the scale `eps` is measured against.
@@ -183,7 +181,7 @@ loss(x, y, a=None, b=None, potentials=False)
 `sinkslot_solve` below):
 
 - `"fixed"`: runs exactly `n_iters`, no convergence check.
-- `"marginal"`: stop once both marginals' $\|\cdot\|_\infty$ deviation is within tolerance: $\max(\|P\mathbf{1} - a\|, \|P^\top \mathbf{1} - b\|) \le$ `stop_tol`.
+- `"marginal"`: stop once $\|(P\mathbf{1} - a,\, P^\top \mathbf{1} - b)\|_\infty \le$ `stop_tol` (both marginals' max deviation).
 - `"potential"`: stop once $\varepsilon \max(|\Delta\phi|, |\Delta\psi|) \lt$
   `stop_tol` (change in the dual potentials since the last check).
 
