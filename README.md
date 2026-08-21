@@ -36,8 +36,8 @@ it, SinkSLOT runs the pure-torch fallback automatically.
 
 - `x`: `(N, d)` floating tensor.
 - `y`: `(M, d)` floating tensor.
-- `a`: `(N,)` nonnegative weights summing to 1.
-- `b`: `(M,)` nonnegative weights summing to 1.
+- `a`: `(N,)` nonnegative weights.
+- `b`: `(M,)` nonnegative weights.
 
 `x`, `y`, `a`, `b` must all share the same dtype and device. `a`/`b` are
 used exactly as given, not normalized; `sum(a)` must equal `sum(b)`, which
