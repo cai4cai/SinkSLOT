@@ -215,23 +215,26 @@ built on. Same arguments, but it returns the raw solve state as a
 ```python
 from sinkslot import sinkslot_solve
 
-phi, psi, rows, cols, S, iters_run, converged, final_viol = sinkslot_solve(
+result = sinkslot_solve(
     x, y, a, b, eps=0.05, L=64, seed=0, n_iters=200,
     stop_mode="marginal", stop_max_iter=20000, stop_tol=1e-6, stop_check_every=5,
 )
+# also unpacks/indexes like a plain tuple:
+# phi, psi, rows, cols, S, iters_run, converged, final_viol = result
 ```
 
-- `phi`/`psi`: final dual potentials, absorbed (`phi = f/eps`) -- not
-  necessarily converged under `stop_mode="fixed"`, which always runs
+- `result.phi`/`result.psi`: final dual potentials, absorbed (`phi = f/eps`)
+  -- not necessarily converged under `stop_mode="fixed"`, which always runs
   exactly `n_iters` with no convergence check.
-- `rows`/`cols`/`S`: the sliced-OT support and reference plan. `S[k]` is
-  the reference mass on `(rows[k], cols[k])`; the achieved plan's own
-  value there is `(phi[rows] + psi[cols] + S.log() - cost/eps).exp()`,
-  what `sparse_transport_plan` returns.
-- `iters_run`/`converged`/`final_viol`: `None`/`None`/`None` under
-  `stop_mode="fixed"` (ran exactly `n_iters`); otherwise the actual
-  iteration count, whether it converged within `stop_max_iter`, and the
-  final convergence-check value.
+- `result.rows`/`result.cols`/`result.S`: the sliced-OT support and
+  reference plan. `S[k]` is the reference mass on `(rows[k], cols[k])`;
+  the achieved plan's own value there is
+  `(phi[rows] + psi[cols] + S.log() - cost/eps).exp()`, what
+  `sparse_transport_plan` returns.
+- `result.iters_run`/`result.converged`/`result.final_viol`:
+  `None`/`None`/`None` under `stop_mode="fixed"` (ran exactly `n_iters`);
+  otherwise the actual iteration count, whether it converged within
+  `stop_max_iter`, and the final convergence-check value.
 
 ## Reproducing the paper
 
