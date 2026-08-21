@@ -10,8 +10,8 @@ product `a ⊗ b`. Restricting each Sinkhorn iteration to that plan's support
 reduces the per-iteration cost from `O(N²)` to `O(LN)`, where `L` is the
 number of random slicing directions.
 
-The resulting objective, SLOT, is a divergence: it needs no debiasing, and
-SLOT(x, x) = 0.
+The resulting objective, SLOT, is a divergence: SLOT(x, x) = 0, so it
+needs no debiasing.
 
 On CUDA, `backend="auto"` (the default) uses the fused Triton kernels when
 Triton is installed; otherwise, and always on CPU, SinkSLOT automatically
