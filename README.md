@@ -79,34 +79,41 @@ An explicit gradient-descent loop works either through `autograd`
 (`SamplesLoss`) or directly via `slot_grad`:
 
 ```python
-x_flow = torch.randn(1000, 2, device="cuda")
-y_flow = torch.randn(1000, 2, device="cuda") + 3.0
-loss_flow = SamplesLoss(eps=0.01, L=100, n_iters=200)
+x = torch.randn(1000, 2, device="cuda")
+y = torch.randn(1000, 2, device="cuda") + 3.0
+a = torch.full((1000,), 1.0 / 1000, device="cuda")
+b = torch.full((1000,), 1.0 / 1000, device="cuda")
+loss = SamplesLoss(eps=0.01, L=100, n_iters=200)
 
 lr = 0.1
 for step in range(200):
-    x_flow = x_flow.detach().requires_grad_(True)
-    cost = loss_flow(x_flow, y_flow)
-    grad, = torch.autograd.grad(cost, [x_flow])
-    x_flow = x_flow - lr * grad
+    x = x.detach().requires_grad_(True)
+    cost = loss(x, y, a=a, b=b)
+    grad, = torch.autograd.grad(cost, [x])
+    x = x - lr * grad
 ```
 
 ```python
 from sinkslot import slot_grad
 
-x_flow = torch.randn(1000, 2, device="cuda")
-y_flow = torch.randn(1000, 2, device="cuda") + 3.0
-a_flow = torch.full((1000,), 1.0 / 1000, device="cuda")
+x = torch.randn(1000, 2, device="cuda")
+y = torch.randn(1000, 2, device="cuda") + 3.0
+a = torch.full((1000,), 1.0 / 1000, device="cuda")
+b = torch.full((1000,), 1.0 / 1000, device="cuda")
 
 lr = 0.1
 for step in range(200):
-    grad = slot_grad(x_flow, y_flow, a_flow, eps=0.01, L=100, seed=0, n_iters=200)
-    x_flow = x_flow - lr * grad
+    grad = slot_grad(x, y, a, eps=0.01, L=100, seed=0, n_iters=200, b=b)
+    x = x - lr * grad
 ```
 
 ### Potentials
 
 ```python
+x = torch.randn(10000, 2, device="cuda")
+y = torch.randn(10000, 2, device="cuda")
+loss = SamplesLoss(eps=0.05, L=64, n_iters=200)
+
 phi, psi = loss(x, y, potentials=True)
 ```
 
