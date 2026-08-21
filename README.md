@@ -75,9 +75,9 @@ x = torch.randn(10000, 2, requires_grad=True, device=device)
 y = torch.randn(10000, 2, device=device)
 
 loss = SamplesLoss(eps=0.05, L=64, n_iters=200)
-cost = loss(x, y)                          # achieved SLOT_eps divergence
+cost = loss(x, y)                          # achieved SLOT_eps divergence (primal value)
 grad_x, = torch.autograd.grad(cost, [x])   # analytic gradient, no backprop through Sinkhorn
-phi, psi = loss(x, y, potentials=True)
+phi, psi = loss(x, y, potentials=True)     # dual potentials
 ```
 
 ### Gradient Flow
