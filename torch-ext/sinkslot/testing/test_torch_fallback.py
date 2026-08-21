@@ -559,9 +559,9 @@ def test_samples_loss_and_slot_grad_independent_ab_match_frozen_support_finite_d
     v = torch.randn(n, 3, generator=g).double(); v = v / v.norm()
     fd = (cost_frozen_plan(x + h * v) - cost_frozen_plan(x - h * v)) / (2 * h)
 
-    g_slot = slot_grad(x, y, a, eps, L, seed=0, n_iters=3000, backend="torch", b=b)
+    g_slot = slot_grad(x, y, a, b, eps, L, seed=0, n_iters=3000, backend="torch")
     relerr_slot_grad = abs(float(fd) - float((g_slot * v).sum())) / abs(float(fd))
-    assert relerr_slot_grad < 1e-6, f"slot_grad(b=...) vs frozen FD: {relerr_slot_grad:.3e}"
+    assert relerr_slot_grad < 1e-6, f"slot_grad(a, b) vs frozen FD: {relerr_slot_grad:.3e}"
 
     x_req = x.clone().requires_grad_(True)
     loss = SamplesLoss(eps=eps, L=L, n_iters=3000, backend="torch")

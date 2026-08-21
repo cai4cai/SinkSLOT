@@ -102,7 +102,7 @@ way, the loops differ only in how `grad` gets computed.
  lr = 0.1
  for step in range(200):
      x = x.detach().requires_grad_(True)
-     cost = loss(x, y, a=a, b=b)
+     cost = loss(x, y, a, b)
 +    grad, = torch.autograd.grad(cost, [x])
      x = x - lr * grad
 ```
@@ -123,8 +123,8 @@ way, the loops differ only in how `grad` gets computed.
  lr = 0.1
  for step in range(200):
 +    grad = slot_grad(
-+        x, y, a, eps=0.01, L=100,
-+        seed=0, n_iters=200, b=b)
++        x, y, a, b, eps=0.01,
++        L=100, seed=0, n_iters=200)
      x = x - lr * grad
 ```
 

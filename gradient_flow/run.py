@@ -111,8 +111,8 @@ def run_flow(method, X0, Y, a_t, eps):
     for step in range(N_STEPS + 1):
         if method == "SinkSLOT":
             x_i_d = x_i.detach()
-            g = slot_grad(x_i_d.float(), Y.float(), a_t.float(), eps, L, seed=0,
-                          n_iters=MAX_ITER).double()
+            g = slot_grad(x_i_d.float(), Y.float(), a_t.float(), a_t.float(), eps, L,
+                          seed=0, n_iters=MAX_ITER).double()
         else:
             x_i.requires_grad_(True)
             if method == "SOT":
