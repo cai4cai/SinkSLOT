@@ -70,8 +70,9 @@ module.
 import torch
 from sinkslot import SamplesLoss
 
-x = torch.randn(10000, 2, requires_grad=True, device="cuda")  # also works on CPU, drop device="cuda"
-y = torch.randn(10000, 2, device="cuda")
+device = "cuda" if torch.cuda.is_available() else "cpu"
+x = torch.randn(10000, 2, requires_grad=True, device=device)
+y = torch.randn(10000, 2, device=device)
 
 loss = SamplesLoss(eps=0.05, L=64, n_iters=200)
 cost = loss(x, y)                          # achieved SLOT_eps divergence
