@@ -186,6 +186,28 @@ def test_sparse_transport_plan_matches_manual_sinkslot_solve_construction():
     assert P_default.shape == (n, m)
 
 
+def test_sparse_barycentric_map_sparse_tensor_form_matches_explicit_coo():
+    """sparse_barycentric_map(P, x, y) (P a sparse_coo_tensor) must agree
+    exactly with the explicit (T_vals, rows, cols, x, y) form it wraps --
+    the two are meant to be interchangeable, not just numerically close.
+    """
+    from sinkslot import sparse_transport_plan, sparse_barycentric_map
+
+    n, m, eps, L = 300, 250, 0.05, 40
+    x, y, a, b = _problem(n, m)
+
+    P = sparse_transport_plan(x, y, a, b, eps=eps, L=L, seed=0, n_iters=2000,
+                               backend="torch")
+    rows, cols = P.indices()
+    Tx_explicit, Ty_explicit = sparse_barycentric_map(P.values(), rows, cols, x, y)
+    Tx_sparse, Ty_sparse = sparse_barycentric_map(P, x, y)
+    assert torch.equal(Tx_explicit, Tx_sparse)
+    assert torch.equal(Ty_explicit, Ty_sparse)
+
+    with pytest.raises(TypeError, match="expects"):
+        sparse_barycentric_map(P, x)
+
+
 def test_sinkslot_solve_backend_override_on_cpu():
     """backend='torch' and backend='auto' must agree on CPU (both pick torch),
     backend='triton' must raise cleanly (no CUDA here), and a bogus backend
@@ -221,6 +243,40 @@ def test_sinkslot_solve_variant_default_matches_explicit_alternating():
 
     with pytest.raises(ValueError, match="variant must be"):
         sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=200, variant="bogus")
+
+
+def test_sinkslot_solve_rejects_unequal_total_mass():
+    """sum(a) != sum(b) is mathematically ill-posed and previously produced a
+    silently wrong plan -- now checked upfront, matching every other
+    argument-validation error sinkslot_solve raises.
+    """
+    n, m, eps, L = 300, 250, 0.05, 40
+    x, y, a, b = _problem(n, m)
+
+    with pytest.raises(ValueError, match="equal total mass"):
+        sinkslot_solve(x, y, a, b * 2.0, eps, L, seed=0, n_iters=10)
+
+    # Equal mass but not each summing to 1 is fine (a well-posed, just
+    # non-normalized problem) -- only the *mismatch* between a and b raises.
+    sinkslot_solve(x, y, a * 3.0, b * 3.0, eps, L, seed=0, n_iters=10)
+
+
+def test_sinkslot_solve_returns_namedtuple_matching_positional_unpack():
+    """SinkslotSolveResult is a NamedTuple: named-field access must agree
+    with plain positional unpacking/indexing, so it's a strict addition,
+    not a behavior change for existing callers.
+    """
+    n, m, eps, L = 300, 250, 0.05, 40
+    x, y, a, b = _problem(n, m)
+
+    result = sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=10)
+    phi, psi, rows, cols, S, it, converged, viol = result
+    assert result.phi is phi and result[0] is phi
+    assert result.psi is psi and result[1] is psi
+    assert result.rows is rows and result.cols is cols and result.S is S
+    assert result.iters_run == it == 10
+    assert result.converged is converged is None
+    assert result.final_viol is viol is None
 
 
 def test_sinkslot_symmetric_torch_fixed_mode_gives_correct_marginals():
@@ -363,7 +419,7 @@ def test_seg_lse_coo_matches_brute_force():
 
 
 def test_samples_loss_symmetric_option_runs_and_agrees_with_alternating():
-    """SamplesLoss(symmetric=True): forward value and backward gradient
+    """SamplesLoss(variant="symmetric"): forward value and backward gradient
     must both be finite, and -- given enough iterations for both schemes to
     be near their (shared, see test_sinkslot_symmetric_converges_to_the_same
     _plan_as_alternating above) fixed point -- close to the default
@@ -378,13 +434,13 @@ def test_samples_loss_symmetric_option_runs_and_agrees_with_alternating():
     y = torch.randn(n, d, generator=g) + 1.0
 
     x_sym = x.clone().requires_grad_(True)
-    loss_sym = SamplesLoss(eps=0.05, L=20, n_iters=3000, backend="torch", symmetric=True)
+    loss_sym = SamplesLoss(eps=0.05, L=20, n_iters=3000, backend="torch", variant="symmetric")
     L_sym = loss_sym(x_sym, y)
     L_sym.backward()
     assert torch.isfinite(L_sym) and torch.isfinite(x_sym.grad).all()
 
     x_alt = x.clone().requires_grad_(True)
-    loss_alt = SamplesLoss(eps=0.05, L=20, n_iters=3000, backend="torch", symmetric=False)
+    loss_alt = SamplesLoss(eps=0.05, L=20, n_iters=3000, backend="torch", variant="alternating")
     L_alt = loss_alt(x_alt, y)
     L_alt.backward()
 
@@ -395,7 +451,7 @@ def test_samples_loss_symmetric_option_runs_and_agrees_with_alternating():
 
     # alpha=1.0: unaveraged simultaneous update: must still run and be finite.
     loss_a1 = SamplesLoss(eps=0.05, L=20, n_iters=500, backend="torch",
-                           symmetric=True, alpha=1.0)
+                           variant="symmetric", alpha=1.0)
     assert torch.isfinite(loss_a1(x, y))
 
     # potentials=True escape hatch under symmetric too.

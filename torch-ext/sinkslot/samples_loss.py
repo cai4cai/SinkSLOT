@@ -95,13 +95,12 @@ class SamplesLoss(torch.nn.Module):
     point regardless of how it was reached. `backend`: "auto" / "triton" /
     "torch", see `sinkslot_solve`.
 
-    `symmetric`: False (default) uses the alternating (Gauss-Seidel)
-    solve loop, same as every other SinkSLOT entry point so far. True uses
-    the symmetric (Jacobi) loop instead (`sinkslot_solve`'s `variant=
-    "symmetric"`) -- see `sinkhorn_solvers.sinkslot_symmetric_triton`'s own
-    docstring for the update rule. `alpha` is that update's blend weight
+    `variant`: "alternating" (default) uses the Gauss-Seidel solve loop,
+    same as every other SinkSLOT entry point so far. "symmetric" uses the
+    Jacobi loop instead -- see `sinkhorn_solvers.sinkslot_symmetric_triton`'s
+    own docstring for the update rule. `alpha` is that update's blend weight
     (`f_new = (1-alpha)*f_old + alpha*f_cand`); unused when
-    `symmetric=False`.
+    `variant="alternating"`.
 
     Forward returns the achieved transport cost `<T, C>` as a scalar tensor
     (not the full SLOT_eps divergence, which also adds `eps * KL(T, P^SOT)`),
@@ -109,7 +108,7 @@ class SamplesLoss(torch.nn.Module):
     `a`/`b`, or `eps`/`L` -- matching `slot_grad`'s own scope exactly, since
     that's the formula backward reuses). The envelope theorem's validity
     doesn't depend on which solve loop produced the potentials, so this
-    holds for `symmetric=True` exactly as it does for the default.
+    holds for `variant="symmetric"` exactly as it does for the default.
 
     `forward(x, y, a=None, b=None, potentials=False)`: `a`/`b` are the
     source/target marginal weights, each independently uniform over its own
@@ -120,7 +119,7 @@ class SamplesLoss(torch.nn.Module):
 
     def __init__(self, loss: str = "sinkhorn", *, eps: float = 0.05, L: int = 64,
                  seed: int = 0, n_iters: int = 200, backend: str = "auto",
-                 symmetric: bool = False, alpha: float = 0.5,
+                 variant: str = "alternating", alpha: float = 0.5,
                  stop_mode: str = "fixed", stop_max_iter: int = 20000,
                  stop_tol: float = 1e-6, stop_check_every: int = 5):
         super().__init__()
@@ -134,7 +133,7 @@ class SamplesLoss(torch.nn.Module):
         self.seed = seed
         self.n_iters = n_iters
         self.backend = backend
-        self.symmetric = symmetric
+        self.variant = variant
         self.alpha = alpha
         self.stop_mode = stop_mode
         self.stop_max_iter = stop_max_iter
@@ -148,17 +147,16 @@ class SamplesLoss(torch.nn.Module):
             a = torch.full((n,), 1.0 / n, device=x.device, dtype=x.dtype)
         if b is None:
             b = torch.full((m,), 1.0 / m, device=y.device, dtype=y.dtype)
-        variant = "symmetric" if self.symmetric else "alternating"
 
         if potentials:
             phi, psi, *_ = sinkslot_solve(
                 x, y, a, b, self.eps, self.L, self.seed, self.n_iters,
                 stop_mode=self.stop_mode, stop_max_iter=self.stop_max_iter,
                 stop_tol=self.stop_tol, stop_check_every=self.stop_check_every,
-                backend=self.backend, variant=variant, alpha=self.alpha)
+                backend=self.backend, variant=self.variant, alpha=self.alpha)
             return phi, psi
 
         return _SLOTCostFn.apply(x, y, a, b, self.eps, self.L, self.seed,
-                                  self.n_iters, self.backend, variant, self.alpha,
+                                  self.n_iters, self.backend, self.variant, self.alpha,
                                   self.stop_mode, self.stop_max_iter, self.stop_tol,
                                   self.stop_check_every)

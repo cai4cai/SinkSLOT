@@ -23,6 +23,7 @@ packages mark "internal, but not hidden behind Python's underscore convention").
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import NamedTuple, Optional
 
 import torch
 
@@ -146,6 +147,22 @@ def seg_lse_online(indptr, colidx, lam, phi, psi, n, block=None, num_warps=None,
 # --------------------------------------------------------------------------
 # Alternating loop and entry point
 # --------------------------------------------------------------------------
+
+
+class SinkslotSolveResult(NamedTuple):
+    """`sinkslot_solve`'s return value. A real tuple subclass, so every
+    existing `phi, psi, rows, cols, S, it, converged, viol = sinkslot_solve(...)`
+    call site keeps working unchanged; named-field access (`result.phi`) is
+    just an added convenience.
+    """
+    phi: torch.Tensor
+    psi: torch.Tensor
+    rows: torch.Tensor
+    cols: torch.Tensor
+    S: torch.Tensor
+    iters_run: Optional[int]
+    converged: Optional[bool]
+    final_viol: Optional[float]
 
 
 _STOP_MODES = ("fixed", "marginal", "potential", "potential_linf")
@@ -568,14 +585,25 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop_mode="fixed",
     `n_iters` and `stop_max_iter` are never both in effect at once: which
     one governs the iteration count depends entirely on `stop_mode`.
 
-    Returns (phi, psi, rows, cols, S, iters_run, converged, final_viol): phi,
-    psi absorbed (phi=f/eps, psi=g/eps); rows/cols/S the sliced support, needed
-    by callers building the transport plan or its gradient.
+    Returns a `SinkslotSolveResult` NamedTuple (phi, psi, rows, cols, S,
+    iters_run, converged, final_viol) -- unpacks and indexes like a plain
+    tuple, plus named-field access. phi, psi absorbed (phi=f/eps, psi=g/eps);
+    rows/cols/S the sliced support, needed by callers building the transport
+    plan or its gradient.
+
+    Raises `ValueError` if `a.sum()` and `b.sum()` disagree: a and b must
+    carry equal total mass for a well-posed transport problem, and the
+    solve loops silently produce a wrong plan otherwise rather than raising.
     """
     if backend not in ("auto", "triton", "torch"):
         raise ValueError(f"backend must be 'auto', 'triton', or 'torch', got {backend!r}")
     if variant not in ("alternating", "symmetric"):
         raise ValueError(f"variant must be 'alternating' or 'symmetric', got {variant!r}")
+    if not torch.allclose(a.sum(), b.sum().to(a.dtype), rtol=1e-4, atol=1e-4):
+        raise ValueError(
+            f"a and b must have equal total mass, got sum(a)={a.sum().item():.6g} "
+            f"!= sum(b)={b.sum().item():.6g}"
+        )
     if backend == "triton":
         if not (_HAS_TRITON and X.is_cuda):
             raise ValueError("backend='triton' requires Triton installed and X on CUDA")
@@ -615,7 +643,7 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop_mode="fixed",
             phi, psi, it, converged, viol = sinkslot_alternating_torch(
                 rows, cols, lam, log_a, log_b, n, m, n_iters, stop, eps)
 
-    return phi, psi, rows, cols, S, it, converged, viol
+    return SinkslotSolveResult(phi, psi, rows, cols, S, it, converged, viol)
 
 
 def sparse_transport_plan(x, y, a=None, b=None, *, eps=0.05, L=64, seed=0,

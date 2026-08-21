@@ -13,9 +13,9 @@ number of random slicing directions.
 The resulting objective, SLOT, is a divergence: it needs no debiasing, and
 SLOT(x, x) = 0.
 
-By default SinkSLOT runs on fused Triton/CUDA kernels. It's also fully
-usable with plain PyTorch, on CPU or on CUDA without Triton installed,
-through an automatic pure-torch fallback: same algorithm, just without the
+On CUDA, `backend="auto"` (the default) uses the fused Triton kernels when
+Triton is installed; otherwise, and always on CPU, SinkSLOT automatically
+falls back to plain PyTorch, running the same algorithm just without the
 fused-kernel throughput.
 
 ## Install
@@ -39,11 +39,18 @@ it, SinkSLOT runs the pure-torch fallback automatically.
 - `a`: `(N,)` nonnegative weights summing to 1.
 - `b`: `(M,)` nonnegative weights summing to 1.
 
-Not normalized internally: used exactly as given, so `sum(a)` must equal
-`sum(b)` for a well-posed problem; if they don't, nothing raises, but the
-result is silently wrong (verified: row marginals disagree with the input,
-no exception). Zero entries are legal, a zero-weight point just
-receives/sends zero mass.
+`x`/`y` must share dtype and device; same for `a`/`b`. Not normalized
+internally: `a`/`b` are used exactly as given, so they must already be the
+marginals you want. `sum(a)` must equal `sum(b)` for a well-posed problem;
+this is checked, raising `ValueError` on mismatch. Zero entries are legal,
+a zero-weight point just receives/sends zero mass.
+
+Ground cost is squared Euclidean: `C_ij = |x_i - y_j|^2`, which sets the
+scale `eps` is measured against.
+
+`seed` controls the random slicing directions: the same `(x.shape[-1], L,
+seed)` always gives the same directions, from a generator local to that
+call, independent of global PyTorch RNG state or any prior call.
 
 | | Supported |
 |---|---|
@@ -72,6 +79,11 @@ loss = SamplesLoss(eps=0.05, L=64, n_iters=200)
 cost = loss(x, y)                          # achieved transport cost <T, C>
 grad_x, = torch.autograd.grad(cost, [x])   # analytic gradient of SLOT_eps itself (the KL term's gradient vanishes here), no backprop through Sinkhorn
 ```
+
+`loss(x, y)` returns `<T, C>` only, not the full SLOT_eps divergence
+(which adds `eps * KL(T, P^SOT)`); `grad_x` above is still the true
+SLOT_eps gradient, since the KL term's gradient vanishes at the
+converged plan.
 
 ### Gradient Flow
 
@@ -140,8 +152,9 @@ phi, psi = loss(x, y, potentials=True)
 from sinkslot import sparse_transport_plan, sparse_barycentric_map
 
 P = sparse_transport_plan(x, y, eps=0.05, L=64, seed=0, n_iters=200)  # torch.sparse_coo_tensor (10000, 10000): P[i, j] = mass moved x[i] -> y[j]
-rows, cols = P.indices()
-Tx, Ty = sparse_barycentric_map(P.values(), rows, cols, x, y)
+Tx, Ty = sparse_barycentric_map(P, x, y)
+# Tx[i]: barycentric image of source point x[i] in the target cloud
+# Ty[j]: barycentric image of target point y[j] in the source cloud
 ```
 
 ## API Reference
@@ -150,14 +163,14 @@ Tx, Ty = sparse_barycentric_map(P.values(), rows, cols, x, y)
 
 ```python
 SamplesLoss(
-    loss="sinkhorn",         # only "sinkhorn" is implemented
+    loss="sinkhorn",
     eps=0.05,                # entropic regularisation strength
     L=64,                    # number of random slicing directions
     seed=0,                  # RNG seed for the slicing directions
     n_iters=200,             # exact iteration count when stop_mode="fixed" (the default)
     backend="auto",          # "auto" | "triton" | "torch"
-    symmetric=False,         # False: alternating (Gauss-Seidel) update; True: symmetric (Jacobi)
-    alpha=0.5,                # Jacobi blend weight, only used when symmetric=True
+    variant="alternating",   # "alternating" (Gauss-Seidel) | "symmetric" (Jacobi)
+    alpha=0.5,                # Jacobi blend weight, only used when variant="symmetric"
     stop_mode="fixed",       # "fixed" | "marginal" | "potential" | "potential_linf"
     stop_max_iter=20000,     # iteration cap when stop_mode != "fixed" (n_iters is then unused)
     stop_tol=1e-6,           # convergence threshold
@@ -187,8 +200,9 @@ Same arguments as the low-level solver below, but returns the plan itself: a
 ## Low-Level Solver API
 
 `sinkslot_solve` is what `SamplesLoss` and `sparse_transport_plan` are both
-built on. Same arguments, but it returns the raw solve state as an
-8-value tuple instead of a scalar cost or a plan tensor.
+built on. Same arguments, but it returns the raw solve state as a
+`SinkslotSolveResult` NamedTuple instead of a scalar cost or a plan tensor
+(unpacks/indexes like a plain tuple, plus named-field access).
 
 ```python
 from sinkslot import sinkslot_solve
@@ -199,7 +213,9 @@ phi, psi, rows, cols, S, iters_run, converged, final_viol = sinkslot_solve(
 )
 ```
 
-- `phi`/`psi`: converged dual potentials, absorbed (`phi = f/eps`).
+- `phi`/`psi`: final dual potentials, absorbed (`phi = f/eps`) -- not
+  necessarily converged under `stop_mode="fixed"`, which always runs
+  exactly `n_iters` with no convergence check.
 - `rows`/`cols`/`S`: the sliced-OT support and reference plan. `S[k]` is
   the reference mass on `(rows[k], cols[k])`; the achieved plan's own
   value there is `(phi[rows] + psi[cols] + S.log() - cost/eps).exp()`,
