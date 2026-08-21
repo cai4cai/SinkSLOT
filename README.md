@@ -34,14 +34,16 @@ it, SinkSLOT runs the pure-torch fallback automatically.
 
 ## Tensor Contract
 
-- `x`: `(N, d)`, `y`: `(M, d)`.
-- `a`: `(N,)`, `b`: `(M,)`, nonnegative weights. **Not normalized
-  internally**: used exactly as given, so `a`/`b` must already be the
-  marginals you want (typically each summing to 1). `sum(a)` must equal
-  `sum(b)` for a well-posed problem; if they don't, nothing raises, but the
-  result is silently wrong (verified: row marginals disagree with the
-  input, no exception). Zero entries are legal, a zero-weight point just
-  receives/sends zero mass.
+- `x`: `(N, d)` floating tensor.
+- `y`: `(M, d)` floating tensor.
+- `a`: `(N,)` nonnegative weights summing to 1.
+- `b`: `(M,)` nonnegative weights summing to 1.
+
+Not normalized internally: used exactly as given, so `sum(a)` must equal
+`sum(b)` for a well-posed problem; if they don't, nothing raises, but the
+result is silently wrong (verified: row marginals disagree with the input,
+no exception). Zero entries are legal, a zero-weight point just
+receives/sends zero mass.
 - `float64`:
   - Yes on `backend="torch"`.
   - No on `backend="triton"`. Raises `ValueError`: the Triton kernels are float32-only.
@@ -69,14 +71,20 @@ x = torch.randn(10000, 2, requires_grad=True, device="cuda")  # also works on CP
 y = torch.randn(10000, 2, device="cuda")
 
 loss = SamplesLoss(eps=0.05, L=64, n_iters=200)  # backend="auto": automatically detects whether Triton is installed
-cost = loss(x, y)                          # achieved SLOT_eps cost, <T, C>
-grad_x, = torch.autograd.grad(cost, [x])   # analytic gradient, no backprop through Sinkhorn
+cost = loss(x, y)                          # achieved transport cost <T, C> (not the full SLOT_eps divergence, which also adds eps * KL(T, P^SOT))
+grad_x, = torch.autograd.grad(cost, [x])   # analytic gradient of SLOT_eps itself (the KL term's gradient vanishes here), no backprop through Sinkhorn
 ```
 
 ### Gradient Flow
 
 An explicit gradient-descent loop works either through `autograd`
-(`SamplesLoss`) or directly via `slot_grad`:
+(`SamplesLoss`) or directly via `slot_grad`: same analytic gradient either
+way, the loops differ only in how `grad` gets computed.
+
+<table>
+<tr><th>autograd</th><th>slot_grad</th></tr>
+<tr>
+<td>
 
 ```python
 x = torch.randn(1000, 2, device="cuda")
@@ -89,9 +97,12 @@ lr = 0.1
 for step in range(200):
     x = x.detach().requires_grad_(True)
     cost = loss(x, y, a=a, b=b)
-    grad, = torch.autograd.grad(cost, [x])
+    grad, = torch.autograd.grad(cost, [x])  # <-- differs
     x = x - lr * grad
 ```
+
+</td>
+<td>
 
 ```python
 from sinkslot import slot_grad
@@ -103,9 +114,14 @@ b = torch.full((1000,), 1.0 / 1000, device="cuda")
 
 lr = 0.1
 for step in range(200):
-    grad = slot_grad(x, y, a, eps=0.01, L=100, seed=0, n_iters=200, b=b)
+    grad = slot_grad(x, y, a, eps=0.01, L=100,   # <-- differs
+                      seed=0, n_iters=200, b=b)
     x = x - lr * grad
 ```
+
+</td>
+</tr>
+</table>
 
 ### Potentials
 
@@ -171,9 +187,7 @@ Same arguments as the low-level solver below, but returns the plan itself: a
 
 `sinkslot_solve` is what `SamplesLoss` and `sparse_transport_plan` are both
 built on. Same arguments, but it returns the raw solve state as an
-8-value tuple instead of a scalar cost or a plan tensor. Reach for it only
-if you need the dual potentials and sliced support directly; most callers
-want one of the two functions above instead.
+8-value tuple instead of a scalar cost or a plan tensor.
 
 ```python
 from sinkslot import sinkslot_solve
@@ -184,14 +198,15 @@ phi, psi, rows, cols, S, iters_run, converged, final_viol = sinkslot_solve(
 )
 ```
 
-`phi`/`psi`: converged dual potentials, absorbed (`phi = f/eps`). `rows`/
-`cols`/`S`: the sliced-OT support and reference plan. `S[k]` is the
-reference mass on `(rows[k], cols[k])`; the achieved plan's own value there
-is `(phi[rows] + psi[cols] + S.log() - cost/eps).exp()` (this is exactly
-what `sparse_transport_plan` computes for you). `iters_run`/`converged`/
-`final_viol`: `None`/`None`/`None` under `stop_mode="fixed"` (ran exactly
-`n_iters`); otherwise the actual iteration count, whether it converged
-within `stop_max_iter`, and the final convergence-check value.
+- `phi`/`psi`: converged dual potentials, absorbed (`phi = f/eps`).
+- `rows`/`cols`/`S`: the sliced-OT support and reference plan. `S[k]` is
+  the reference mass on `(rows[k], cols[k])`; the achieved plan's own
+  value there is `(phi[rows] + psi[cols] + S.log() - cost/eps).exp()`
+  (this is exactly what `sparse_transport_plan` computes for you).
+- `iters_run`/`converged`/`final_viol`: `None`/`None`/`None` under
+  `stop_mode="fixed"` (ran exactly `n_iters`); otherwise the actual
+  iteration count, whether it converged within `stop_max_iter`, and the
+  final convergence-check value.
 
 ## Reproducing the paper
 
@@ -220,3 +235,9 @@ Benchmarked against [FlashSinkhorn](https://github.com/ot-triton-lab/flash-sinkh
 ## Citation
 
 The arXiv paper isn't public yet. A citation will be added here once it is.
+
+## License
+
+Apache-2.0, covering this repository except `torch-ext/flash_sinkhorn/`,
+which is vendored from [FlashSinkhorn](https://github.com/ot-triton-lab/flash-sinkhorn)
+and stays under its own MIT license (see `torch-ext/flash_sinkhorn/LICENSE`).

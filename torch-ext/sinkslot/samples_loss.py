@@ -33,7 +33,8 @@ from .gradient import sparse_barycentric_map
 
 
 class _SLOTCostFn(torch.autograd.Function):
-    """Forward: solve + the achieved entropic cost <T, C>. Backward: the
+    """Forward: solve + the achieved transport cost <T, C> (not the full
+    SLOT_eps divergence, which also adds eps * KL(T, P^SOT)). Backward: the
     envelope-theorem gradient, reusing forward's already-solved plan (no
     second solve) -- this IS `slot_grad`'s own formula, inlined so it can
     share `T_vals`/`rows`/`cols` with forward instead of recomputing them.
@@ -102,7 +103,8 @@ class SamplesLoss(torch.nn.Module):
     (`f_new = (1-alpha)*f_old + alpha*f_cand`); unused when
     `symmetric=False`.
 
-    Forward returns the achieved SLOT_eps cost `<T, C>` as a scalar tensor,
+    Forward returns the achieved transport cost `<T, C>` as a scalar tensor
+    (not the full SLOT_eps divergence, which also adds `eps * KL(T, P^SOT)`),
     differentiable w.r.t. `x` via the envelope-theorem gradient (not `y`,
     `a`/`b`, or `eps`/`L` -- matching `slot_grad`'s own scope exactly, since
     that's the formula backward reuses). The envelope theorem's validity
