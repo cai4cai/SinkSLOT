@@ -549,9 +549,10 @@ def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=
     return phi, psi, it, converged, viol
 
 
-def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop_mode="fixed",
-                    stop_max_iter=20000, stop_tol=1e-6, stop_check_every=5,
-                    chunk=None, backend="auto", variant="alternating", alpha=0.5):
+def sinkslot_solve(X, Y, a=None, b=None, eps=0.05, L=64, seed=0, n_iters=200,
+                    stop_mode="fixed", stop_max_iter=20000, stop_tol=1e-6,
+                    stop_check_every=5, chunk=None, backend="auto",
+                    variant="alternating", alpha=0.5):
     """SinkSLOT end to end: build the sliced plan, then solve -- on any device.
 
     Dispatches on X's device and whether Triton is importable: the fused Triton
@@ -602,7 +603,15 @@ def sinkslot_solve(X, Y, a, b, eps, L, seed, n_iters, stop_mode="fixed",
     Raises `ValueError` if `a.sum()` and `b.sum()` disagree: a and b must
     carry equal total mass for a well-posed transport problem, and the
     solve loops silently produce a wrong plan otherwise rather than raising.
+
+    `a`, `b`: source/target weights, each independently uniform over
+    `X.shape[0]`/`Y.shape[0]` when omitted, matching `SamplesLoss`'s and
+    `sparse_transport_plan`'s own convention.
     """
+    if a is None:
+        a = torch.full((X.shape[0],), 1.0 / X.shape[0], device=X.device, dtype=X.dtype)
+    if b is None:
+        b = torch.full((Y.shape[0],), 1.0 / Y.shape[0], device=Y.device, dtype=Y.dtype)
     if backend not in ("auto", "triton", "torch"):
         raise ValueError(f"backend must be 'auto', 'triton', or 'torch', got {backend!r}")
     if variant not in ("alternating", "symmetric"):
@@ -669,16 +678,12 @@ def sparse_transport_plan(x, y, a=None, b=None, *, eps=0.05, L=64, seed=0,
     `sinkslot_solve` directly, not through `SamplesLoss`'s autograd
     Function.
 
-    `a`, `b`: marginal weights, uniform if omitted. `stop_mode`/`stop_max_iter`/
-    `stop_tol`/`stop_check_every`: forwarded to `sinkslot_solve` unchanged,
-    see its own docstring.
+    `a`, `b`: marginal weights, uniform if omitted (forwarded to
+    `sinkslot_solve`, which resolves the default itself). `stop_mode`/
+    `stop_max_iter`/`stop_tol`/`stop_check_every`: forwarded to
+    `sinkslot_solve` unchanged, see its own docstring.
     """
     n, m = x.shape[0], y.shape[0]
-    if a is None:
-        a = torch.full((n,), 1.0 / n, device=x.device, dtype=x.dtype)
-    if b is None:
-        b = torch.full((m,), 1.0 / m, device=y.device, dtype=y.dtype)
-
     phi, psi, rows, cols, S, it, converged, viol = sinkslot_solve(
         x, y, a, b, eps, L, seed, n_iters, stop_mode=stop_mode,
         stop_max_iter=stop_max_iter, stop_tol=stop_tol,

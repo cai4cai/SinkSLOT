@@ -259,6 +259,29 @@ def test_sinkslot_solve_rejects_unequal_total_mass():
     sinkslot_solve(x, y, a * 3.0, b * 3.0, eps, L, seed=0, n_iters=10)
 
 
+def test_sinkslot_solve_defaults_a_b_to_uniform():
+    """a/b default to uniform over x.shape[0]/y.shape[0] when omitted,
+    matching SamplesLoss/sparse_transport_plan's own convention -- and
+    eps/L/seed/n_iters get the same defaults those two use, so
+    sinkslot_solve(x, y) alone is a valid call.
+    """
+    n, m = 300, 250
+    x, y, a, b = _problem(n, m)
+    uniform_a = torch.full((n,), 1.0 / n, dtype=x.dtype)
+    uniform_b = torch.full((m,), 1.0 / m, dtype=y.dtype)
+
+    defaulted = sinkslot_solve(x, y, backend="torch")
+    explicit = sinkslot_solve(x, y, uniform_a, uniform_b, eps=0.05, L=64,
+                               seed=0, n_iters=200, backend="torch")
+    assert torch.equal(defaulted.phi, explicit.phi)
+    assert torch.equal(defaulted.psi, explicit.psi)
+
+    # explicit a/b still override the default, same as before.
+    with_ab = sinkslot_solve(x, y, a, b, eps=0.05, L=64, seed=0, n_iters=200,
+                              backend="torch")
+    assert not torch.equal(with_ab.phi, defaulted.phi)
+
+
 def test_sinkslot_solve_returns_namedtuple_matching_positional_unpack():
     """SinkslotSolveResult is a NamedTuple: named-field access must agree
     with plain positional unpacking/indexing, so it's a strict addition,

@@ -34,11 +34,10 @@ it, SinkSLOT runs the pure-torch fallback automatically.
 
 ## Tensor Contract
 
-- `x`: `(N, d)` floating tensor, the source point cloud.
-- `y`: `(M, d)` floating tensor, the target point cloud.
-- `a`: `(N,)` nonnegative source weights. Uniform if omitted (`SamplesLoss`,
-  `sparse_transport_plan`); `sinkslot_solve` requires it.
-- `b`: `(M,)` nonnegative target weights. Same as `a`.
+- `x`: `(N, d)` floating source point cloud.
+- `y`: `(M, d)` floating target point cloud.
+- `a`: `(N,)` optional nonnegative source weights, uniform if omitted.
+- `b`: `(M,)` optional nonnegative target weights, uniform if omitted.
 
 `x`, `y`, `a`, `b` must all share the same dtype and device. `a`/`b` are
 used exactly as given, not normalized; `sum(a)` must equal `sum(b)`, which
