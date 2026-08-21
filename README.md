@@ -147,6 +147,9 @@ phi, psi = loss(x, y, potentials=True)
 from sinkslot import sparse_transport_plan, sparse_barycentric_map
 
 P = sparse_transport_plan(x, y, eps=0.05, L=64, seed=0, n_iters=200)  # torch.sparse_coo_tensor (10000, 10000): P[i, j] = mass moved x[i] -> y[j]
+rows, cols = P.indices()
+mass = P.values()          # mass[k]: transported from x[rows[k]] to y[cols[k]]
+
 Tx, Ty = sparse_barycentric_map(P, x, y)
 # Tx[i]: barycentric image of source point x[i] in the target cloud
 # Ty[j]: barycentric image of target point y[j] in the source cloud
