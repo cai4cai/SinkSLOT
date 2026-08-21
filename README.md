@@ -44,14 +44,12 @@ Not normalized internally: used exactly as given, so `sum(a)` must equal
 result is silently wrong (verified: row marginals disagree with the input,
 no exception). Zero entries are legal, a zero-weight point just
 receives/sends zero mass.
-- `float64`:
-  - Yes on `backend="torch"`.
-  - No on `backend="triton"`. Raises `ValueError`: the Triton kernels are float32-only.
 
 | | Supported |
 |---|---|
 | `N != M` | Yes |
 | `float32` | Yes, on every backend |
+| `float64` | Yes on `backend="torch"`. No on `backend="triton"`, raises `ValueError`: the Triton kernels are float32-only |
 | CPU | Yes. `backend="auto"` (the default) resolves to `torch`; Triton requires CUDA |
 | CUDA | Yes. `backend="auto"` (the default) picks `triton` when installed, `torch` otherwise |
 
