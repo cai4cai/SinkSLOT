@@ -77,6 +77,7 @@ y = torch.randn(10000, 2, device=device)
 loss = SamplesLoss(eps=0.05, L=64, n_iters=200)
 cost = loss(x, y)                          # achieved SLOT_eps divergence
 grad_x, = torch.autograd.grad(cost, [x])   # analytic gradient, no backprop through Sinkhorn
+phi, psi = loss(x, y, potentials=True)
 ```
 
 ### Gradient Flow
@@ -131,17 +132,6 @@ way, the loops differ only in how `grad` gets computed.
 </td>
 </tr>
 </table>
-
-### Potentials
-
-```python
-device = "cuda" if torch.cuda.is_available() else "cpu"
-x = torch.randn(10000, 2, device=device)
-y = torch.randn(10000, 2, device=device)
-loss = SamplesLoss(eps=0.05, L=64, n_iters=200)
-
-phi, psi = loss(x, y, potentials=True)
-```
 
 ### Sparse Transport Plan and Barycentric Map
 
