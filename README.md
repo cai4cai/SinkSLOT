@@ -2,7 +2,7 @@
   <img src="assets/overview.png" alt="Overview of the SinkSLOT pipeline" width="100%">
 </p>
 
-# SinkSLOT
+# SinkSLOT: Sinkhorn via Sparse Lifted Optimal Transport
 
 SinkSLOT computes entropic optimal transport (EOT) using a sparse sliced
 lifted plan as the reference measure, instead of the usual independent
