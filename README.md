@@ -50,8 +50,8 @@ it, SinkSLOT runs the pure-torch fallback automatically.
 |---|---|
 | `N != M` | Yes |
 | `float32` | Yes, on every backend |
-| CPU | Yes (`backend="torch"`; Triton requires CUDA) |
-| CUDA | Yes (`backend="torch"` or `"triton"`) |
+| CPU | Yes. `backend="auto"` (the default) resolves to `torch`; Triton requires CUDA |
+| CUDA | Yes. `backend="auto"` (the default) picks `triton` when installed, `torch` otherwise |
 
 ## Basic Usage
 
