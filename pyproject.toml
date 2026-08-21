@@ -71,6 +71,13 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["torch-ext"]
 
+[tool.setuptools.package-data]
+# flash_sinkhorn's own LICENSE (MIT, distinct copyright -- see the file
+# itself) doesn't travel into the sdist/wheel by default, since it isn't a
+# .py file and there's no MANIFEST.in; without this, `pip install sinkslot`
+# ships the vendored code without the license MIT requires alongside it.
+flash_sinkhorn = ["LICENSE"]
+
 [tool.setuptools.dynamic]
 version = {attr = "flash_sinkhorn.__version__"}
 
