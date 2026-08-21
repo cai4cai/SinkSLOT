@@ -183,8 +183,8 @@ loss(x, y, a=None, b=None, potentials=False)
 `sinkslot_solve` below):
 
 - `"fixed"`: runs exactly `n_iters`, no convergence check.
-- `"marginal"`: stop once both marginals' max deviation is within tolerance: $\max(\|P\mathbf{1} - a\|, \|P^\top \mathbf{1} - b\|) \le$ `stop_tol`.
-- `"potential"`: stop once $\varepsilon \max(|\Delta\phi|, |\Delta\psi|) <$
+- `"marginal"`: stop once both marginals' $\|\cdot\|_\infty$ deviation is within tolerance: $\max(\|P\mathbf{1} - a\|, \|P^\top \mathbf{1} - b\|) \le$ `stop_tol`.
+- `"potential"`: stop once $\varepsilon \max(|\Delta\phi|, |\Delta\psi|) \lt$
   `stop_tol` (change in the dual potentials since the last check).
 
 ### sparse_transport_plan
