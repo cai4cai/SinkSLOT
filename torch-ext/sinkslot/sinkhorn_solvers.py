@@ -242,9 +242,11 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
     #
     # Check both row and column marginal violation, without an extra
     # seg_lse_online call.
-    # swap_tensors below moves phi's data into phi_old in place (no memcpy);
-    # phi's old buffer becomes garbage, which is fine since seg_lse_online
-    # immediately overwrites it via out=phi.
+    # Both swaps happen up front: phi_old/psi_old end up holding this
+    # iteration's CURRENT phi/psi (no memcpy), while phi/psi become stale
+    # garbage -- fine, since both are immediately overwritten via
+    # out=phi/out=psi. The row update reads psi_old, not psi, since that's
+    # where the current psi now lives after the swap.
     a, b = log_a.exp(), log_b.exp()
     phi_old, psi_old = phi.clone(), psi.clone()
     it = 0
@@ -252,8 +254,8 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
     viol = float("inf")
     while it < stop.max_iter:
         torch.utils.swap_tensors(phi_old, phi)
-        seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi)
         torch.utils.swap_tensors(psi_old, psi)
+        seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi_old, n, r_blk, r_w, base=log_a, out=phi)
         seg_lse_online(c_ptr, c_idx, c_lam, z_m, phi, m, c_blk, c_w, base=log_b, out=psi)
         it += 1
         if it % stop.check_every == 0 or it == stop.max_iter:
