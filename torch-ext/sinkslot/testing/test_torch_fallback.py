@@ -87,7 +87,7 @@ def test_sinkslot_alternating_torch_fixed_mode_gives_correct_marginals():
     assert torch.allclose(row_marg, a, atol=1e-4)
 
 
-def test_sinkslot_alternating_torch_marginal_and_potential_modes_converge_and_agree():
+def test_sinkslot_alternating_torch_marginal_mode_converges():
     n, m, eps, L = 300, 250, 0.05, 40
     x, y, a, b = _problem(n, m)
     rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
@@ -99,14 +99,12 @@ def test_sinkslot_alternating_torch_marginal_and_potential_modes_converge_and_ag
         rows, cols, lam, log_a, log_b, n, m, 20000, _Stop(mode="marginal"))
     assert conv_m and viol_m <= 1e-6
 
-    phi_p, psi_p, it_p, conv_p, viol_p = sinkslot_alternating_torch(
-        rows, cols, lam, log_a, log_b, n, m, 20000, _Stop(mode="potential"))
-    assert conv_p
-    # Documented to fall back to the same check as marginal mode.
-    assert torch.equal(phi_m, phi_p) and torch.equal(psi_m, psi_p)
 
-
-def test_sinkslot_alternating_torch_potential_linf_mode_converges():
+def test_sinkslot_alternating_torch_potential_mode_converges():
+    """stop.mode == "potential" (renamed from "potential_linf", the only
+    genuinely distinct third mode -- the old "potential" was byte-for-byte
+    identical to "marginal" and was dropped, see issue #47).
+    """
     n, m, eps, L = 300, 250, 0.05, 40
     x, y, a, b = _problem(n, m)
     rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
@@ -116,7 +114,7 @@ def test_sinkslot_alternating_torch_potential_linf_mode_converges():
 
     phi, psi, it, converged, change = sinkslot_alternating_torch(
         rows, cols, lam, log_a, log_b, n, m, 20000,
-        _Stop(mode="potential_linf", tol=1e-4), eps=eps)
+        _Stop(mode="potential", tol=1e-4), eps=eps)
     assert converged and change < 1e-4
 
 
@@ -302,7 +300,7 @@ def test_sinkslot_symmetric_torch_fixed_mode_gives_correct_marginals():
     assert torch.allclose(col_marg, b, atol=1e-3)
 
 
-def test_sinkslot_symmetric_torch_marginal_and_potential_modes_converge_and_agree():
+def test_sinkslot_symmetric_torch_marginal_mode_converges():
     """Unlike alternating, neither marginal is exact after a symmetric update
     (see sinkslot_symmetric_triton's own docstring), so this checks BOTH row
     and col marginals directly against the achieved plan, not just the
@@ -315,21 +313,20 @@ def test_sinkslot_symmetric_torch_marginal_and_potential_modes_converge_and_agre
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()
 
-    for mode in ("marginal", "potential"):
-        stop = _Stop(mode=mode, max_iter=20000)
-        phi, psi, it, converged, viol = sinkslot_symmetric_torch(
-            rows, cols, lam, log_a, log_b, n, m, 20000, stop=stop)
-        assert converged, f"{mode}: did not converge within max_iter"
-        assert viol <= stop.tol
+    stop = _Stop(mode="marginal", max_iter=20000)
+    phi, psi, it, converged, viol = sinkslot_symmetric_torch(
+        rows, cols, lam, log_a, log_b, n, m, 20000, stop=stop)
+    assert converged and viol <= stop.tol
 
-        T_vals = (phi[rows] + psi[cols] + lam).exp()
-        row_marg = torch.zeros(n).index_add_(0, rows, T_vals)
-        col_marg = torch.zeros(m).index_add_(0, cols, T_vals)
-        assert float((row_marg - a).abs().max()) <= stop.tol * 10
-        assert float((col_marg - b).abs().max()) <= stop.tol * 10
+    T_vals = (phi[rows] + psi[cols] + lam).exp()
+    row_marg = torch.zeros(n).index_add_(0, rows, T_vals)
+    col_marg = torch.zeros(m).index_add_(0, cols, T_vals)
+    assert float((row_marg - a).abs().max()) <= stop.tol * 10
+    assert float((col_marg - b).abs().max()) <= stop.tol * 10
 
 
-def test_sinkslot_symmetric_torch_potential_linf_mode_converges():
+def test_sinkslot_symmetric_torch_potential_mode_converges():
+    """stop.mode == "potential" (renamed from "potential_linf", see issue #47)."""
     n, m, eps, L = 300, 250, 0.05, 40
     x, y, a, b = _problem(n, m)
     rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
@@ -337,7 +334,7 @@ def test_sinkslot_symmetric_torch_potential_linf_mode_converges():
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()
 
-    stop = _Stop(mode="potential_linf", max_iter=20000, tol=1e-6)
+    stop = _Stop(mode="potential", max_iter=20000, tol=1e-6)
     phi, psi, it, converged, change = sinkslot_symmetric_torch(
         rows, cols, lam, log_a, log_b, n, m, 20000, stop=stop, eps=eps)
     assert converged

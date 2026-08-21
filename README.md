@@ -171,7 +171,7 @@ SamplesLoss(
     backend="auto",          # "auto" | "triton" | "torch"
     variant="alternating",   # "alternating" (Gauss-Seidel) | "symmetric" (Jacobi)
     alpha=0.5,                # Jacobi blend weight, only used when variant="symmetric"
-    stop_mode="fixed",       # "fixed" | "marginal" | "potential" | "potential_linf"
+    stop_mode="fixed",       # "fixed" | "marginal" | "potential"
     stop_max_iter=20000,     # iteration cap when stop_mode != "fixed" (n_iters is then unused)
     stop_tol=1e-6,           # convergence threshold
     stop_check_every=5,      # check convergence every N iterations
