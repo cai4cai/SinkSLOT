@@ -91,11 +91,12 @@ way, the loops differ only in how `grad` gets computed.
 <td>
 
 ```diff
+ device = "cuda" if torch.cuda.is_available() else "cpu"
  n = 1000
- x = torch.randn(n, 2, device="cuda")
- y = torch.randn(n, 2, device="cuda") + 3.0
- a = torch.full((n,), 1.0 / n, device="cuda")
- b = torch.full((n,), 1.0 / n, device="cuda")
+ x = torch.randn(n, 2, device=device)
+ y = torch.randn(n, 2, device=device) + 3.0
+ a = torch.full((n,), 1.0 / n, device=device)
+ b = torch.full((n,), 1.0 / n, device=device)
  loss = SamplesLoss(eps=0.01, L=100, n_iters=200)
 
  lr = 0.1
@@ -112,11 +113,12 @@ way, the loops differ only in how `grad` gets computed.
 ```diff
  from sinkslot import slot_grad
 
+ device = "cuda" if torch.cuda.is_available() else "cpu"
  n = 1000
- x = torch.randn(n, 2, device="cuda")
- y = torch.randn(n, 2, device="cuda") + 3.0
- a = torch.full((n,), 1.0 / n, device="cuda")
- b = torch.full((n,), 1.0 / n, device="cuda")
+ x = torch.randn(n, 2, device=device)
+ y = torch.randn(n, 2, device=device) + 3.0
+ a = torch.full((n,), 1.0 / n, device=device)
+ b = torch.full((n,), 1.0 / n, device=device)
 
  lr = 0.1
  for step in range(200):
@@ -133,8 +135,9 @@ way, the loops differ only in how `grad` gets computed.
 ### Potentials
 
 ```python
-x = torch.randn(10000, 2, device="cuda")
-y = torch.randn(10000, 2, device="cuda")
+device = "cuda" if torch.cuda.is_available() else "cpu"
+x = torch.randn(10000, 2, device=device)
+y = torch.randn(10000, 2, device=device)
 loss = SamplesLoss(eps=0.05, L=64, n_iters=200)
 
 phi, psi = loss(x, y, potentials=True)
@@ -145,8 +148,9 @@ phi, psi = loss(x, y, potentials=True)
 ```python
 from sinkslot import sparse_transport_plan, sparse_barycentric_map
 
-x = torch.randn(10000, 2, device="cuda")
-y = torch.randn(10000, 2, device="cuda")
+device = "cuda" if torch.cuda.is_available() else "cpu"
+x = torch.randn(10000, 2, device=device)
+y = torch.randn(10000, 2, device=device)
 
 P = sparse_transport_plan(x, y, eps=0.05, L=64, seed=0, n_iters=200)  # torch.sparse_coo_tensor (10000, 10000): P[i, j] = mass moved x[i] -> y[j]
 rows, cols = P.indices()
