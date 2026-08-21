@@ -97,7 +97,7 @@ SamplesLoss(
     backend="auto",     # "auto" | "triton" | "torch"
     symmetric=False,    # False: alternating (Gauss-Seidel) update; True: symmetric (Jacobi)
     alpha=0.5,          # Jacobi blend weight, only used when symmetric=True
-    stop=None,          # early stopping config, see sinkslot_solve below
+    stop=None,          # "fixed" | "marginal" | "potential" | "potential_linf"
 )
 
 loss(x, y, a=None, b=None, potentials=False)
@@ -120,10 +120,6 @@ Same arguments as `sinkslot_solve`, but returns the plan itself: a
 `potentials=True`.
 
 ### sinkslot_solve
-
-`stop` (on `SamplesLoss` and `sparse_transport_plan` above, or passed
-directly here) is any object with these four attributes -- a small
-`dataclass` is the easiest way:
 
 ```python
 from dataclasses import dataclass
