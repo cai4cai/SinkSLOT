@@ -85,15 +85,6 @@ grad_x, = torch.autograd.grad(cost, [x])   # analytic gradient of SLOT_eps itsel
 SLOT_eps gradient, since the KL term's gradient vanishes at the
 converged plan.
 
-`stop_mode` (on `SamplesLoss`, `sparse_transport_plan`, and `sinkslot_solve`
-below):
-
-- `"fixed"`: runs exactly `n_iters`, no convergence check.
-- `"marginal"`: stop once $\max_i |P\mathbf{1} - a|_i \le$ `stop_tol` (the
-  achieved row marginal's $L_\infty$ deviation from `a`).
-- `"potential"`: stop once $\varepsilon \max(|\Delta\phi|, |\Delta\psi|) <$
-  `stop_tol` (change in the dual potentials since the last check).
-
 ### Gradient Flow
 
 An explicit gradient-descent loop works either through `autograd`
@@ -190,6 +181,15 @@ loss(x, y, a=None, b=None, potentials=False)
 # a/b: source/target marginal weights, independent, uniform if omitted
 # potentials=True returns (phi, psi) instead of the scalar cost
 ```
+
+`stop_mode` (shared by `SamplesLoss`, `sparse_transport_plan`, and
+`sinkslot_solve` below):
+
+- `"fixed"`: runs exactly `n_iters`, no convergence check.
+- `"marginal"`: stop once $\|P\mathbf{1} - a\|_\infty \le$ `stop_tol` (the
+  achieved row marginal's max deviation from `a`).
+- `"potential"`: stop once $\varepsilon \max(|\Delta\phi|, |\Delta\psi|) <$
+  `stop_tol` (change in the dual potentials since the last check).
 
 ### sparse_transport_plan
 
