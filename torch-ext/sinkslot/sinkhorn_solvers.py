@@ -374,6 +374,12 @@ def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, l
                 if change < stop.tol:
                     converged = True
                     break
+                # NOT swap_tensors: unlike alternating's marginal-mode swap (where
+                # the swapped-into buffer is immediately overwritten via out= before
+                # ever being read), phi/psi here are read by half_steps() on every
+                # iteration, including the very next one -- swapping in prev_phi's
+                # stale contents would feed a stale value straight back into the
+                # live iteration, not just into the diagnostic.
                 prev_phi.copy_(phi)
                 prev_psi.copy_(psi)
         return phi, psi, it, converged, change
@@ -397,7 +403,9 @@ def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, l
             half_steps()
             row_marg = a * (phi - phi_cand).exp()
             col_marg = b * (psi - psi_cand).exp()
-            viol = max(float((row_marg - a).abs().max()), float((col_marg - b).abs().max()))
+            # One sync (float() at the end), not two: the max itself runs on
+            # device first.
+            viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
             if viol <= stop.tol:
                 converged = True
                 break
@@ -522,7 +530,12 @@ def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=
     if mode == "potential":
         if eps is None:
             raise ValueError("eps is required for stop.mode == 'potential'")
-        prev_phi, prev_psi = phi.clone(), psi.clone()
+        # No .clone() needed: phi/psi are reassigned to a new tensor each
+        # iteration (the blend above is out-of-place), never mutated in
+        # place, so `prev_phi = phi` before overwriting is already a cheap
+        # reference -- unlike sinkslot_symmetric_triton, where phi/psi are
+        # mutated in place via .mul_()/.add_() and a real copy is required.
+        prev_phi, prev_psi = phi, psi
         it = 0
         converged = False
         change = float("inf")
@@ -537,8 +550,8 @@ def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=
                 if change < stop.tol:
                     converged = True
                     break
-                prev_phi.copy_(phi)
-                prev_psi.copy_(psi)
+                prev_phi = phi
+                prev_psi = psi
         return phi, psi, it, converged, change
 
     # mode == "marginal" -- the only mode left after _resolve_stop_mode.
@@ -559,7 +572,9 @@ def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=
             phi_fresh, psi_fresh = half_steps(phi, psi)
             row_marg = a * (phi - phi_fresh).exp()
             col_marg = b * (psi - psi_fresh).exp()
-            viol = max(float((row_marg - a).abs().max()), float((col_marg - b).abs().max()))
+            # One sync (float() at the end), not two: the max itself runs on
+            # device first.
+            viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
             if viol <= stop.tol:
                 converged = True
                 break
