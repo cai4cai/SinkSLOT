@@ -35,9 +35,8 @@ def _marg_viol(
     max(max|row_marg-a|, max|col_marg-b|) -- matches the SLOT repo's actual
     working "marg_viol" stopping rule exactly (bench/solvers/sinkslot.py's
     `_violation`/`_run_v5`: ``max(float((r-a).abs().max()), float((c-b).abs().max()))``).
-    A sum (total-variation) was used here previously -- and still is in an
-    earlier, uncorrected copy of this same convention in bench_forward.py's
-    `_srot_sinkhorn`/`_sparsink_sinkhorn` and sinkslot.py's `_run_v5` -- but a
+    A sum (total-variation) was used here previously -- and in bench_forward.py's
+    `_srot_sinkhorn`/`_sparsink_sinkhorn`, both since corrected to match -- but a
     sum over n (or m) terms against a fixed absolute tolerance is essentially
     unreachable at n=10,000 regardless of how converged the solve actually is,
     which is why it looked like potential-change and marginal-violation modes
