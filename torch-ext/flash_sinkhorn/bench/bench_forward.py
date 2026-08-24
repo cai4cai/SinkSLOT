@@ -612,11 +612,12 @@ class StopCfg:
     """Early-stopping configuration threaded into the solver loops.
 
     mode="fixed" runs exactly n_iters. mode="marginal" runs up to max_iter,
-    stopping when the total-variation marginal violation <= tol and |mass-1| <=
-    mass_tol -- srot/sinkslot/sinkslotcuda/spar_sink/rand_sink's proven default
-    (see SLOT repo), and now also implemented natively in FlashSinkhorn's own
-    solvers (sinkhorn_solvers.py) for flash_symmetric/flash_alternating, so it's
-    directly comparable across every method. mode="potential" stops on
+    stopping when the max (L-infinity) row/col marginal violation <= tol --
+    srot/sinkslot/sinkslotcuda/spar_sink/rand_sink's proven default (see SLOT
+    repo), and now also implemented natively in FlashSinkhorn's own solvers
+    (sinkhorn_solvers.py) for flash_symmetric/flash_alternating, so it's
+    directly comparable across every method. Not gated on mass_tol -- SLOT's
+    own working rule doesn't check mass separately either. mode="potential" stops on
     ||du||_1+||dv||_1 <= tol (Spar-Sink's rule; no FlashSinkhorn equivalent --
     Flash falls back to potential_linf for this mode). mode="potential_linf" stops
     once the dual potentials themselves stop moving, max(|Δf|, |Δg|) < tol since
@@ -882,7 +883,7 @@ def _srot_sinkhorn(
         return f, g, n_iters, None, None
 
     if mode == "potential_linf":
-        prev_f, prev_g = f.clone(), g.clone()
+        prev_f, prev_g = f, g
         it = 0
         converged = False
         change = float("inf")
@@ -895,29 +896,34 @@ def _srot_sinkhorn(
                 if change < stop.tol:
                     converged = True
                     break
-                prev_f.copy_(f)
-                prev_g.copy_(g)
+                prev_f = f
+                prev_g = g
         return f, g, it, converged, change
 
     a = log_a.exp()
+    b = log_b.exp()
+    f_old, g_old = f, g
     it = 0
     converged = False
     viol = float("inf")
     while it < stop.max_iter:
+        f_old = f
+        g_old = g
         f = eps * (log_a - _row_lse(g))
         g = eps * (log_b - _col_lse(f))
         it += 1
         if it % stop.check_every == 0 or it == stop.max_iter:
-            row_marg = (f / eps + _row_lse(g)).exp()      # col marginal is exactly b
+            # Check both row and column marginal violation, without an extra
+            # _row_lse call.
+            row_marg = a * ((f_old - f) / eps).exp()
+            col_marg = b * ((g_old - g) / eps).exp()
             # max (L-infinity), not sum: matches the SLOT repo's actual working
             # "marg_viol" rule (bench/solvers/sinkslot.py's _violation/_run_v5).
             # A sum over n terms against a fixed absolute tol is unreachable at
             # n=10,000 regardless of convergence -- SLOT's own ConvergenceCfg
             # documents max as the n-invariant criterion. Not gated on mass_tol
-            # either, matching SLOT exactly -- mass is still returned for the
-            # diagnostic column.
-            viol = float((row_marg - a).abs().max())
-            mass = float(row_marg.sum())
+            # either, matching SLOT exactly.
+            viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
             if viol <= stop.tol:
                 converged = True
                 break
@@ -1686,7 +1692,7 @@ def _sparsink_sinkhorn(
         # same rule FlashSinkhorn uses natively) -- just don't assume tol alone
         # bounds solution error here the way it more safely does for SROT/SinkSLOT's
         # denser supports. check_every should span the support's mixing timescale.
-        prev_f, prev_g = f.clone(), g.clone()
+        prev_f, prev_g = f, g
         it = 0
         converged = False
         change = float("inf")
@@ -1699,28 +1705,31 @@ def _sparsink_sinkhorn(
                 if change < stop.tol:
                     converged = True
                     break
-                prev_f.copy_(f)
-                prev_g.copy_(g)
+                prev_f = f
+                prev_g = g
         return f, g, empty, it, converged, change
 
     a = log_a.exp()
+    b = log_b.exp()
     it = 0
     converged = False
     viol = float("inf")
     while it < stop.max_iter:
-        f_prev, g_prev = f, g
+        f_old, g_old = f, g
         f = eps * (log_a - _row_lse(g))
         g = eps * (log_b - _col_lse(f))
         it += 1
         if it % stop.check_every == 0 or it == stop.max_iter:
-            row_marg = (f / eps + _row_lse(g)).exp()
+            # Check both row and column marginal violation, without an extra
+            # _row_lse call.
+            row_marg = a * ((f_old - f) / eps).exp()
+            col_marg = b * ((g_old - g) / eps).exp()
             # max (L-infinity), not sum -- see _srot_sinkhorn's comment: a sum
             # over n terms against a fixed absolute tol is unreachable at
             # n=10,000 regardless of convergence. Matches SLOT's actual
             # working "marg_viol" rule. Not gated on mass_tol either, matching
-            # SLOT exactly -- mass is still returned for the diagnostic column.
-            viol = float((row_marg - a).abs().max())
-            mass = float(row_marg.sum())
+            # SLOT exactly.
+            viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
             if stop.mode == "potential":
                 # Spar-Sink's rule: max(||du||_inf, ||dv||_inf) on the scaling
                 # vectors u=exp(f/eps). Also switched from sum to max: same
@@ -1728,8 +1737,8 @@ def _sparsink_sinkhorn(
                 # implement this mode at all (its own Spar-Sink never early-stops),
                 # so there's no reference to match, but a sum over n+m terms
                 # against a fixed tol has the identical unreachable-at-scale flaw.
-                du = float(((f / eps).exp() - (f_prev / eps).exp()).abs().max())
-                dv = float(((g / eps).exp() - (g_prev / eps).exp()).abs().max())
+                du = float(((f / eps).exp() - (f_old / eps).exp()).abs().max())
+                dv = float(((g / eps).exp() - (g_old / eps).exp()).abs().max())
                 if max(du, dv) <= stop.potential_tol:
                     converged = True
                     break
@@ -3557,7 +3566,7 @@ def main() -> None:
                              "(max L_inf change in the dual potentials) for srot/sinkslot/sinkslotcuda/"
                              "spar_sink/rand_sink too.")
     parser.add_argument("--max-iter", type=int, default=10000, help="Iteration cap in non-fixed stop modes.")
-    parser.add_argument("--stop-tol", type=float, default=1e-4, help="TV marginal-violation threshold.")
+    parser.add_argument("--stop-tol", type=float, default=1e-4, help="Max (L-infinity) marginal-violation threshold.")
     parser.add_argument("--potential-tol", type=float, default=1e-6, help="Spar-Sink ||du||+||dv|| threshold.")
     parser.add_argument("--mass-tol", type=float, default=1e-6, help="|sum(P) - 1| threshold.")
     parser.add_argument("--check-every", type=int, default=10, help="Iterations between convergence checks.")

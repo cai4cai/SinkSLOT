@@ -201,14 +201,14 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
 
     Returns (phi, psi, iters_run, converged, final_viol). With `stop` None or
     stop.mode == "fixed" it runs exactly n_iters (converged/final_viol None).
-    With stop.mode == "marginal" it runs up to stop.max_iter and stops on the
-    max (L-infinity) marginal violation: after the column half-step the
-    column marginals are exactly b, so only the row marginal deviates, and
-    r = a * exp(phi - phi_next) where phi_next is the next row LSE -- one extra
-    LSE, no O(nnz) work. This is max, not a total-variation sum: matches the
-    SLOT repo's actual working "marg_viol" rule (bench/solvers/sinkslot.py's
-    `_violation`/`_run_v5` there) -- a sum over n terms against a fixed
-    absolute tol is unreachable at n=10,000 regardless of convergence.
+    With stop.mode == "marginal" it runs up to stop.max_iter and stops once a
+    proxy for the max (L-infinity) row/col marginal violation drops below
+    stop.tol (see the check's own comment below -- it's not the exact
+    violation, traded for one fewer LSE call per side per check). This is
+    max, not a total-variation sum: matches the SLOT repo's actual working
+    "marg_viol" rule (bench/solvers/sinkslot.py's `_violation`/`_run_v5`
+    there) -- a sum over n terms against a fixed absolute tol is unreachable
+    at n=10,000 regardless of convergence.
 
     stop.mode == "potential" reproduces FlashSinkhorn's own native rule:
     stop once the dual potentials stop moving, max(|Δf|, |Δg|) < stop.tol since
@@ -251,37 +251,36 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
                 if change < stop.tol:
                     converged = True
                     break
-                prev_phi.copy_(phi)
-                prev_psi.copy_(psi)
+                torch.utils.swap_tensors(prev_phi, phi)
+                torch.utils.swap_tensors(prev_psi, psi)
         return phi, psi, it, converged, change
 
     # mode == "marginal" -- the only mode left after _resolve_stop_mode.
-    a = log_a.exp()
-    phi_next = torch.empty_like(log_a)
+    #
+    # Check both row and column marginal violation, without an extra
+    # seg_lse_online call.
+    # Both swaps happen up front: phi_old/psi_old end up holding this
+    # iteration's CURRENT phi/psi (no memcpy), while phi/psi become stale
+    # garbage -- fine, since both are immediately overwritten via
+    # out=phi/out=psi. The row update reads psi_old, not psi, since that's
+    # where the current psi now lives after the swap.
+    a, b = log_a.exp(), log_b.exp()
+    phi_old, psi_old = phi.clone(), psi.clone()
     it = 0
     converged = False
     viol = float("inf")
     while it < stop.max_iter:
-        seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi)
+        torch.utils.swap_tensors(phi_old, phi)
+        torch.utils.swap_tensors(psi_old, psi)
+        seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi_old, n, r_blk, r_w, base=log_a, out=phi)
         seg_lse_online(c_ptr, c_idx, c_lam, z_m, phi, m, c_blk, c_w, base=log_b, out=psi)
         it += 1
         if it % stop.check_every == 0 or it == stop.max_iter:
-            # phi_next is NOT a redundant recompute of phi: phi used the psi from
-            # the previous iteration, phi_next uses the psi just updated two lines
-            # up, so it's what phi would be after one more row half-step -- the
-            # one-step-ahead value the row-marginal-violation formula below needs.
-            # Storing the previous phi instead would answer a different question
-            # (how much phi itself moved), not the row marginal's actual deviation
-            # from a. See the docstring above for the r = a*exp(phi - phi_next)
-            # identity this relies on.
-            seg_lse_online(r_ptr, r_idx, r_lam, z_n, psi, n, r_blk, r_w, base=log_a, out=phi_next)
-            row_marg = a * (phi - phi_next).exp()          # col marginal is exactly b
-            # max (L-infinity), matching SLOT's actual _run_v5 exactly:
-            # `if float((a * ((phi - phi_new).exp() - 1.0).abs()).max()) <= threshold`.
-            # Not gated on mass_tol either -- SLOT's own working rule doesn't
-            # check mass separately; still returned for the diagnostic column.
-            viol = float((row_marg - a).abs().max())
-            mass = float(row_marg.sum())
+            row_marg = a * (phi_old - phi).exp()
+            col_marg = b * (psi_old - psi).exp()
+            # One sync (float() at the end), not two: the max itself runs on
+            # device first.
+            viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
             if viol <= stop.tol:
                 converged = True
                 break
@@ -330,6 +329,18 @@ def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, l
 
     mode = _resolve_stop_mode(stop)
 
+    # A shared closure here, unlike sinkslot_alternating_triton's inlined
+    # seg_lse_online calls, because the two situations aren't the same
+    # shape: half_steps() is called 5 times below with an IDENTICAL "compute
+    # both candidates" pattern every time (the marginal branch reuses it
+    # verbatim for its post-blend fresh check too, see below), whereas
+    # alternating's "marginal" branch only ever needs ONE of its two
+    # half-steps recomputed (phi_next), never both -- there's no
+    # equally-clean repeated unit to name there. This is also why an
+    # earlier, cross-backend closure merge of _run_v5/_run_v5_torch was
+    # reverted (#22's history): that one needed three closures to avoid
+    # aliasing phi/phi_next, and the indirection cost more than the
+    # duplicated lines were worth. No such aliasing risk here.
     def half_steps():
         # Both read the CURRENT phi/psi (unmutated at this point in every
         # call site below); writes go into phi_cand/psi_cand, never phi/psi
@@ -363,6 +374,12 @@ def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, l
                 if change < stop.tol:
                     converged = True
                     break
+                # NOT swap_tensors: unlike alternating's marginal-mode swap (where
+                # the swapped-into buffer is immediately overwritten via out= before
+                # ever being read), phi/psi here are read by half_steps() on every
+                # iteration, including the very next one -- swapping in prev_phi's
+                # stale contents would feed a stale value straight back into the
+                # live iteration, not just into the diagnostic.
                 prev_phi.copy_(phi)
                 prev_psi.copy_(psi)
         return phi, psi, it, converged, change
@@ -386,7 +403,9 @@ def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, l
             half_steps()
             row_marg = a * (phi - phi_cand).exp()
             col_marg = b * (psi - psi_cand).exp()
-            viol = max(float((row_marg - a).abs().max()), float((col_marg - b).abs().max()))
+            # One sync (float() at the end), not two: the max itself runs on
+            # device first.
+            viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
             if viol <= stop.tol:
                 converged = True
                 break
@@ -439,7 +458,7 @@ def sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, sto
     if mode == "potential":
         if eps is None:
             raise ValueError("eps is required for stop.mode == 'potential'")
-        prev_phi, prev_psi = phi.clone(), psi.clone()
+        prev_phi, prev_psi = phi, psi
         it = 0
         converged = False
         change = float("inf")
@@ -453,26 +472,30 @@ def sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, sto
                 if change < stop.tol:
                     converged = True
                     break
-                prev_phi.copy_(phi)
-                prev_psi.copy_(psi)
+                prev_phi = phi
+                prev_psi = psi
         return phi, psi, it, converged, change
 
     # mode == "marginal" -- the only mode left after _resolve_stop_mode.
-    a = log_a.exp()
+    # Check both row and column marginal violation, without an extra
+    # _seg_lse_coo call. No .clone() needed: phi/psi are reassigned to a new
+    # tensor each iteration, never mutated in place, so `phi_old = phi`
+    # before overwriting is already a cheap reference.
+    a, b = log_a.exp(), log_b.exp()
+    phi_old, psi_old = phi, psi
     it = 0
     converged = False
     viol = float("inf")
     while it < stop.max_iter:
+        phi_old = phi
+        psi_old = psi
         phi = log_a - _seg_lse_coo(lam + psi[cols], rows, n)
         psi = log_b - _seg_lse_coo(lam + phi[rows], cols, m)
         it += 1
         if it % stop.check_every == 0 or it == stop.max_iter:
-            # One-step-ahead phi using the psi just updated above -- see
-            # sinkslot_alternating_triton's matching comment for why this isn't
-            # a redundant recompute.
-            phi_next = log_a - _seg_lse_coo(lam + psi[cols], rows, n)
-            row_marg = a * (phi - phi_next).exp()
-            viol = float((row_marg - a).abs().max())
+            row_marg = a * (phi_old - phi).exp()
+            col_marg = b * (psi_old - psi).exp()
+            viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
             if viol <= stop.tol:
                 converged = True
                 break
@@ -490,6 +513,8 @@ def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=
     phi, psi = torch.zeros_like(log_a), torch.zeros_like(log_b)
     mode = _resolve_stop_mode(stop)
 
+    # Shared closure for the same reason sinkslot_symmetric_triton's own
+    # half_steps() is -- see that function's docstring.
     def half_steps(phi_cur, psi_cur):
         phi_cand = log_a - _seg_lse_coo(lam + psi_cur[cols], rows, n)
         psi_cand = log_b - _seg_lse_coo(lam + phi_cur[rows], cols, m)
@@ -505,7 +530,12 @@ def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=
     if mode == "potential":
         if eps is None:
             raise ValueError("eps is required for stop.mode == 'potential'")
-        prev_phi, prev_psi = phi.clone(), psi.clone()
+        # No .clone() needed: phi/psi are reassigned to a new tensor each
+        # iteration (the blend above is out-of-place), never mutated in
+        # place, so `prev_phi = phi` before overwriting is already a cheap
+        # reference -- unlike sinkslot_symmetric_triton, where phi/psi are
+        # mutated in place via .mul_()/.add_() and a real copy is required.
+        prev_phi, prev_psi = phi, psi
         it = 0
         converged = False
         change = float("inf")
@@ -520,8 +550,8 @@ def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=
                 if change < stop.tol:
                     converged = True
                     break
-                prev_phi.copy_(phi)
-                prev_psi.copy_(psi)
+                prev_phi = phi
+                prev_psi = psi
         return phi, psi, it, converged, change
 
     # mode == "marginal" -- the only mode left after _resolve_stop_mode.
@@ -542,7 +572,9 @@ def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=
             phi_fresh, psi_fresh = half_steps(phi, psi)
             row_marg = a * (phi - phi_fresh).exp()
             col_marg = b * (psi - psi_fresh).exp()
-            viol = max(float((row_marg - a).abs().max()), float((col_marg - b).abs().max()))
+            # One sync (float() at the end), not two: the max itself runs on
+            # device first.
+            viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
             if viol <= stop.tol:
                 converged = True
                 break
