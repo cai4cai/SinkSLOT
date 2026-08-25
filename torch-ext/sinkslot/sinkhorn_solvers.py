@@ -648,6 +648,22 @@ def sinkslot_solve(X, Y, a=None, b=None, eps=0.05, L=64, seed=0, n_iters=200,
         raise ValueError(f"backend must be 'auto', 'triton', or 'torch', got {backend!r}")
     if variant not in ("alternating", "symmetric"):
         raise ValueError(f"variant must be 'alternating' or 'symmetric', got {variant!r}")
+    # Reject half precision outright. The Triton path already refuses anything
+    # but float32 (see sparse_sqeuclidean_cost), but the pure-torch fallback
+    # used to accept float16/bfloat16 silently and return numbers that look
+    # plausible and are not: the cost expression itself is dtype-agnostic, but
+    # the log-domain iteration downstream is not, and its exp() overflows the
+    # narrow exponent. Measured on CPU against a float64 reference, n=2048:
+    # bfloat16 returns inf at every eps tested, and float16 lands 3-12% off.
+    # Neither raised anything. Silently wrong is the one outcome worth ruling
+    # out here, so this refuses rather than warns.
+    if X.dtype in (torch.float16, torch.bfloat16) or Y.dtype in (torch.float16, torch.bfloat16):
+        raise ValueError(
+            f"sinkslot_solve does not support half precision: the log-domain "
+            f"iteration overflows (bfloat16 returns inf by n=2048; float16 "
+            f"drifts several percent). Got X.dtype={X.dtype}, Y.dtype={Y.dtype}. "
+            f"Cast to float32 (or float64 on CPU) first."
+        )
     if not torch.allclose(a.sum(), b.sum().to(a.dtype), rtol=1e-4, atol=1e-4):
         raise ValueError(
             f"a and b must have equal total mass, got sum(a)={a.sum().item():.6g} "
