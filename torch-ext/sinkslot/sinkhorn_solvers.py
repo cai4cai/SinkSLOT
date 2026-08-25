@@ -26,6 +26,8 @@ from types import SimpleNamespace
 from typing import NamedTuple, Optional
 
 import torch
+from beartype import beartype
+from jaxtyping import Float, jaxtyped
 
 from .solver import (
     _HAS_TRITON,
@@ -581,10 +583,14 @@ def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=
     return phi, psi, it, converged, viol
 
 
-def sinkslot_solve(X, Y, a=None, b=None, eps=0.05, L=64, seed=0, n_iters=200,
+@jaxtyped(typechecker=beartype)
+def sinkslot_solve(X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
+                    a: Float[torch.Tensor, "n"] | None = None,
+                    b: Float[torch.Tensor, "m"] | None = None,
+                    eps=0.05, L=64, seed=0, n_iters=200,
                     stop_mode="fixed", stop_max_iter=20000, stop_tol=1e-6,
                     stop_check_every=5, chunk=None, backend="auto",
-                    variant="alternating", alpha=0.5):
+                    variant="alternating", alpha=0.5) -> SinkslotSolveResult:
     """SinkSLOT end to end: build the sliced plan, then solve -- on any device.
 
     Dispatches on X's device and whether Triton is importable: the fused Triton
@@ -711,10 +717,14 @@ def sinkslot_solve(X, Y, a=None, b=None, eps=0.05, L=64, seed=0, n_iters=200,
     return SinkslotSolveResult(phi, psi, rows, cols, S, it, converged, viol)
 
 
-def sparse_transport_plan(x, y, a=None, b=None, *, eps=0.05, L=64, seed=0,
+@jaxtyped(typechecker=beartype)
+def sparse_transport_plan(x: Float[torch.Tensor, "n d"], y: Float[torch.Tensor, "m d"],
+                           a: Float[torch.Tensor, "n"] | None = None,
+                           b: Float[torch.Tensor, "m"] | None = None, *,
+                           eps=0.05, L=64, seed=0,
                            n_iters=200, stop_mode="fixed", stop_max_iter=20000,
                            stop_tol=1e-6, stop_check_every=5, backend="auto",
-                           variant="alternating", alpha=0.5):
+                           variant="alternating", alpha=0.5) -> torch.Tensor:
     """SinkSLOT's transport plan as a sparse `(n, m)` COO tensor.
 
     Wraps `sinkslot_solve`, then materialises its solved potentials into

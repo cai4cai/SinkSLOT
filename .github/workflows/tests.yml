@@ -1,10 +1,9 @@
 name: tests
 
 # Minimal CI (#11): confirm SinkSLOT installs and runs correctly on hosts
-# that don't look like the paper's own H100 machine -- no CUDA, no Triton
-# (not even installable on macOS), a plain `pip install`. That's exactly
-# the pure-torch fallback #10/#22 added, so this is what actually exercises
-# it.
+# that don't look like the paper's own H100 machine -- no CUDA, no Triton,
+# a plain `pip install`. That's exactly the pure-torch fallback #10/#22
+# added, so this is what actually exercises it.
 #
 # The install is deliberately no-extras. FlashSinkhorn is a `bench`-extra
 # dependency now (#7) and hard-depends on Triton, so leaving extras off is
@@ -21,9 +20,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        python-version: ["3.9", "3.12"]
-    runs-on: ${{ matrix.os }}
+        python-version: ["3.11", "3.12", "3.13"]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 

@@ -24,6 +24,8 @@ from __future__ import annotations
 import functools
 
 import torch
+from beartype import beartype
+from jaxtyping import Float, jaxtyped
 
 from .solver import _HAS_TRITON, sot_plan_coo, _ot_1d_coo_batched_cuda, to_csr, sparse_sqeuclidean_cost
 from .sinkhorn_solvers import sinkslot_alternating_triton, sinkslot_alternating_torch
@@ -111,7 +113,10 @@ def hvp_x_sqeuclid_from_potentials(X, Y, a, v, rows, cols, T_vals, eps, *,
     return 2.0 * a[:, None] * v - 2.0 * dT
 
 
-def hvp_x_sqeuclid(X, Y, a, eps, L, seed, n_iters, v, tau2=3e-7, solve_tol=1e-11,
+@jaxtyped(typechecker=beartype)
+def hvp_x_sqeuclid(X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
+             a: Float[torch.Tensor, "n"], eps, L, seed, n_iters,
+             v: Float[torch.Tensor, "n d"], tau2=3e-7, solve_tol=1e-11,
              max_cg_iter=8000, backend="auto"):
     """End-to-end Hessian-vector product H(X) @ v of grad_X SLOT_eps: solve
     Sinkhorn on the (frozen) sliced-OT support, then call

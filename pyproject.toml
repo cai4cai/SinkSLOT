@@ -14,7 +14,7 @@ version = "0.1.0"
 description = "SinkSLOT: Sinkhorn via Sparse Lifted Optimal Transport -- a sparse Sinkhorn solver over a sliced-OT reference plan, in PyTorch + Triton."
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 keywords = ["optimal-transport", "sliced-optimal-transport", "sparse-sinkhorn", "sinkhorn", "triton", "pytorch", "gpu"]
 authors = [
   {name = "CAI4CAI research group", email = "contact@cai4cai.uk"},
@@ -22,16 +22,22 @@ authors = [
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering",
   "Environment :: GPU :: NVIDIA CUDA",
 ]
 dependencies = [
   "numpy",
   "torch>=2.5",
+  # Shape/dtype annotations on the public API, checked at runtime rather than
+  # only by a static checker -- beartype is what does the checking jaxtyping
+  # defers to. jaxtyping >=0.3 is why requires-python is 3.11: 0.2.x is the
+  # last line supporting 3.9, and it stopped getting fixes in 2024. Python 3.9
+  # is EOL anyway (Oct 2025) and 3.10 follows in Oct 2026.
+  "jaxtyping>=0.3",
+  "beartype>=0.19",
 ]
 
 [project.urls]
@@ -44,8 +50,8 @@ UpstreamFlashSinkhorn = "https://github.com/ot-triton-lab/flash-sinkhorn"
 # Triton is its own extra, not a core dependency: sinkslot.sinkslot_solve
 # already falls back to pure torch at runtime when Triton isn't importable,
 # but making it a hard dependency would still force `pip install sinkslot`
-# to require it, which also breaks a plain install on a platform without a
-# Triton wheel (e.g. macOS). `dev` still pulls it in, since
+# to require it, which also breaks a plain install on any platform without
+# a Triton wheel. `dev` still pulls it in, since
 # benchmarking/development wants the fused kernels.
 triton = [
   "triton>=3.1",
@@ -55,8 +61,8 @@ triton = [
 # not, and FlashSinkhorn hard-depends on Triton (every module under its
 # kernels/ imports triton at module scope, with no pure-torch fallback).
 # Keeping it out of core dependencies is what lets `pip install sinkslot`
-# still work on CPU-only and macOS hosts, which is exactly what the CPU
-# fallback and its CI matrix exist to guarantee.
+# still work on CPU-only hosts, which is exactly what the CPU fallback and
+# its CI matrix exist to guarantee.
 #
 # Pinned to a SHA on cai4cai's fork rather than PyPI's flash-sinkhorn:
 # the released 0.3.3.post1 predates stop_mode="marginal", which the
