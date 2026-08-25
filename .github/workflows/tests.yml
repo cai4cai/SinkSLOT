@@ -1,0 +1,49 @@
+name: tests
+
+# Minimal CI (#11): confirm SinkSLOT installs and runs correctly on hosts
+# that don't look like the paper's own H100 machine -- no CUDA, no Triton
+# (not even installable on macOS), a plain `pip install`. That's exactly
+# the pure-torch fallback #10/#22 added, so this is what actually exercises
+# it.
+#
+# The install is deliberately no-extras. FlashSinkhorn is a `bench`-extra
+# dependency now (#7) and hard-depends on Triton, so leaving extras off is
+# what makes this a real test of the claim that SinkSLOT's own solver needs
+# neither. tests/test_hub_package.py asserts that directly.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.9", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install (no extras -- this is the point)
+        run: |
+          python -m pip install --upgrade pip
+          # torch's default index serves the CUDA build on Linux, which drags
+          # in several GB of nvidia-* packages we don't need on a CPU-only
+          # runner and, on the free ubuntu-latest disk quota, don't fit --
+          # this job exists to check the CPU path, not to prove the GPU one
+          # installs. Installing the CPU build from PyTorch's own index first
+          # means `pip install -e .` (which also wants torch>=2.5) finds it
+          # already satisfied and leaves it alone.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e .
+          pip install pytest
+
+      - name: Run the portable test suite
+        run: pytest torch-ext/sinkslot/testing/ tests/ -v
