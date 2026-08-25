@@ -42,7 +42,6 @@ CONFIG = BenchConfig(
     max_iter=10000,
     stop_tol=1e-6,
     potential_tol=1e-6,
-    mass_tol=1e-6,
     check_every=10,
 
     warmup=0,

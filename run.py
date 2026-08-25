@@ -99,7 +99,6 @@ def build_command(
                 "--max-iter", str(cfg.max_iter),
                 "--stop-tol", str(cfg.stop_tol),
                 "--potential-tol", str(cfg.potential_tol),
-                "--mass-tol", str(cfg.mass_tol),
                 "--check-every", str(cfg.check_every)]
 
     if cfg.no_sparsink:

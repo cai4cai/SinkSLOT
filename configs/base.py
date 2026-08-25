@@ -117,9 +117,13 @@ class BenchConfig:
 
     # Early stopping. stop_mode "fixed" (default) runs exactly n_iters -- the
     # FlashSinkhorn protocol, which isolates per-iteration cost for a fair throughput
-    # comparison. "marginal" runs up to max_iter, stopping when the total-variation
-    # marginal violation sum|P1-a|+|P^T1-b| <= stop_tol and |mass-1| <= mass_tol; the
-    # TV (L1) norm is n-independent, unlike an absolute max threshold. "potential"
+    # comparison. "marginal" runs up to max_iter, stopping when the max
+    # (L-infinity) marginal violation max(max|P1-a|, max|P^T1-b|) <= stop_tol.
+    # It is a max rule, not a total-variation sum, and it is not gated on total
+    # mass: a TV sum over n terms against a fixed absolute tolerance is
+    # unreachable at n=10,000 however converged the solve actually is, which is
+    # what made marginal stopping look broken before it was measured
+    # correctly. The max rule is the n-invariant one. "potential"
     # reproduces Spar-Sink's rule, ||du||_1+||dv||_1 <= potential_tol. "potential_linf"
     # reproduces FlashSinkhorn's own native rule, max(|df|,|dg|) <= stop_tol since the
     # last check -- implemented (in addition to marginal) for srot/sinkslot/
@@ -129,7 +133,6 @@ class BenchConfig:
     max_iter: int = 10000        # cap in non-fixed modes (n_iters is the count in "fixed")
     stop_tol: float = 1e-4       # marginal/potential_linf threshold, n-independent
     potential_tol: float = 1e-6  # Spar-Sink's ||du||+||dv|| threshold ("potential" mode)
-    mass_tol: float = 1e-6       # |sum(P) - 1| threshold
     check_every: int = 10        # iterations between convergence checks
     warmup: int = 5
     rep: int = 15
@@ -197,7 +200,6 @@ CONFIG = BenchConfig(
     max_iter=10000,
     stop_tol=1e-4,
     potential_tol=1e-6,
-    mass_tol=1e-6,
     check_every=10,
 
     warmup=5,
