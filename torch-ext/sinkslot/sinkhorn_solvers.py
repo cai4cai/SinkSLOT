@@ -218,7 +218,7 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
     FlashSinkhorn's and SROT's unabsorbed f, g. Not to be confused with
     Spar-Sink's own, differently-defined "potential" mode (a change in the
     scaling vectors u=exp(f/eps), not in f/g themselves) in
-    flash_sinkhorn/bench/bench_forward.py -- that's a distinct rule for a
+    sinkslot/bench/bench_forward.py -- that's a distinct rule for a
     distinct solver, unrelated to this one.
     """
     r_blk, r_w = launch_cfg(r_idx.numel(), n)
@@ -422,7 +422,7 @@ def _seg_lse_coo(vals, idx, size):
 
     out[i] = logsumexp_{k: idx[k] == i} vals[k]; -inf for an empty group. Same
     scatter_reduce/index_add pattern as `test_sinkslot_alternating_triton_
-    matches_plain_torch_segmented_lse` in flash_sinkhorn/testing/test_sinkslot_bench.py,
+    matches_plain_torch_segmented_lse` in sinkslot/testing/test_sinkslot_bench.py,
     which validates this matches `_seg_lse_online_kernel`'s fp32 output on the
     real Triton path.
     """

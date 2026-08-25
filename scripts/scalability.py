@@ -29,7 +29,7 @@ from configs.scalability import (  # noqa: E402
 def build(d, eps, n, output_dir, *, method, seed, max_dense_size, slices=None,
           extra_flags=None):
     cmd = [
-        sys.executable, "-m", "flash_sinkhorn.bench.bench_forward",
+        sys.executable, "-m", "sinkslot.bench.bench_forward",
         "--sizes", str(n), "--dims", str(d), "--eps", str(eps),
         "--n-iters", str(MAX_ITER), "--warmup", "0", "--rep", "5",
         "--max-dense-size", str(max_dense_size), "--output-dir", output_dir,

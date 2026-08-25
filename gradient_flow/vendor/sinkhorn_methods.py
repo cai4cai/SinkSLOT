@@ -2,7 +2,7 @@
 
 Vendored (trimmed to just what gradient_flow/run.py needs) from a sibling
 research repository's own lib/sinkhorn_methods.py -- this repo has no
-differentiable EOT/SROT loss of its own (torch-ext/flash_sinkhorn/bench is
+differentiable EOT/SROT loss of its own (torch-ext/sinkslot/bench is
 benchmark-timing code only), so the dense autograd-through-Sinkhorn baselines
 live here instead of being re-derived.
 """

@@ -181,7 +181,7 @@ class DeviceHighWater:
 
 
 def _inputs(n: int, m: int, d: int, device: torch.device, dataset: str):
-    from flash_sinkhorn.bench.bench_forward import sample_point_cloud
+    from sinkslot.bench.bench_forward import sample_point_cloud
 
     torch.manual_seed(0)
     x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
@@ -224,10 +224,10 @@ def _probe_flash(backend: str, args) -> Dict[str, Callable]:
 
 def _probe_srot(args) -> Dict[str, Callable]:
     def imports():
-        from flash_sinkhorn.bench.bench_forward import build_sot_plan  # noqa: F401
+        from sinkslot.bench.bench_forward import build_sot_plan  # noqa: F401
 
     def setup(state):
-        from flash_sinkhorn.bench.bench_forward import build_sot_plan
+        from sinkslot.bench.bench_forward import build_sot_plan
 
         x, y, a, b = state["xyab"]
         # build_sot_plan is fp64 throughout and allocates several N x M fp64
@@ -241,7 +241,7 @@ def _probe_srot(args) -> Dict[str, Callable]:
         state["log_a"], state["log_b"] = a.log(), b.log()
 
     def solve(state):
-        from flash_sinkhorn.bench.bench_forward import StopCfg, _srot_sinkhorn
+        from sinkslot.bench.bench_forward import StopCfg, _srot_sinkhorn
 
         _srot_sinkhorn(state["cost"], state["log_pi"], state["log_a"], state["log_b"],
                        args.eps, args.iters, StopCfg.fixed())
@@ -276,7 +276,7 @@ def _probe_sinkslot(cuda_path: bool, args) -> Dict[str, Callable]:
         state["log_ab"] = (a.log(), b.log())
 
     def solve(state):
-        from flash_sinkhorn.bench.bench_forward import StopCfg
+        from sinkslot.bench.bench_forward import StopCfg
         from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
 
         n, m = state["nm"]
@@ -288,10 +288,10 @@ def _probe_sinkslot(cuda_path: bool, args) -> Dict[str, Callable]:
 
 def _probe_sparsink(method: str, args) -> Dict[str, Callable]:
     def imports():
-        from flash_sinkhorn.bench.bench_forward import build_sparse_kernel  # noqa: F401
+        from sinkslot.bench.bench_forward import build_sparse_kernel  # noqa: F401
 
     def setup(state):
-        from flash_sinkhorn.bench.bench_forward import build_sparse_kernel
+        from sinkslot.bench.bench_forward import build_sparse_kernel
 
         x, y, a, b = state["xyab"]
         # Dense N x M cost, then a dense N x M probability matrix inside
@@ -307,7 +307,7 @@ def _probe_sparsink(method: str, args) -> Dict[str, Callable]:
         state["nnz"] = int(rows.numel())
 
     def solve(state):
-        from flash_sinkhorn.bench.bench_forward import StopCfg, _sparsink_sinkhorn
+        from sinkslot.bench.bench_forward import StopCfg, _sparsink_sinkhorn
 
         rows, cols, log_values = state["sparse"]
         log_a, log_b = state["log_ab"]

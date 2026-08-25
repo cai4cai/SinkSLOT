@@ -31,7 +31,7 @@ def sparse_barycentric_map(*args):
 
     Normalizes by the plan's own achieved marginals (scatter-summed from
     T_vals), not the target a, b -- matters when the solve hasn't fully
-    converged. Also lives (independently) in flash_sinkhorn/bench/bench_forward.py,
+    converged. Also lives (independently) in sinkslot/bench/bench_forward.py,
     which this doesn't import from since that pulls in the whole benchmark harness.
     """
     if len(args) == 3:

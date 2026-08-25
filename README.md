@@ -259,6 +259,16 @@ The arXiv paper isn't public yet. A citation will be added here once it is.
 
 ## License
 
-Apache-2.0, covering this repository except `torch-ext/flash_sinkhorn/`,
-which is vendored from [FlashSinkhorn](https://github.com/ot-triton-lab/flash-sinkhorn)
-and stays under its own MIT license (see `torch-ext/flash_sinkhorn/LICENSE`).
+Apache-2.0, covering this repository in full.
+
+FlashSinkhorn is no longer vendored here. It is an ordinary third-party
+dependency, pulled in only by the `bench` extra (`pip install -e '.[bench]'`)
+because the benchmark harness compares against it -- SinkSLOT's own solver
+does not need it. It keeps its own MIT license in its own repository.
+
+The `bench` extra points at [cai4cai/flash-sinkhorn](https://github.com/cai4cai/flash-sinkhorn),
+a fork of [FlashSinkhorn](https://github.com/ot-triton-lab/flash-sinkhorn),
+rather than the `flash-sinkhorn` package on PyPI. The fork adds
+`stop_mode="marginal"`, without which FlashSinkhorn cannot be stopped on the
+same rule as SinkSLOT, SROT and Spar-Sink, and the benchmark would not be
+comparing like with like.

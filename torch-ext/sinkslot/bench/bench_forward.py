@@ -36,22 +36,22 @@ Timing methodology:
 
 Usage:
     # Default: d=3,8,64, TF32 enabled, online methods only (in-process)
-    python -m flash_sinkhorn.bench.bench_forward
+    python -m sinkslot.bench.bench_forward
 
     # Strict FP32 (slower but higher precision)
-    python -m flash_sinkhorn.bench.bench_forward --no-tf32
+    python -m sinkslot.bench.bench_forward --no-tf32
 
     # Include tensorized/dense methods (small sizes only)
-    python -m flash_sinkhorn.bench.bench_forward --tensorized --max-dense-size 20000
+    python -m sinkslot.bench.bench_forward --tensorized --max-dense-size 20000
 
     # Verify loss parity first, then benchmark
-    python -m flash_sinkhorn.bench.bench_forward --verify
+    python -m sinkslot.bench.bench_forward --verify
 
     # Single dimension
-    python -m flash_sinkhorn.bench.bench_forward --dims 64
+    python -m sinkslot.bench.bench_forward --dims 64
 
     # Subprocess mode: still available for maximum isolation if needed
-    python -m flash_sinkhorn.bench.bench_forward --subprocess --dims 512
+    python -m sinkslot.bench.bench_forward --subprocess --dims 512
 """
 
 from __future__ import annotations
@@ -374,7 +374,7 @@ def compute_entropic_ot_reference(
 
 _ref_cost_cache: Dict[str, float] = {}
 
-_REF_COST_CACHE_PATH = Path.home() / ".cache" / "flash_sinkhorn" / "entropic_ot_reference.json"
+_REF_COST_CACHE_PATH = Path.home() / ".cache" / "sinkslot" / "entropic_ot_reference.json"
 
 # Bump whenever the benchmark's (x, y, a, b) generation changes -- seed, distribution,
 # or draw order -- or when the reference functional itself changes. Cached values from
@@ -473,7 +473,7 @@ def compute_exact_ot_reference(
 
 _exact_ref_cache: Dict[str, ExactRef] = {}
 
-_EXACT_REF_CACHE_DIR = Path.home() / ".cache" / "flash_sinkhorn" / "exact_ot_reference"
+_EXACT_REF_CACHE_DIR = Path.home() / ".cache" / "sinkslot" / "exact_ot_reference"
 
 # Bump whenever (x, y, a, b) generation changes (seed, distribution, draw order) --
 # a stale cache would silently corrupt every cost_gap/barycentric_sym.
@@ -932,7 +932,7 @@ def _srot_sinkhorn(
 
 _srot_ref_cache: Dict[str, float] = {}
 
-_SROT_REF_CACHE_PATH = Path.home() / ".cache" / "flash_sinkhorn" / "srot_reference.json"
+_SROT_REF_CACHE_PATH = Path.home() / ".cache" / "sinkslot" / "srot_reference.json"
 _SROT_REF_CACHE_VERSION = 1
 
 
@@ -2177,7 +2177,7 @@ def bench_sinkslotcuda(
 
 
 _sinkslot_ref_cache: Dict[str, float] = {}
-_SINKSLOT_REF_CACHE_PATH = Path.home() / ".cache" / "flash_sinkhorn" / "sinkslot_reference.json"
+_SINKSLOT_REF_CACHE_PATH = Path.home() / ".cache" / "sinkslot" / "sinkslot_reference.json"
 _SINKSLOT_REF_CACHE_VERSION = 1
 
 
@@ -2208,7 +2208,7 @@ def _cached_sinkslot_reference(n, m, d, eps, slices, rows, cols, log_S, cost,
 
 
 _sinkslot_cuda_ref_cache: Dict[str, float] = {}
-_SINKSLOT_CUDA_REF_CACHE_PATH = Path.home() / ".cache" / "flash_sinkhorn" / "sinkslotcuda_reference.json"
+_SINKSLOT_CUDA_REF_CACHE_PATH = Path.home() / ".cache" / "sinkslot" / "sinkslotcuda_reference.json"
 # Separate namespace from the SinkSLOT cache: the CUDA path's fp64 cumsum yields a
 # different (more accurate) sliced support than the baseline's fp32 scan -- the two
 # disagreed on up to 3.8% of the support -- so each converges to its own optimum.
@@ -3444,7 +3444,7 @@ def run_forward_benchmark_subprocess(
 
         # Build subprocess command, forwarding relevant flags
         cmd = [
-            sys.executable, "-m", "flash_sinkhorn.bench.bench_forward",
+            sys.executable, "-m", "sinkslot.bench.bench_forward",
             "--single-size", str(n),
             "--single-dim", str(d),
             "--eps", str(args.eps),
