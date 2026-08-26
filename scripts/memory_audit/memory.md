@@ -3,7 +3,7 @@
 **Status: audit closed.** This started as a worry that the sweep's `gpu_memory_mb`
 column understates FlashSinkhorn (its `TOTAL` here, which includes the transient
 Triton-autotune allocator pool, is far above its `device` reading). It doesn't:
-`gpu_memory_used_mb()` (`torch-ext/flash_sinkhorn/bench/bench_forward.py`) calls
+`gpu_memory_used_mb()` (`torch-ext/sinkslot/bench/bench_forward.py`) calls
 `empty_cache()` before reading specifically to strip that ~270MB of pooled-but-unused
 autotune scratch, and says so in its own docstring — the sweep's number was always
 meant to be steady-state footprint, not instantaneous peak, and that choice is applied

@@ -26,6 +26,8 @@ relative error, float64, independent random a/b, n != m). `b` defaults to
 from __future__ import annotations
 
 import torch
+from beartype import beartype
+from jaxtyping import Float, jaxtyped
 
 from .solver import sparse_sqeuclidean_cost
 from .sinkhorn_solvers import sinkslot_solve
@@ -140,8 +142,11 @@ class SamplesLoss(torch.nn.Module):
         self.stop_tol = stop_tol
         self.stop_check_every = stop_check_every
 
-    def forward(self, x: torch.Tensor, y: torch.Tensor, a: torch.Tensor = None,
-                b: torch.Tensor = None, potentials: bool = False):
+    @jaxtyped(typechecker=beartype)
+    def forward(self, x: Float[torch.Tensor, "n d"], y: Float[torch.Tensor, "m d"],
+                a: Float[torch.Tensor, "n"] | None = None,
+                b: Float[torch.Tensor, "m"] | None = None,
+                potentials: bool = False):
         n, m = x.shape[0], y.shape[0]
         if a is None:
             a = torch.full((n,), 1.0 / n, device=x.device, dtype=x.dtype)

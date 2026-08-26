@@ -36,22 +36,22 @@ Timing methodology:
 
 Usage:
     # Default: d=3,8,64, TF32 enabled, online methods only (in-process)
-    python -m flash_sinkhorn.bench.bench_forward
+    python -m sinkslot.bench.bench_forward
 
     # Strict FP32 (slower but higher precision)
-    python -m flash_sinkhorn.bench.bench_forward --no-tf32
+    python -m sinkslot.bench.bench_forward --no-tf32
 
     # Include tensorized/dense methods (small sizes only)
-    python -m flash_sinkhorn.bench.bench_forward --tensorized --max-dense-size 20000
+    python -m sinkslot.bench.bench_forward --tensorized --max-dense-size 20000
 
     # Verify loss parity first, then benchmark
-    python -m flash_sinkhorn.bench.bench_forward --verify
+    python -m sinkslot.bench.bench_forward --verify
 
     # Single dimension
-    python -m flash_sinkhorn.bench.bench_forward --dims 64
+    python -m sinkslot.bench.bench_forward --dims 64
 
     # Subprocess mode: still available for maximum isolation if needed
-    python -m flash_sinkhorn.bench.bench_forward --subprocess --dims 512
+    python -m sinkslot.bench.bench_forward --subprocess --dims 512
 """
 
 from __future__ import annotations
@@ -374,7 +374,7 @@ def compute_entropic_ot_reference(
 
 _ref_cost_cache: Dict[str, float] = {}
 
-_REF_COST_CACHE_PATH = Path.home() / ".cache" / "flash_sinkhorn" / "entropic_ot_reference.json"
+_REF_COST_CACHE_PATH = Path.home() / ".cache" / "sinkslot" / "entropic_ot_reference.json"
 
 # Bump whenever the benchmark's (x, y, a, b) generation changes -- seed, distribution,
 # or draw order -- or when the reference functional itself changes. Cached values from
@@ -473,7 +473,7 @@ def compute_exact_ot_reference(
 
 _exact_ref_cache: Dict[str, ExactRef] = {}
 
-_EXACT_REF_CACHE_DIR = Path.home() / ".cache" / "flash_sinkhorn" / "exact_ot_reference"
+_EXACT_REF_CACHE_DIR = Path.home() / ".cache" / "sinkslot" / "exact_ot_reference"
 
 # Bump whenever (x, y, a, b) generation changes (seed, distribution, draw order) --
 # a stale cache would silently corrupt every cost_gap/barycentric_sym.
@@ -616,8 +616,8 @@ class StopCfg:
     srot/sinkslot/sinkslotcuda/spar_sink/rand_sink's proven default (see SLOT
     repo), and now also implemented natively in FlashSinkhorn's own solvers
     (sinkhorn_solvers.py) for flash_symmetric/flash_alternating, so it's
-    directly comparable across every method. Not gated on mass_tol -- SLOT's
-    own working rule doesn't check mass separately either. mode="potential" stops on
+    directly comparable across every method. Not gated on total mass -- the
+    working rule doesn't check mass separately. mode="potential" stops on
     ||du||_1+||dv||_1 <= tol (Spar-Sink's rule; no FlashSinkhorn equivalent --
     Flash falls back to potential_linf for this mode). mode="potential_linf" stops
     once the dual potentials themselves stop moving, max(|Δf|, |Δg|) < tol since
@@ -638,7 +638,6 @@ class StopCfg:
     max_iter: int = 10000
     tol: float = 1e-4
     potential_tol: float = 1e-6
-    mass_tol: float = 1e-6
     check_every: int = 10
 
     @staticmethod
@@ -921,7 +920,7 @@ def _srot_sinkhorn(
             # "marg_viol" rule (bench/solvers/sinkslot.py's _violation/_run_v5).
             # A sum over n terms against a fixed absolute tol is unreachable at
             # n=10,000 regardless of convergence -- SLOT's own ConvergenceCfg
-            # documents max as the n-invariant criterion. Not gated on mass_tol
+            # documents max as the n-invariant criterion. Not gated on mass
             # either, matching SLOT exactly.
             viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
             if viol <= stop.tol:
@@ -932,7 +931,7 @@ def _srot_sinkhorn(
 
 _srot_ref_cache: Dict[str, float] = {}
 
-_SROT_REF_CACHE_PATH = Path.home() / ".cache" / "flash_sinkhorn" / "srot_reference.json"
+_SROT_REF_CACHE_PATH = Path.home() / ".cache" / "sinkslot" / "srot_reference.json"
 _SROT_REF_CACHE_VERSION = 1
 
 
@@ -1114,7 +1113,7 @@ def bench_flashsinkhorn(
         _fs_stop_mode = "marginal" if _stop.mode == "marginal" else "potential_linf"
         _fs_kwargs = {
             "threshold": _stop.tol, "inner_iterations": _stop.check_every,
-            "stop_mode": _fs_stop_mode, "mass_tol": _stop.mass_tol,
+            "stop_mode": _fs_stop_mode,
         }
     _fs_iters = n_iters if _stop.mode == "fixed" else _stop.max_iter
     loss_fn = SamplesLoss(
@@ -1727,7 +1726,7 @@ def _sparsink_sinkhorn(
             # max (L-infinity), not sum -- see _srot_sinkhorn's comment: a sum
             # over n terms against a fixed absolute tol is unreachable at
             # n=10,000 regardless of convergence. Matches SLOT's actual
-            # working "marg_viol" rule. Not gated on mass_tol either, matching
+            # working "marg_viol" rule. Not gated on mass either, matching
             # SLOT exactly.
             viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
             if stop.mode == "potential":
@@ -2013,7 +2012,7 @@ def bench_sinkslot(
         _stop.mode, _stop.mode)
     _sinkslot_stop = StopCfg(mode=_sinkslot_stop_mode, max_iter=_stop.max_iter,
                               tol=_stop.tol, potential_tol=_stop.potential_tol,
-                              mass_tol=_stop.mass_tol, check_every=_stop.check_every)
+                              check_every=_stop.check_every)
 
     def run():
         sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
@@ -2132,7 +2131,7 @@ def bench_sinkslotcuda(
         _stop.mode, _stop.mode)
     _sinkslot_stop = StopCfg(mode=_sinkslot_stop_mode, max_iter=_stop.max_iter,
                               tol=_stop.tol, potential_tol=_stop.potential_tol,
-                              mass_tol=_stop.mass_tol, check_every=_stop.check_every)
+                              check_every=_stop.check_every)
 
     def run():
         sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
@@ -2177,7 +2176,7 @@ def bench_sinkslotcuda(
 
 
 _sinkslot_ref_cache: Dict[str, float] = {}
-_SINKSLOT_REF_CACHE_PATH = Path.home() / ".cache" / "flash_sinkhorn" / "sinkslot_reference.json"
+_SINKSLOT_REF_CACHE_PATH = Path.home() / ".cache" / "sinkslot" / "sinkslot_reference.json"
 _SINKSLOT_REF_CACHE_VERSION = 1
 
 
@@ -2208,7 +2207,7 @@ def _cached_sinkslot_reference(n, m, d, eps, slices, rows, cols, log_S, cost,
 
 
 _sinkslot_cuda_ref_cache: Dict[str, float] = {}
-_SINKSLOT_CUDA_REF_CACHE_PATH = Path.home() / ".cache" / "flash_sinkhorn" / "sinkslotcuda_reference.json"
+_SINKSLOT_CUDA_REF_CACHE_PATH = Path.home() / ".cache" / "sinkslot" / "sinkslotcuda_reference.json"
 # Separate namespace from the SinkSLOT cache: the CUDA path's fp64 cumsum yields a
 # different (more accurate) sliced support than the baseline's fp32 scan -- the two
 # disagreed on up to 3.8% of the support -- so each converges to its own optimum.
@@ -3444,7 +3443,7 @@ def run_forward_benchmark_subprocess(
 
         # Build subprocess command, forwarding relevant flags
         cmd = [
-            sys.executable, "-m", "flash_sinkhorn.bench.bench_forward",
+            sys.executable, "-m", "sinkslot.bench.bench_forward",
             "--single-size", str(n),
             "--single-dim", str(d),
             "--eps", str(args.eps),
@@ -3568,7 +3567,6 @@ def main() -> None:
     parser.add_argument("--max-iter", type=int, default=10000, help="Iteration cap in non-fixed stop modes.")
     parser.add_argument("--stop-tol", type=float, default=1e-4, help="Max (L-infinity) marginal-violation threshold.")
     parser.add_argument("--potential-tol", type=float, default=1e-6, help="Spar-Sink ||du||+||dv|| threshold.")
-    parser.add_argument("--mass-tol", type=float, default=1e-6, help="|sum(P) - 1| threshold.")
     parser.add_argument("--check-every", type=int, default=10, help="Iterations between convergence checks.")
     parser.add_argument(
         "--sinkslot-slices", type=str, default="50",
@@ -3653,7 +3651,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     _stop_cfg = StopCfg(mode=args.stop_mode, max_iter=args.max_iter, tol=args.stop_tol,
-                        potential_tol=args.potential_tol, mass_tol=args.mass_tol,
+                        potential_tol=args.potential_tol,
                         check_every=args.check_every)
 
     srot_slices = [int(v) for v in str(args.srot_slices).split(",") if v.strip()]

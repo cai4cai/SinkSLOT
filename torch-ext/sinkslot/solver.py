@@ -17,6 +17,8 @@ Package name: sinkslot
 from __future__ import annotations
 
 import torch
+from beartype import beartype
+from jaxtyping import Float, Int, jaxtyped
 
 try:
     import triton
@@ -26,7 +28,8 @@ except ImportError:
     _HAS_TRITON = False
 
 
-def get_random_projections(d: int, L: int, seed: int) -> torch.Tensor:
+@jaxtyped(typechecker=beartype)
+def get_random_projections(d: int, L: int, seed: int) -> Float[torch.Tensor, "L d"]:
     """L random directions, drawn uniformly from the unit sphere in R^d.
 
     Standard-normal draws, L2-normalised -- the standard way to sample
@@ -124,7 +127,7 @@ def _ot_1d_coo_batched_cuda(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor,
 
     Net: 49.5x on the dominant stage AND a strictly more accurate plan. Because
     the support differs from the naive fp32 scan, SinkSLOT-CUDA keeps its own
-    reference-cache namespace (see flash_sinkhorn/bench/bench_forward.py).
+    reference-cache namespace (see sinkslot/bench/bench_forward.py).
 
     Dtype: the `.double()` upcast below is internal and fixed, not driven by
     the caller's dtype -- `a`, `b`, `PX`, `PY` can be float32 or float64 on the
@@ -171,10 +174,12 @@ def _ot_1d_coo_batched_cuda(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor,
     return R.reshape(-1)[sel], Cc.reshape(-1)[sel], mass.reshape(-1)[sel]
 
 
+@jaxtyped(typechecker=beartype)
 def sot_plan_coo(
-    X: torch.Tensor, Y: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
-    L: int, seed: int, chunk: int = None, ot1d=_ot_1d_coo_batched,
-):
+    X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
+    a: Float[torch.Tensor, "n"], b: Float[torch.Tensor, "m"],
+    L: int, seed: int, chunk: int | None = None, ot1d=_ot_1d_coo_batched,
+) -> tuple[Int[torch.Tensor, "nnz"], Int[torch.Tensor, "nnz"], Float[torch.Tensor, "nnz"]]:
     """Unsmoothed SOT plan as COO: (rows, cols, vals), nnz <= L(N+M).
 
     Same construction as sot_plan_dense but never allocates N x M. The gamma
@@ -318,7 +323,12 @@ if _HAS_TRITON:
         tl.store(OUT + k, acc, mask=mask)
 
 
-def sparse_sqeuclidean_cost(x, y, rows, cols, block: int = 1024, use_triton=None):
+@jaxtyped(typechecker=beartype)
+def sparse_sqeuclidean_cost(
+    x: Float[torch.Tensor, "n d"], y: Float[torch.Tensor, "m d"],
+    rows: Int[torch.Tensor, "nnz"], cols: Int[torch.Tensor, "nnz"],
+    block: int = 1024, use_triton=None,
+) -> Float[torch.Tensor, "nnz"]:
     """Squared-euclidean cost on the sparse support.
 
     Fused Triton kernel when `x` is CUDA and Triton is installed (the

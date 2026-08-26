@@ -3,18 +3,18 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-# Distribution name for this repo (SinkSLOT). It packages two things under
-# different attribution: the vendored flash_sinkhorn library (third-party
-# prior work, MIT-licensed, kept under its own copyright and license -- see
-# torch-ext/flash_sinkhorn/LICENSE, not repeated here) and this repo's own
-# contribution (torch-ext/sinkslot/, gradient_flow/, configs/, the benchmark
-# harness), whose author is listed below.
+# Distribution name for this repo (SinkSLOT). Everything packaged here is
+# this repo's own contribution (torch-ext/sinkslot/, gradient_flow/,
+# configs/, the benchmark harness) under the single Apache-2.0 license
+# below. FlashSinkhorn is no longer vendored (see issue #7): it is an
+# ordinary third-party dependency now, pulled in only by the `bench` extra,
+# and keeps its own MIT license in its own repository.
 name = "sinkslot"
-dynamic = ["version"]
+version = "0.1.0"
 description = "SinkSLOT: Sinkhorn via Sparse Lifted Optimal Transport -- a sparse Sinkhorn solver over a sliced-OT reference plan, in PyTorch + Triton."
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 keywords = ["optimal-transport", "sliced-optimal-transport", "sparse-sinkhorn", "sinkhorn", "triton", "pytorch", "gpu"]
 authors = [
   {name = "CAI4CAI research group", email = "contact@cai4cai.uk"},
@@ -22,16 +22,22 @@ authors = [
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering",
   "Environment :: GPU :: NVIDIA CUDA",
 ]
 dependencies = [
   "numpy",
   "torch>=2.5",
+  # Shape/dtype annotations on the public API, checked at runtime rather than
+  # only by a static checker -- beartype is what does the checking jaxtyping
+  # defers to. jaxtyping >=0.3 is why requires-python is 3.11: 0.2.x is the
+  # last line supporting 3.9, and it stopped getting fixes in 2024. Python 3.9
+  # is EOL anyway (Oct 2025) and 3.10 follows in Oct 2026.
+  "jaxtyping>=0.3",
+  "beartype>=0.19",
 ]
 
 [project.urls]
@@ -44,11 +50,27 @@ UpstreamFlashSinkhorn = "https://github.com/ot-triton-lab/flash-sinkhorn"
 # Triton is its own extra, not a core dependency: sinkslot.sinkslot_solve
 # already falls back to pure torch at runtime when Triton isn't importable,
 # but making it a hard dependency would still force `pip install sinkslot`
-# to require it, which also breaks a plain install on a platform without a
-# Triton wheel (e.g. macOS). `dev` still pulls it in, since
+# to require it, which also breaks a plain install on any platform without
+# a Triton wheel. `dev` still pulls it in, since
 # benchmarking/development wants the fused kernels.
 triton = [
   "triton>=3.1",
+]
+# The benchmark harness (sinkslot.bench.bench_forward) compares against
+# FlashSinkhorn, so it needs the library -- but SinkSLOT's own solver does
+# not, and FlashSinkhorn hard-depends on Triton (every module under its
+# kernels/ imports triton at module scope, with no pure-torch fallback).
+# Keeping it out of core dependencies is what lets `pip install sinkslot`
+# still work on CPU-only hosts, which is exactly what the CPU fallback and
+# its CI matrix exist to guarantee.
+#
+# Pinned to a SHA on cai4cai's fork rather than PyPI's flash-sinkhorn:
+# the released 0.3.3.post1 predates stop_mode="marginal", which the
+# benchmark needs to stop FlashSinkhorn on the same rule as SinkSLOT,
+# SROT and Spar-Sink. Repoint this at "flash-sinkhorn>=0.4" if upstream
+# releases the change.
+bench = [
+  "flash-sinkhorn @ git+https://github.com/cai4cai/flash-sinkhorn.git@ab28c56a26bbb5c47c454fd0ff74864d0abafaae",
 ]
 dev = [
   "pytest",
@@ -63,6 +85,7 @@ dev = [
   "textual",
   "torchsparsegradutils",
   "sinkslot[triton]",
+  "sinkslot[bench]",
 ]
 
 [tool.setuptools]
@@ -71,16 +94,6 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["torch-ext"]
 
-[tool.setuptools.package-data]
-# flash_sinkhorn's own LICENSE (MIT, distinct copyright -- see the file
-# itself) doesn't travel into the sdist/wheel by default, since it isn't a
-# .py file and there's no MANIFEST.in; without this, `pip install sinkslot`
-# ships the vendored code without the license MIT requires alongside it.
-flash_sinkhorn = ["LICENSE"]
-
-[tool.setuptools.dynamic]
-version = {attr = "flash_sinkhorn.__version__"}
-
 [tool.pytest.ini_options]
 addopts = "-ra"
-testpaths = ["torch-ext/flash_sinkhorn/testing", "torch-ext/sinkslot/testing"]
+testpaths = ["torch-ext/sinkslot/testing"]

@@ -26,6 +26,8 @@ from types import SimpleNamespace
 from typing import NamedTuple, Optional
 
 import torch
+from beartype import beartype
+from jaxtyping import Float, jaxtyped
 
 from .solver import (
     _HAS_TRITON,
@@ -218,7 +220,7 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
     FlashSinkhorn's and SROT's unabsorbed f, g. Not to be confused with
     Spar-Sink's own, differently-defined "potential" mode (a change in the
     scaling vectors u=exp(f/eps), not in f/g themselves) in
-    flash_sinkhorn/bench/bench_forward.py -- that's a distinct rule for a
+    sinkslot/bench/bench_forward.py -- that's a distinct rule for a
     distinct solver, unrelated to this one.
     """
     r_blk, r_w = launch_cfg(r_idx.numel(), n)
@@ -422,7 +424,7 @@ def _seg_lse_coo(vals, idx, size):
 
     out[i] = logsumexp_{k: idx[k] == i} vals[k]; -inf for an empty group. Same
     scatter_reduce/index_add pattern as `test_sinkslot_alternating_triton_
-    matches_plain_torch_segmented_lse` in flash_sinkhorn/testing/test_sinkslot_bench.py,
+    matches_plain_torch_segmented_lse` in sinkslot/testing/test_sinkslot_bench.py,
     which validates this matches `_seg_lse_online_kernel`'s fp32 output on the
     real Triton path.
     """
@@ -581,10 +583,14 @@ def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=
     return phi, psi, it, converged, viol
 
 
-def sinkslot_solve(X, Y, a=None, b=None, eps=0.05, L=64, seed=0, n_iters=200,
+@jaxtyped(typechecker=beartype)
+def sinkslot_solve(X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
+                    a: Float[torch.Tensor, "n"] | None = None,
+                    b: Float[torch.Tensor, "m"] | None = None,
+                    eps=0.05, L=64, seed=0, n_iters=200,
                     stop_mode="fixed", stop_max_iter=20000, stop_tol=1e-6,
                     stop_check_every=5, chunk=None, backend="auto",
-                    variant="alternating", alpha=0.5):
+                    variant="alternating", alpha=0.5) -> SinkslotSolveResult:
     """SinkSLOT end to end: build the sliced plan, then solve -- on any device.
 
     Dispatches on X's device and whether Triton is importable: the fused Triton
@@ -648,6 +654,22 @@ def sinkslot_solve(X, Y, a=None, b=None, eps=0.05, L=64, seed=0, n_iters=200,
         raise ValueError(f"backend must be 'auto', 'triton', or 'torch', got {backend!r}")
     if variant not in ("alternating", "symmetric"):
         raise ValueError(f"variant must be 'alternating' or 'symmetric', got {variant!r}")
+    # Reject half precision outright. The Triton path already refuses anything
+    # but float32 (see sparse_sqeuclidean_cost), but the pure-torch fallback
+    # used to accept float16/bfloat16 silently and return numbers that look
+    # plausible and are not: the cost expression itself is dtype-agnostic, but
+    # the log-domain iteration downstream is not, and its exp() overflows the
+    # narrow exponent. Measured on CPU against a float64 reference, n=2048:
+    # bfloat16 returns inf at every eps tested, and float16 lands 3-12% off.
+    # Neither raised anything. Silently wrong is the one outcome worth ruling
+    # out here, so this refuses rather than warns.
+    if X.dtype in (torch.float16, torch.bfloat16) or Y.dtype in (torch.float16, torch.bfloat16):
+        raise ValueError(
+            f"sinkslot_solve does not support half precision: the log-domain "
+            f"iteration overflows (bfloat16 returns inf by n=2048; float16 "
+            f"drifts several percent). Got X.dtype={X.dtype}, Y.dtype={Y.dtype}. "
+            f"Cast to float32 (or float64 on CPU) first."
+        )
     if not torch.allclose(a.sum(), b.sum().to(a.dtype), rtol=1e-4, atol=1e-4):
         raise ValueError(
             f"a and b must have equal total mass, got sum(a)={a.sum().item():.6g} "
@@ -695,10 +717,14 @@ def sinkslot_solve(X, Y, a=None, b=None, eps=0.05, L=64, seed=0, n_iters=200,
     return SinkslotSolveResult(phi, psi, rows, cols, S, it, converged, viol)
 
 
-def sparse_transport_plan(x, y, a=None, b=None, *, eps=0.05, L=64, seed=0,
+@jaxtyped(typechecker=beartype)
+def sparse_transport_plan(x: Float[torch.Tensor, "n d"], y: Float[torch.Tensor, "m d"],
+                           a: Float[torch.Tensor, "n"] | None = None,
+                           b: Float[torch.Tensor, "m"] | None = None, *,
+                           eps=0.05, L=64, seed=0,
                            n_iters=200, stop_mode="fixed", stop_max_iter=20000,
                            stop_tol=1e-6, stop_check_every=5, backend="auto",
-                           variant="alternating", alpha=0.5):
+                           variant="alternating", alpha=0.5) -> torch.Tensor:
     """SinkSLOT's transport plan as a sparse `(n, m)` COO tensor.
 
     Wraps `sinkslot_solve`, then materialises its solved potentials into

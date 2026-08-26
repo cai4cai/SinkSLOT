@@ -15,6 +15,8 @@ this file's first-order gradient).
 from __future__ import annotations
 
 import torch
+from beartype import beartype
+from jaxtyping import Float, Int, jaxtyped
 
 from .solver import sparse_sqeuclidean_cost
 from .sinkhorn_solvers import sinkslot_solve
@@ -31,7 +33,7 @@ def sparse_barycentric_map(*args):
 
     Normalizes by the plan's own achieved marginals (scatter-summed from
     T_vals), not the target a, b -- matters when the solve hasn't fully
-    converged. Also lives (independently) in flash_sinkhorn/bench/bench_forward.py,
+    converged. Also lives (independently) in sinkslot/bench/bench_forward.py,
     which this doesn't import from since that pulls in the whole benchmark harness.
     """
     if len(args) == 3:
@@ -59,7 +61,12 @@ def sparse_barycentric_map(*args):
     return Tx, Ty
 
 
-def slot_grad(X, Y, a, b, eps, L, seed, n_iters, backend="auto"):
+@jaxtyped(typechecker=beartype)
+def slot_grad(
+    X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
+    a: Float[torch.Tensor, "n"], b: Float[torch.Tensor, "m"],
+    eps: float, L: int, seed: int, n_iters: int, backend: str = "auto",
+) -> Float[torch.Tensor, "n d"]:
     """grad_X SLOT_eps(X, Y) by the envelope theorem (Feydy et al. 2019's trick):
 
         grad_X SLOT_eps(X, Y) = 2 * diag(a) * (X - T_eps(X))

@@ -43,7 +43,7 @@ def build_command(
     seed: data-generation seed for this unit (defaults to cfg.seeds[0] if not given).
     Only affects (x, y, a, b); method-internal randomness stays independently seeded.
     """
-    module = "flash_sinkhorn.bench.bench_forward"
+    module = "sinkslot.bench.bench_forward"
     cmd = [
         sys.executable, "-m", module,
         "--sizes", str(size) if size is not None else ",".join(str(s) for s in cfg.sizes),
@@ -99,7 +99,6 @@ def build_command(
                 "--max-iter", str(cfg.max_iter),
                 "--stop-tol", str(cfg.stop_tol),
                 "--potential-tol", str(cfg.potential_tol),
-                "--mass-tol", str(cfg.mass_tol),
                 "--check-every", str(cfg.check_every)]
 
     if cfg.no_sparsink:
