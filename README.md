@@ -4,6 +4,8 @@
 
 # SinkSLOT: Sinkhorn via Sparse Lifted Optimal Transport
 
+[![arXiv](https://img.shields.io/badge/arXiv-2608.28262-b31b1b.svg)](https://arxiv.org/abs/2608.28262)
+
 SinkSLOT computes entropic optimal transport (EOT) using a sparse sliced
 lifted plan as the reference measure, instead of the usual independent
 product `a ⊗ b`. Restricting each Sinkhorn iteration to that plan's support
@@ -256,6 +258,8 @@ Benchmarked against [FlashSinkhorn](https://github.com/ot-triton-lab/flash-sinkh
 ## Citation
 
 If you use SinkSLOT, please cite:
+
+Hsieh, I., Kundu, S. S., Vercauteren, T. and Dorent, R. (2026). [SinkSLOT: Sinkhorn via Sparse Lifted Optimal Transport](https://arxiv.org/abs/2608.28262). *arXiv preprint arXiv:2608.28262*.
 
 ```bibtex
 @article{hsieh2026sinkslot,
