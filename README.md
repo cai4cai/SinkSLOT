@@ -263,7 +263,7 @@ Hsieh, I., Kundu, S. S., Vercauteren, T. and Dorent, R. (2026). [SinkSLOT: Sinkh
 
 ```bibtex
 @article{hsieh2026sinkslot,
-  title={SinkSLOT: Sinkhorn via Sparse Lifted Optimal Transport},
+  title={{SinkSLOT}: {Sinkhorn} via Sparse Lifted Optimal Transport},
   author={Hsieh, Ian and Kundu, Soumya Snigdha and Vercauteren, Tom and Dorent, Reuben},
   journal={arXiv preprint arXiv:2608.28262},
   year={2026},
