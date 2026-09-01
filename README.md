@@ -255,7 +255,17 @@ Benchmarked against [FlashSinkhorn](https://github.com/ot-triton-lab/flash-sinkh
 
 ## Citation
 
-The arXiv paper isn't public yet. A citation will be added here once it is.
+If you use SinkSLOT, please cite:
+
+```bibtex
+@article{hsieh2026sinkslot,
+  title={SinkSLOT: Sinkhorn via Sparse Lifted Optimal Transport},
+  author={Hsieh, Ian and Kundu, Soumya Snigdha and Vercauteren, Tom and Dorent, Reuben},
+  journal={arXiv preprint arXiv:2608.28262},
+  year={2026},
+  url={https://arxiv.org/abs/2608.28262}
+}
+```
 
 ## License
 

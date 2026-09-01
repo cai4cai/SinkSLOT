@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "SinkSLOT: Sinkhorn via Sparse Lifted Optimal Transport"
+authors:
+  - family-names: Hsieh
+    given-names: Ian
+  - family-names: Kundu
+    given-names: Soumya Snigdha
+  - family-names: Vercauteren
+    given-names: Tom
+  - family-names: Dorent
+    given-names: Reuben
+license: Apache-2.0
+repository-code: "https://github.com/cai4cai/SinkSLOT"
+preferred-citation:
+  type: article
+  title: "SinkSLOT: Sinkhorn via Sparse Lifted Optimal Transport"
+  authors:
+    - family-names: Hsieh
+      given-names: Ian
+    - family-names: Kundu
+      given-names: Soumya Snigdha
+    - family-names: Vercauteren
+      given-names: Tom
+    - family-names: Dorent
+      given-names: Reuben
+  journal: "arXiv preprint arXiv:2608.28262"
+  year: 2026
+  url: "https://arxiv.org/abs/2608.28262"
