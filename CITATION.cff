@@ -27,3 +27,6 @@ preferred-citation:
   journal: "arXiv preprint arXiv:2608.28262"
   year: 2026
   url: "https://arxiv.org/abs/2608.28262"
+  identifiers:
+    - type: other
+      value: "arXiv:2608.28262"
