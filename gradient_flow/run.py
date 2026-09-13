@@ -26,9 +26,9 @@ Four methods, one figure:
     plus the closed-form envelope-theorem gradient
     grad_X SLOT_eps(X,Y) = 2*diag(a)*(X - T_eps(X)) (see sinkslot/gradient.py).
 
-    SOT/EOT/SROT run in float64 (vendor/sinkhorn_methods.py, ported from a
-    sibling research repository's own copy, which has no CUDA/Triton
-    dependency). SinkSLOT runs in float32 on the Triton path: its fused cost
+    SOT/EOT/SROT run in float64 (POT and GeomLoss's own kernels for SOT/EOT;
+    SinkSLOT's torch fallback, which has no CUDA/Triton dependency, for SROT).
+    SinkSLOT runs in float32 on the Triton path: its fused cost
     kernel accumulates in fp32 regardless of input dtype (see
     sparse_sqeuclidean_cost's own docstring), so there is no float64 path
     there. The pure-torch fallback (used automatically without a GPU) has no
@@ -59,10 +59,50 @@ from gradient_flow.config import (
     N, STEPS, N_STEPS, LR, EPS_VALUES, MAX_ITER, L, DELTA_SROT, DATA_SCALE,
     METHOD_NAMES, ROW_LABELS,
 )
-from gradient_flow.vendor.sinkhorn_methods import geomloss_sinkhorn_divergence_fixed_iters
 from sinkslot.gradient import slot_grad
 from sinkslot.solver import sot_plan_coo, sparse_sqeuclidean_cost
 from sinkslot.sinkhorn_solvers import sinkslot_alternating_torch
+
+
+def geomloss_sinkhorn_divergence_fixed_iters(X_t, Y_t, eps, n_iters):
+    """Debiased Sinkhorn divergence via GeomLoss's own kernels, at a fixed
+    iteration count instead of GeomLoss's default epsilon-annealing schedule.
+
+    GeomLoss's SamplesLoss anneals eps from the point cloud's diameter down to
+    the target blur, converging in ~8-30 steps for typical blur values -- not
+    comparable to this experiment's other three arms, which all run a fixed
+    n_iters regardless of when they'd otherwise stop. This calls the same
+    softmin_tensorized/sinkhorn_loop primitives SamplesLoss uses internally,
+    but with eps_list held constant at the target eps for the full n_iters,
+    so every arm in the comparison spends the same fixed compute per step.
+
+    GeomLoss's own p=2 cost is 0.5*||x-y||^2 (half of the ||x-y||^2 convention
+    used by the other three arms and by sinkslot itself), so eps is halved
+    before being fed to GeomLoss's kernel and the returned divergence is
+    doubled at the end -- both the Gibbs kernel and the resulting gradient
+    then match the other arms' convention exactly, not just up to a constant.
+    """
+    from geomloss._legacy.sinkhorn_divergence import log_weights, sinkhorn_cost, sinkhorn_loop
+    from geomloss._legacy.sinkhorn_samples import cost_routines, softmin_tensorized
+
+    n, m = X_t.shape[0], Y_t.shape[0]
+    Xb, Yb = X_t.unsqueeze(0), Y_t.unsqueeze(0)
+    a = torch.full((1, n), 1.0 / n, dtype=X_t.dtype, device=X_t.device)
+    b = torch.full((1, m), 1.0 / m, dtype=Y_t.dtype, device=Y_t.device)
+
+    cost = cost_routines[2]
+    C_xy, C_yx = cost(Xb, Yb.detach()), cost(Yb, Xb.detach())
+    C_xx, C_yy = cost(Xb, Xb.detach()), cost(Yb, Yb.detach())
+
+    eps_geomloss = eps / 2.0
+    eps_list = [eps_geomloss] * n_iters
+    f_aa, g_bb, g_ab, f_ba = sinkhorn_loop(
+        softmin_tensorized, log_weights(a), log_weights(b),
+        C_xx, C_yy, C_xy, C_yx, eps_list, rho=None, debias=True,
+    )
+    div = sinkhorn_cost(eps_geomloss, None, a, b, f_aa, g_bb, g_ab, f_ba,
+                         batch=True, debias=True, potentials=False)
+    return 2.0 * div.squeeze(0)
 
 
 def sinkslot_smoothed_divergence(X, Y, a, b, eps, L, seed, n_iters, gamma):
@@ -135,9 +175,9 @@ def draw_samples(fname, n, rng, dtype=DTYPE, device="cpu"):
 def exact_ot_cost(X, Y):
     """Raw squared-W2 exact OT cost (not sqrt'd). X, Y: torch tensors, any device.
 
-    Calls POT directly (ot.dist, ot.emd2) rather than through vendor's
-    exact_ot/build_cost -- POT's own backend accepts torch tensors natively
-    (verified against 0.9.7), so no numpy round-trip is needed here at all.
+    Calls POT directly (ot.dist, ot.emd2) -- POT's own backend accepts torch
+    tensors natively (verified against 0.9.7), so no numpy round-trip is
+    needed here at all.
     """
     n, m = X.shape[0], Y.shape[0]
     Xc, Yc = X.detach().cpu().double(), Y.detach().cpu().double()
