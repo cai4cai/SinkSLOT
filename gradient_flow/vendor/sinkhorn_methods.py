@@ -1,166 +1,52 @@
-"""Dense SOT/EOT/SROT baselines for the gradient-flow experiment.
+"""EOT baseline for the gradient-flow experiment, via GeomLoss's own kernels.
 
-Vendored (trimmed to just what gradient_flow/run.py needs) from a sibling
-research repository's own lib/sinkhorn_methods.py -- this repo has no
-differentiable EOT/SROT loss of its own (torch-ext/sinkslot/bench is
-benchmark-timing code only), so the dense autograd-through-Sinkhorn baselines
-live here instead of being re-derived.
+Previously held a dense SOT/EOT/SROT baseline vendored from a sibling
+research repository. Both call sites in gradient_flow/run.py have since moved
+off it -- EOT to GeomLoss (below), SROT to sinkslot's own sparse solve
+machinery (see sinkslot_smoothed_divergence in run.py) after the vendored
+SROT implementation turned numerically unstable at eps=0.01 once an
+unjustified floor on its Gibbs kernel was removed. The vendored functions
+are gone with it: dead code with no remaining callers.
 """
-import numpy as np
-import ot
 import torch
 
 
-def build_cost(X, Y):
-    """Squared Euclidean cost matrix."""
-    return ot.dist(X, Y, metric="sqeuclidean")
+def geomloss_sinkhorn_divergence_fixed_iters(X_t, Y_t, eps, n_iters):
+    """Debiased Sinkhorn divergence via GeomLoss's own kernels, at a fixed
+    iteration count instead of GeomLoss's default epsilon-annealing schedule.
 
+    GeomLoss's SamplesLoss anneals eps from the point cloud's diameter down to
+    the target blur, converging in ~8-30 steps for typical blur values -- not
+    comparable to this experiment's other three arms, which all run a fixed
+    n_iters regardless of when they'd otherwise stop. This calls the same
+    softmin_tensorized/sinkhorn_loop primitives SamplesLoss uses internally,
+    but with eps_list held constant at the target eps for the full n_iters,
+    so every arm in the comparison spends the same fixed compute per step.
 
-def exact_ot(a, b, C):
-    """Exact LP optimal transport cost (ground truth)."""
-    G = ot.emd(a, b, C)
-    return float(np.sum(G * C)), G
-
-
-def build_sot_plan(X, Y, a, b, L=50, delta=1e-8, rng=None):
+    GeomLoss's own p=2 cost is 0.5*||x-y||^2 (half of the ||x-y||^2 convention
+    used by the other three arms and by sinkslot itself), so eps is halved
+    before being fed to GeomLoss's kernel and the returned divergence is
+    doubled at the end -- both the Gibbs kernel and the resulting gradient
+    then match the other arms' convention exactly, not just up to a constant.
     """
-    Uniform-average SOT reference plan from L random 1D projections.
+    from geomloss._legacy.sinkhorn_divergence import log_weights, sinkhorn_cost, sinkhorn_loop
+    from geomloss._legacy.sinkhorn_samples import cost_routines, softmin_tensorized
 
-    Returns (1 - delta) pi_SOT + delta pi_ind with pi_ind = a outer b (product /
-    independent coupling). Same marginals as pi_SOT; for delta > 0 every entry is
-    strictly positive when a, b > 0 (helps Sinkhorn kernel support).
-    """
-    rng = rng or np.random.default_rng(0)
-    n, d = X.shape
-    m = Y.shape[0]
-    pi_sot = np.zeros((n, m), dtype=np.float64)
+    n, m = X_t.shape[0], Y_t.shape[0]
+    Xb, Yb = X_t.unsqueeze(0), Y_t.unsqueeze(0)
+    a = torch.full((1, n), 1.0 / n, dtype=X_t.dtype, device=X_t.device)
+    b = torch.full((1, m), 1.0 / m, dtype=Y_t.dtype, device=Y_t.device)
 
-    thetas = rng.standard_normal((L, d))
-    theta_norms = np.linalg.norm(thetas, axis=1, keepdims=True)
-    theta_norms = np.maximum(theta_norms, 1e-300)
-    thetas /= theta_norms
+    cost = cost_routines[2]
+    C_xy, C_yx = cost(Xb, Yb.detach()), cost(Yb, Xb.detach())
+    C_xx, C_yy = cost(Xb, Xb.detach()), cost(Yb, Yb.detach())
 
-    px_all = X @ thetas.T
-    py_all = Y @ thetas.T
-    emd_1d = ot.emd_1d
-    inv_L = 1.0 / L
-
-    for ell in range(L):
-        pi_sot += emd_1d(px_all[:, ell], py_all[:, ell], a, b)
-
-    pi_sot *= inv_L
-    if delta > 0.0:
-        pi_ind = np.outer(a, b)
-        pi_sot = (1.0 - delta) * pi_sot + delta * pi_ind
-    return pi_sot
-
-
-def _sinkhorn_std_torch_plan(a_t, b_t, C_t, eps, max_iter=200, tol=1e-9):
-    """Differentiable Torch Sinkhorn plan for K=exp(-C/eps)."""
-    K = torch.exp(-C_t / eps).clamp_min(1e-12)
-    u = torch.ones_like(a_t)
-    v = torch.ones_like(b_t)
-    for _ in range(max_iter):
-        u_prev = u
-        u = a_t / (K @ v).clamp_min(1e-12)
-        v = b_t / (K.t() @ u).clamp_min(1e-12)
-        if tol > 0:
-            err = torch.mean(torch.abs(u - u_prev))
-            if float(err.detach().cpu().item()) < tol:
-                break
-    return (u[:, None] * K) * v[None, :]
-
-
-def _sinkhorn_sot_torch_plan(a_t, b_t, C_t, pi_sot_t, eps, max_iter=200, tol=1e-9):
-    """Differentiable Torch Sinkhorn plan for K=pi_sot*exp(-C/eps)."""
-    K = (pi_sot_t * torch.exp(-C_t / eps)).clamp_min(1e-12)
-    u = torch.ones_like(a_t)
-    v = torch.ones_like(b_t)
-    for _ in range(max_iter):
-        u_prev = u
-        u = a_t / (K @ v).clamp_min(1e-12)
-        v = b_t / (K.t() @ u).clamp_min(1e-12)
-        if tol > 0:
-            err = torch.mean(torch.abs(u - u_prev))
-            if float(err.detach().cpu().item()) < tol:
-                break
-    return (u[:, None] * K) * v[None, :]
-
-
-def sinkhorn_divergence_torch_autograd(X_t, Y_t, eps, max_iter=100, tol=0.0):
-    """
-    Differentiable Sinkhorn divergence for autograd-based optimization.
-    Returns a scalar torch.Tensor.
-    """
-    n = X_t.shape[0]
-    m = Y_t.shape[0]
-    a_t = torch.full((n,), 1.0 / n, dtype=X_t.dtype, device=X_t.device)
-    b_t = torch.full((m,), 1.0 / m, dtype=Y_t.dtype, device=Y_t.device)
-
-    C_xy = torch.cdist(X_t, Y_t, p=2) ** 2
-    C_xx = torch.cdist(X_t, X_t, p=2) ** 2
-    C_yy = torch.cdist(Y_t, Y_t, p=2) ** 2
-
-    pi_xy = _sinkhorn_std_torch_plan(a_t, b_t, C_xy, eps=eps, max_iter=max_iter, tol=tol)
-    pi_xx = _sinkhorn_std_torch_plan(a_t, a_t, C_xx, eps=eps, max_iter=max_iter, tol=tol)
-    pi_yy = _sinkhorn_std_torch_plan(b_t, b_t, C_yy, eps=eps, max_iter=max_iter, tol=tol)
-
-    ot_xy = torch.sum(pi_xy * C_xy)
-    ot_xx = torch.sum(pi_xx * C_xx)
-    ot_yy = torch.sum(pi_yy * C_yy)
-    return ot_xy - 0.5 * ot_xx - 0.5 * ot_yy
-
-
-def sr_sinkhorn_divergence_torch_autograd(
-    X_t,
-    Y_t,
-    eps,
-    L=80,
-    max_iter=100,
-    tol=0.0,
-    use_softmax=False,
-    temperature=0.05,
-    delta=1e-8,
-):
-    """
-    Differentiable SR-Sinkhorn divergence for autograd-based optimization.
-    The SOT references are rebuilt each call and treated as constants (stop-gradient).
-    """
-    n = X_t.shape[0]
-    m = Y_t.shape[0]
-    a = np.ones(n, dtype=np.float64) / n
-    b = np.ones(m, dtype=np.float64) / m
-    a_t = torch.full((n,), 1.0 / n, dtype=X_t.dtype, device=X_t.device)
-    b_t = torch.full((m,), 1.0 / m, dtype=Y_t.dtype, device=Y_t.device)
-
-    X_np = X_t.detach().cpu().numpy()
-    Y_np = Y_t.detach().cpu().numpy()
-
-    if use_softmax:
-        raise NotImplementedError("softmax SOT weighting not vendored here; see the full "
-                                   "sinkhorn_methods.py in the sibling repo if needed.")
-    pi_sot_xy = build_sot_plan(X_np, Y_np, a, b, L=L, delta=delta)
-
-    # For self terms, the SOT reference is diagonal (identity coupling) for identical supports.
-    # We use it directly and only apply the same delta smoothing used elsewhere.
-    pi_sot_xx = np.eye(n, dtype=np.float64) / n
-    pi_sot_yy = np.eye(m, dtype=np.float64) / m
-    if delta > 0.0:
-        pi_sot_xx = (1.0 - delta) * pi_sot_xx + delta * np.outer(a, a)
-        pi_sot_yy = (1.0 - delta) * pi_sot_yy + delta * np.outer(b, b)
-
-    C_xy = torch.cdist(X_t, Y_t, p=2) ** 2
-    C_xx = torch.cdist(X_t, X_t, p=2) ** 2
-    C_yy = torch.cdist(Y_t, Y_t, p=2) ** 2
-    pi_sot_xy_t = torch.as_tensor(pi_sot_xy, dtype=X_t.dtype, device=X_t.device)
-    pi_sot_xx_t = torch.as_tensor(pi_sot_xx, dtype=X_t.dtype, device=X_t.device)
-    pi_sot_yy_t = torch.as_tensor(pi_sot_yy, dtype=X_t.dtype, device=X_t.device)
-
-    pi_xy = _sinkhorn_sot_torch_plan(a_t, b_t, C_xy, pi_sot_xy_t, eps=eps, max_iter=max_iter, tol=tol)
-    pi_xx = _sinkhorn_sot_torch_plan(a_t, a_t, C_xx, pi_sot_xx_t, eps=eps, max_iter=max_iter, tol=tol)
-    pi_yy = _sinkhorn_sot_torch_plan(b_t, b_t, C_yy, pi_sot_yy_t, eps=eps, max_iter=max_iter, tol=tol)
-
-    ot_xy = torch.sum(pi_xy * C_xy)
-    ot_xx = torch.sum(pi_xx * C_xx)
-    ot_yy = torch.sum(pi_yy * C_yy)
-    return ot_xy - 0.5 * ot_xx - 0.5 * ot_yy
+    eps_geomloss = eps / 2.0
+    eps_list = [eps_geomloss] * n_iters
+    f_aa, g_bb, g_ab, f_ba = sinkhorn_loop(
+        softmin_tensorized, log_weights(a), log_weights(b),
+        C_xx, C_yy, C_xy, C_yx, eps_list, rho=None, debias=True,
+    )
+    div = sinkhorn_cost(eps_geomloss, None, a, b, f_aa, g_bb, g_ab, f_ba,
+                         batch=True, debias=True, potentials=False)
+    return 2.0 * div.squeeze(0)

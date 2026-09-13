@@ -11,8 +11,16 @@ Four methods, one figure:
     no Sinkhorn solve at all, each projection's 1-D transport is exact (a
     sort), so autograd through `ot.sliced_wasserstein_distance` already gives
     the analytical gradient.
-  * EOT (Feydy et al., 2019): `sinkhorn_divergence_torch_autograd`.
-  * SROT (Nguyen 2026): `sr_sinkhorn_divergence_torch_autograd`, delta=1e-8.
+  * EOT (Feydy et al., 2019): `geomloss_sinkhorn_divergence_fixed_iters`, GeomLoss's
+    own kernels at a fixed iteration count (its default epsilon-annealing
+    schedule converges in ~8 steps, not comparable to the other three arms'
+    fixed MAX_ITER budget -- see that function's own docstring).
+  * SROT (Nguyen 2026): `sinkslot_smoothed_divergence` -- SinkSLOT's own sparse
+    solve machinery with the sliced-lifted prior smoothed by gamma=1e-8
+    (Nguyen 2026's own P^SOT_gamma convention), rather than the separately-
+    vendored dense implementation, which turned numerically unstable at
+    eps=0.01 once its Gibbs-kernel floor was removed (see that function's
+    own docstring for the sparse-vs-dense caveat this introduces).
   * SinkSLOT (ours): the native solver (torch-ext/sinkslot/sinkhorn_solvers.py),
     the exact pipeline this repo's own speed benchmarks exercise,
     plus the closed-form envelope-theorem gradient
@@ -51,10 +59,43 @@ from gradient_flow.config import (
     N, STEPS, N_STEPS, LR, EPS_VALUES, MAX_ITER, L, DELTA_SROT, DATA_SCALE,
     METHOD_NAMES, ROW_LABELS,
 )
-from gradient_flow.vendor.sinkhorn_methods import (
-    sinkhorn_divergence_torch_autograd, sr_sinkhorn_divergence_torch_autograd,
-)
+from gradient_flow.vendor.sinkhorn_methods import geomloss_sinkhorn_divergence_fixed_iters
 from sinkslot.gradient import slot_grad
+from sinkslot.solver import sot_plan_coo, sparse_sqeuclidean_cost
+from sinkslot.sinkhorn_solvers import sinkslot_alternating_torch
+
+
+def sinkslot_smoothed_divergence(X, Y, a, b, eps, L, seed, n_iters, gamma):
+    """SROT arm via SinkSLOT's own sparse solve machinery, with the sliced-
+    lifted prior smoothed toward the independent coupling by `gamma` --
+    P^SOT_gamma = (1-gamma)*P^SOT + gamma*(a (x) b), Nguyen 2026's own
+    convention (same gamma as DELTA_SROT elsewhere in this repo) -- instead
+    of the separately-vendored dense implementation.
+
+    `sot_plan_coo`'s own docstring notes the gamma blend is "deliberately
+    absent" there because it's meant to be folded into the potentials
+    analytically rather than materialised; this instead smooths `S` directly
+    on the sparse support sot_plan_coo already builds; the fully-dense
+    a_i*b_j term at every off-support pair is not added, so at N=1000 with
+    a well-covered support this only approximates Nguyen 2026's dense SROT,
+    it does not reproduce it exactly.
+    """
+    def term(Xp, Yp, ap, bp):
+        n, m = Xp.shape[0], Yp.shape[0]
+        rows, cols, S = sot_plan_coo(Xp, Yp, ap, bp, L=L, seed=seed)
+        S = (1.0 - gamma) * S + gamma * ap[rows] * bp[cols]
+        cost = sparse_sqeuclidean_cost(Xp, Yp, rows, cols, use_triton=False)
+        lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
+        log_a, log_b = ap.log(), bp.log()
+        phi, psi, _, _, _ = sinkslot_alternating_torch(
+            rows, cols, lam, log_a, log_b, n, m, n_iters, stop=None)
+        vals = (phi[rows] + psi[cols] + lam).exp()
+        return (vals * cost).sum()
+
+    ot_xy = term(X, Y, a, b)
+    ot_xx = term(X, X, a, a)
+    ot_yy = term(Y, Y, b, b)
+    return ot_xy - 0.5 * ot_xx - 0.5 * ot_yy
 
 DATA_DIR = Path(__file__).parent / "data"
 OUT_DIR = Path(__file__).parent / "outputs"
@@ -118,10 +159,10 @@ def run_flow(method, X0, Y, a_t, eps):
             if method == "SOT":
                 loss = ot.sliced_wasserstein_distance(x_i, Y, n_projections=L, p=2, seed=0)
             elif method == "EOT":
-                loss = sinkhorn_divergence_torch_autograd(x_i, Y, eps, max_iter=MAX_ITER, tol=0.0)
+                loss = geomloss_sinkhorn_divergence_fixed_iters(x_i, Y, eps, n_iters=MAX_ITER)
             else:  # SROT
-                loss = sr_sinkhorn_divergence_torch_autograd(
-                    x_i, Y, eps, L=L, max_iter=MAX_ITER, tol=0.0, delta=DELTA_SROT)
+                loss = sinkslot_smoothed_divergence(
+                    x_i, Y, a_t, a_t, eps, L, seed=0, n_iters=MAX_ITER, gamma=DELTA_SROT)
             (g,) = torch.autograd.grad(loss, [x_i])
             x_i_d = x_i.detach()
 
