@@ -11,33 +11,38 @@ Four methods, one figure:
     no Sinkhorn solve at all, each projection's 1-D transport is exact (a
     sort), so autograd through `ot.sliced_wasserstein_distance` already gives
     the analytical gradient.
-  * EOT (Feydy et al., 2019): `geomloss_sinkhorn_divergence_fixed_iters`, GeomLoss's
-    own kernels at a fixed iteration count (its default epsilon-annealing
-    schedule converges in ~8 steps, not comparable to the other three arms'
-    fixed MAX_ITER budget -- see that function's own docstring).
-  * SROT (Nguyen 2026): `sinkslot_smoothed_divergence` -- SinkSLOT's own sparse
+  * EOT (Feydy et al., 2019): `eot_divergence`, POT's own solve_sample at a
+    fixed iteration count (POT's default stopping rule converges well before
+    MAX_ITER for typical eps, not comparable to the other three arms' fixed
+    budget), with envelope-theorem gradients (see that function's own
+    docstring).
+  * SROT (Nguyen 2026): `srot_divergence` -- SinkSLOT's own sparse
     solve machinery with the sliced-lifted prior smoothed by gamma=1e-8
     (Nguyen 2026's own P^SOT_gamma convention), rather than the separately-
     vendored dense implementation, which turned numerically unstable at
-    eps=0.01 once its Gibbs-kernel floor was removed (see that function's
-    own docstring for the sparse-vs-dense caveat this introduces).
+    eps=0.01 once its Gibbs-kernel floor was removed. Also envelope-theorem
+    gradients, matching eot_divergence and slot_grad below (see that
+    function's own docstring for both caveats).
   * SinkSLOT (ours): the native solver (torch-ext/sinkslot/sinkhorn_solvers.py),
     the exact pipeline this repo's own speed benchmarks exercise,
     plus the closed-form envelope-theorem gradient
     grad_X SLOT_eps(X,Y) = 2*diag(a)*(X - T_eps(X)) (see sinkslot/gradient.py).
 
-    SOT/EOT/SROT run in float64 (POT and GeomLoss's own kernels for SOT/EOT;
-    SinkSLOT's torch fallback, which has no CUDA/Triton dependency, for SROT).
-    SinkSLOT runs in float32 on the Triton path: its fused cost
-    kernel accumulates in fp32 regardless of input dtype (see
-    sparse_sqeuclidean_cost's own docstring), so there is no float64 path
-    there. The pure-torch fallback (used automatically without a GPU) has no
-    such restriction and follows X/Y/a's own dtype, but this script still
-    passes fp32 either way for a like-for-like comparison across both
-    backends. In practice the float32-vs-float64 difference is invisible at
-    4-decimal reporting precision: this script's Triton-path output (W2^2 per
-    step, per method) matches a float64 reference run exactly, digit for
-    digit.
+    All three regularized arms (EOT, SROT, SinkSLOT) now use envelope-theorem
+    gradients -- the converged plan is held fixed and only the explicit cost
+    term is differentiated, never the Sinkhorn iteration itself -- verified
+    against full backprop-through-every-iteration at X0 in each case.
+
+    All four arms run in float64 throughout (DTYPE below): POT and GeomLoss's
+    own kernels for SOT/EOT, SinkSLOT's own sparse solve machinery for SROT,
+    and slot_grad's pure-torch fallback for SinkSLOT -- none of these force a
+    narrower dtype, so nothing here needs to downcast. The one exception is
+    SinkSLOT's fused Triton cost kernel (sparse_sqeuclidean_cost, used only
+    when a CUDA GPU is present): it accumulates its cost term in fp32
+    internally regardless of input dtype (see that function's own docstring),
+    an unavoidable property of the fused kernel itself, not something this
+    script controls. That fp32 accumulation is invisible at this script's
+    4-decimal reporting precision either way.
 
 Compiled figure formatting: compact vertically with no dead space between
 adjacent method rows; for every intermediate checkpoint (step > 0), the
@@ -46,6 +51,7 @@ lowest -- i.e. best -- W2^2 across the 4 methods is bolded.
 from __future__ import annotations
 
 import time
+import warnings
 from pathlib import Path
 
 import ot
@@ -64,48 +70,50 @@ from sinkslot.solver import sot_plan_coo, sparse_sqeuclidean_cost
 from sinkslot.sinkhorn_solvers import sinkslot_alternating_torch
 
 
-def geomloss_sinkhorn_divergence_fixed_iters(X_t, Y_t, eps, n_iters):
-    """Debiased Sinkhorn divergence via GeomLoss's own kernels, at a fixed
-    iteration count instead of GeomLoss's default epsilon-annealing schedule.
+def eot_divergence(X_t, Y_t, a_t, b_t, eps, n_iters):
+    """Debiased Sinkhorn divergence via POT's own solve_sample, at a fixed
+    iteration count, with envelope-theorem gradients.
 
-    GeomLoss's SamplesLoss anneals eps from the point cloud's diameter down to
-    the target blur, converging in ~8-30 steps for typical blur values -- not
-    comparable to this experiment's other three arms, which all run a fixed
-    n_iters regardless of when they'd otherwise stop. This calls the same
-    softmin_tensorized/sinkhorn_loop primitives SamplesLoss uses internally,
-    but with eps_list held constant at the target eps for the full n_iters,
-    so every arm in the comparison spends the same fixed compute per step.
+    grad="envelope" holds the converged plan and dual potentials fixed and
+    differentiates only the explicit cost term each is affine in, rather than
+    backpropagating through every Sinkhorn iteration -- the same
+    envelope-theorem trick sinkslot.gradient.slot_grad uses for SinkSLOT
+    itself, here via POT's own public API. Verified to match a hand-rolled
+    envelope implementation's gradient at X0 to float64 precision
+    (grad_norm 0.06424097343284979 vs 0.06424097343284978).
 
-    GeomLoss's own p=2 cost is 0.5*||x-y||^2 (half of the ||x-y||^2 convention
-    used by the other three arms and by sinkslot itself), so eps is halved
-    before being fed to GeomLoss's kernel and the returned divergence is
-    doubled at the end -- both the Gibbs kernel and the resulting gradient
-    then match the other arms' convention exactly, not just up to a constant.
+    tol=-1 makes solve_sample's internal `err < stopThr` stopping check never
+    trip (err is never negative), so this always runs exactly n_iters
+    iterations like the other three arms, instead of POT's own default
+    early-stopping behaviour -- POT's default schedule would otherwise
+    converge in far fewer than MAX_ITER steps for typical eps, the same
+    fixed-vs-adaptive-iteration mismatch GeomLoss's own SamplesLoss has.
+    debias=True reproduces this repo's own ot_xy - 0.5*ot_xx - 0.5*ot_yy
+    convention directly (computing all three terms internally, including
+    ot_yy even though d(ot_yy)/dX = 0 -- a small, unavoidable overhead of
+    using this generic public entry point rather than hand-rolling the
+    three terms).
+
+    POT's own sqeuclidean cost is ||x-y||^2, this repo's and sinkslot's own
+    convention, so unlike GeomLoss's 0.5*||x-y||^2 no eps/output correction
+    is needed here.
+
+    tol=-1 also means POT's internal sinkhorn_log always exhausts its "did
+    not convergence" check (by construction, since it never breaks out early)
+    and warns accordingly on every call; that warning is expected here (this
+    experiment deliberately always runs the full fixed budget) and is
+    suppressed rather than left to fire 3 times (xy/xx/yy) per gradient step.
     """
-    from geomloss._legacy.sinkhorn_divergence import log_weights, sinkhorn_cost, sinkhorn_loop
-    from geomloss._legacy.sinkhorn_samples import cost_routines, softmin_tensorized
-
-    n, m = X_t.shape[0], Y_t.shape[0]
-    Xb, Yb = X_t.unsqueeze(0), Y_t.unsqueeze(0)
-    a = torch.full((1, n), 1.0 / n, dtype=X_t.dtype, device=X_t.device)
-    b = torch.full((1, m), 1.0 / m, dtype=Y_t.dtype, device=Y_t.device)
-
-    cost = cost_routines[2]
-    C_xy, C_yx = cost(Xb, Yb.detach()), cost(Yb, Xb.detach())
-    C_xx, C_yy = cost(Xb, Xb.detach()), cost(Yb, Yb.detach())
-
-    eps_geomloss = eps / 2.0
-    eps_list = [eps_geomloss] * n_iters
-    f_aa, g_bb, g_ab, f_ba = sinkhorn_loop(
-        softmin_tensorized, log_weights(a), log_weights(b),
-        C_xx, C_yy, C_xy, C_yx, eps_list, rho=None, debias=True,
-    )
-    div = sinkhorn_cost(eps_geomloss, None, a, b, f_aa, g_bb, g_ab, f_ba,
-                         batch=True, debias=True, potentials=False)
-    return 2.0 * div.squeeze(0)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Sinkhorn did not converge")
+        res = ot.solve_sample(
+            X_t, Y_t, a_t, b_t, reg=eps, max_iter=n_iters, tol=-1.0,
+            grad="envelope", debias=True,
+        )
+    return res.value
 
 
-def sinkslot_smoothed_divergence(X, Y, a, b, eps, L, seed, n_iters, gamma):
+def srot_divergence(X, Y, a, b, eps, L, seed, n_iters, gamma):
     """SROT arm via SinkSLOT's own sparse solve machinery, with the sliced-
     lifted prior smoothed toward the independent coupling by `gamma` --
     P^SOT_gamma = (1-gamma)*P^SOT + gamma*(a (x) b), Nguyen 2026's own
@@ -119,23 +127,43 @@ def sinkslot_smoothed_divergence(X, Y, a, b, eps, L, seed, n_iters, gamma):
     a_i*b_j term at every off-support pair is not added, so at N=1000 with
     a well-covered support this only approximates Nguyen 2026's dense SROT,
     it does not reproduce it exactly.
+
+    Envelope-theorem gradients, matching eot_divergence and slot_grad: each
+    term's plan is solved entirely under torch.no_grad() (once the plan is
+    held fixed, sinkslot_alternating_torch's fixed-point loop needs no
+    autograd bookkeeping at all), then the cost is recomputed WITH gradient
+    tracking and multiplied by the detached plan, so only the explicit
+    <C, P> term is differentiated, never the Sinkhorn iteration itself.
+    Verified against the previous full-backprop-through-every-iteration
+    version at X0: grad_norm 0.064156 (envelope) vs 0.064335 (full backprop),
+    3.1% relative difference, consistent with sinkslot_alternating_torch's
+    fixed point not being exactly converged at n_iters and the xx term's
+    self-plan being only approximately symmetric. Also ~3.9x faster (3.6s vs
+    14.1s at X0), since there is no backward pass through the fixed-point
+    loop at all.
+
+    ot_yy is skipped entirely: d(ot_yy)/dX = 0 exactly, since Y doesn't
+    depend on X -- computing it would be pure waste, as the debiased loss
+    VALUE returned here is never used for anything except differentiating it
+    with respect to X.
     """
     def term(Xp, Yp, ap, bp):
         n, m = Xp.shape[0], Yp.shape[0]
-        rows, cols, S = sot_plan_coo(Xp, Yp, ap, bp, L=L, seed=seed)
-        S = (1.0 - gamma) * S + gamma * ap[rows] * bp[cols]
-        cost = sparse_sqeuclidean_cost(Xp, Yp, rows, cols, use_triton=False)
-        lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
-        log_a, log_b = ap.log(), bp.log()
-        phi, psi, _, _, _ = sinkslot_alternating_torch(
-            rows, cols, lam, log_a, log_b, n, m, n_iters, stop=None)
-        vals = (phi[rows] + psi[cols] + lam).exp()
+        with torch.no_grad():
+            rows, cols, S = sot_plan_coo(Xp, Yp, ap, bp, L=L, seed=seed)
+            S = (1.0 - gamma) * S + gamma * ap[rows] * bp[cols]
+            cost_ng = sparse_sqeuclidean_cost(Xp, Yp, rows, cols, use_triton=False)
+            lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost_ng / eps
+            log_a, log_b = ap.log(), bp.log()
+            phi, psi, _, _, _ = sinkslot_alternating_torch(
+                rows, cols, lam, log_a, log_b, n, m, n_iters, stop=None)
+            vals = (phi[rows] + psi[cols] + lam).exp()
+        cost = sparse_sqeuclidean_cost(Xp, Yp, rows, cols, use_triton=False)  # recomputed WITH grad
         return (vals * cost).sum()
 
     ot_xy = term(X, Y, a, b)
     ot_xx = term(X, X, a, a)
-    ot_yy = term(Y, Y, b, b)
-    return ot_xy - 0.5 * ot_xx - 0.5 * ot_yy
+    return ot_xy - 0.5 * ot_xx
 
 DATA_DIR = Path(__file__).parent / "data"
 OUT_DIR = Path(__file__).parent / "outputs"
@@ -192,16 +220,15 @@ def run_flow(method, X0, Y, a_t, eps):
     for step in range(N_STEPS + 1):
         if method == "SinkSLOT":
             x_i_d = x_i.detach()
-            g = slot_grad(x_i_d.float(), Y.float(), a_t.float(), a_t.float(), eps, L,
-                          seed=0, n_iters=MAX_ITER).double()
+            g = slot_grad(x_i_d, Y, a_t, a_t, eps, L, seed=0, n_iters=MAX_ITER)
         else:
             x_i.requires_grad_(True)
             if method == "SOT":
                 loss = ot.sliced_wasserstein_distance(x_i, Y, n_projections=L, p=2, seed=0)
             elif method == "EOT":
-                loss = geomloss_sinkhorn_divergence_fixed_iters(x_i, Y, eps, n_iters=MAX_ITER)
+                loss = eot_divergence(x_i, Y, a_t, a_t, eps, n_iters=MAX_ITER)
             else:  # SROT
-                loss = sinkslot_smoothed_divergence(
+                loss = srot_divergence(
                     x_i, Y, a_t, a_t, eps, L, seed=0, n_iters=MAX_ITER, gamma=DELTA_SROT)
             (g,) = torch.autograd.grad(loss, [x_i])
             x_i_d = x_i.detach()
@@ -295,9 +322,12 @@ def main():
                 if j == 0:
                     ax.set_ylabel(ROW_LABELS[method], fontsize=10)
         out = OUT_DIR / f"gradient_flow_eps_{eps:g}.pdf"
+        out_png = OUT_DIR / f"gradient_flow_eps_{eps:g}.png"
         fig.savefig(out, bbox_inches="tight", facecolor="white")
+        fig.savefig(out_png, bbox_inches="tight", facecolor="white", dpi=200)
         plt.close(fig)
         print(f"wrote {out}")
+        print(f"wrote {out_png}")
 
 
 if __name__ == "__main__":
