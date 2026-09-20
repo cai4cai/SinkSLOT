@@ -227,12 +227,26 @@ def _kl_gap_sparse(phi, psi, rows, cols, S, cost, a, b, eps):
     objective, evaluated at (phi, psi), restricted to the sparse support
     (rows, cols, S). Returns a float clamped to >= 0 (the feasible-plan
     reconstruction is an approximate correction, so the raw value can come
-    out very slightly negative near convergence)."""
+    out very slightly negative near convergence).
+
+    `phi`/`psi` are SinkSLOT's own dimensionless log-potentials (already in
+    "f/eps" units -- see `vals` below, which matches
+    `sinkslot_alternating_torch`'s own `(phi[rows]+psi[cols]+lam).exp()`
+    convention), NOT same-units-as-cost potentials like FlashSinkhorn's
+    `f`/`g` in `_kl_gap_dense_chunked`. The dual's linear term must be scaled
+    by `eps` to match units with the rest of the formula -- omitting it
+    (an earlier version of this function did) inflates `dual` by roughly
+    `1/eps` relative to `primal`, so `primal - dual` never approaches 0 and
+    the final `max(gap, 0.0)` silently floors the reported gap to exactly
+    0.0 regardless of true convergence, verified against a CPU toy problem
+    where the un-scaled version got stuck at a gap of exactly 0.0 even one
+    iteration in (row-marginal violation 0.11), while this scaled version
+    converges cleanly to ~1e-7 as Sinkhorn iterates converge."""
     tiny = torch.finfo(cost.dtype).tiny
     log_S = S.clamp_min(tiny).log()
     vals = (phi[rows] + psi[cols] + log_S - cost / eps).exp()
 
-    dual = float(phi @ a + psi @ b - eps * vals.sum())
+    dual = float(eps * (phi @ a + psi @ b) - eps * vals.sum())
 
     n, m = a.shape[0], b.shape[0]
     row_sum = torch.zeros(n, device=a.device, dtype=vals.dtype).index_add_(0, rows, vals).clamp_min(tiny)
