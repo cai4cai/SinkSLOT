@@ -255,6 +255,18 @@ Benchmarked against [FlashSinkhorn](https://github.com/ot-triton-lab/flash-sinkh
 [SROT](https://github.com/khainb/SROT), and
 [Spar-Sink](https://github.com/Mengyu8042/Spar-Sink).
 
+## Additional experiments
+
+Not (yet) reported in the paper, but included here:
+
+| Experiment | Script | Notes |
+|---|---|---|
+| Pixel-space color transfer, SinkSLOT vs. FlashSinkhorn | `color_transfer/main_pixel.py` | Point cloud = each image's unique RGB colors (duplicates collapsed into mass weights), typically 4-5 orders of magnitude larger than the paper's synthetic benchmarks. Three stopping modes: each library's own internal potential-change or marginal-violation check, or a genuine Fenchel primal-dual duality-gap stop computed identically for both libraries (`--stop_mode potential\|marginal\|primal_dual`). Requires a CUDA GPU and, for the FlashSinkhorn side, the `bench` extra (`pip install sinkslot[bench]`). Ships no images of its own -- point `--paintings_dir` at your own same-sized RGB photos or paintings. |
+
+```bash
+python -m color_transfer.main_pixel --paintings_dir DIR --output_dir DIR --method sinkslot
+```
+
 ## Citation
 
 If you use SinkSLOT, please cite:
