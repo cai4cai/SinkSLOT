@@ -1,7 +1,7 @@
 """Pixel-space color transfer: SinkSLOT vs. FlashSinkhorn, head to head.
 
-    python -m color_transfer.main_pixel --paintings_dir DIR --output_dir DIR --method sinkslot
-    python -m color_transfer.main_pixel --paintings_dir DIR --output_dir DIR --method flashsinkhorn
+    python -m color_transfer.main_pixel --output_dir DIR --method sinkslot
+    python -m color_transfer.main_pixel --output_dir DIR --method flashsinkhorn
 
 Requires a CUDA GPU (both solvers dispatch to fused Triton kernels with no
 pure-torch fallback here). Install the FlashSinkhorn side of the comparison
@@ -17,8 +17,9 @@ larger, more irregularly-weighted scale than the gradient_flow experiment's
 N=1000 synthetic clouds.
 
 --paintings_dir should contain same-sized RGB images (.jpg/.jpeg/.png); every
-ordered pair is run. This script ships no images of its own -- point it at
-your own photos or paintings.
+ordered pair is run. color_transfer/paintings/ ships 12 Monet paintings
+(public domain; Monet died 1926) for this purpose -- point --paintings_dir
+elsewhere to use your own photos or paintings instead.
 
 Three stopping modes (--stop_mode):
   * "potential": each library's own internal potential-change stop, trusted
@@ -89,10 +90,10 @@ interrupted can be resubmitted to pick up where it left off.
 import argparse
 import json
 import os
-import sys
 import time
 from dataclasses import dataclass
 from itertools import permutations
+from pathlib import Path
 
 import torch
 from PIL import Image
@@ -100,10 +101,14 @@ from PIL import Image
 from sinkslot.sinkhorn_solvers import sinkslot_solve
 from sinkslot.solver import sparse_sqeuclidean_cost
 
+DEFAULT_PAINTINGS_DIR = Path(__file__).parent / "paintings"
+
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--paintings_dir", type=str, required=True)
+    p.add_argument("--paintings_dir", type=str, default=str(DEFAULT_PAINTINGS_DIR),
+                    help=f"Defaults to the 12 bundled Monet paintings ({DEFAULT_PAINTINGS_DIR}); "
+                         "point elsewhere for your own same-sized RGB images.")
     p.add_argument("--output_dir", type=str, required=True)
     p.add_argument("--method", type=str, required=True, choices=["sinkslot", "flashsinkhorn"])
     p.add_argument("--eps_list", type=float, nargs="+", default=[0.01])
