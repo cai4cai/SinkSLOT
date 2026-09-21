@@ -4,7 +4,7 @@
   "eps": 0.1,
   "tol": 1e-06,
   "max_iter": 2000,
-  "check_every": 50,
+  "check_every": 10,
   "pair": [
     "banks-of-rivers-the-thames-hampton-court-first-week-of-october-1874.jpg",
     "the-toques-at-saint-arnoult-1891.jpg"
@@ -14,16 +14,72 @@
   "setup_time": 0.0,
   "checkpoints": [
     {
+      "iters": 10,
+      "time": 0.20953228196594864,
+      "marginal_viol": 0.0009633582085371017,
+      "primal_dual_gap": 0.0036976213217712953,
+      "cost": 0.06680648645851761,
+      "converged": false
+    },
+    {
+      "iters": 20,
+      "time": 0.3773879579966888,
+      "marginal_viol": 0.0003606583923101425,
+      "primal_dual_gap": 0.0022805294604040724,
+      "cost": 0.0711127640097402,
+      "converged": false
+    },
+    {
+      "iters": 30,
+      "time": 0.5658010339830071,
+      "marginal_viol": 0.00013156048953533173,
+      "primal_dual_gap": 0.0009442422655411079,
+      "cost": 0.07312981260474771,
+      "converged": false
+    },
+    {
+      "iters": 40,
+      "time": 0.754031041986309,
+      "marginal_viol": 4.735589027404785e-05,
+      "primal_dual_gap": 0.00035436072794255147,
+      "cost": 0.07391857297625393,
+      "converged": false
+    },
+    {
       "iters": 50,
-      "time": 0.96269392198883,
+      "time": 0.9425243270234205,
       "marginal_viol": 1.695193350315094e-05,
       "primal_dual_gap": 0.00012880063732154806,
       "cost": 0.0742095101159066,
       "converged": false
     },
     {
+      "iters": 60,
+      "time": 1.1307244980125688,
+      "marginal_viol": 6.066635251045227e-06,
+      "primal_dual_gap": 4.631168849300593e-05,
+      "cost": 0.07431465125409886,
+      "converged": false
+    },
+    {
+      "iters": 70,
+      "time": 1.3192587899975479,
+      "marginal_viol": 2.1923333406448364e-06,
+      "primal_dual_gap": 1.6565422993157497e-05,
+      "cost": 0.0743523683049716,
+      "converged": false
+    },
+    {
       "iters": 80,
-      "time": 1.5081715740379877,
+      "time": 1.5074647820438258,
+      "marginal_viol": 7.674098014831543e-07,
+      "primal_dual_gap": 5.926808808003059e-06,
+      "cost": 0.07436587492702529,
+      "converged": false
+    },
+    {
+      "iters": 80,
+      "time": 1.5075130519689992,
       "marginal_viol": 7.674098014831543e-07,
       "primal_dual_gap": 5.926808808003059e-06,
       "cost": 0.07436587492702529,
