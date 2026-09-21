@@ -33,16 +33,18 @@ the iterations figure only (a fixed value on the y-axis, so it renders the
 same regardless of x-axis choice -- drawn once to avoid a redundant legend
 entry on both figures).
 
-Log-scale y-axis in every panel: checkpoints where a metric reads exactly
-0.0 (trajectory.py's own documented max(gap, 0.0) clamp) are dropped from
-that specific line before plotting, per trajectory.py's own module
-docstring -- not treated as real near-zero values. Each trace's final
+Log-scale y-axis in every panel. primal_dual_gap is abs(primal - dual)
+(see main_pixel.py's _kl_gap_sparse/_kl_gap_dense_chunked and trajectory.py's
+own docstring), not clamped to >= 0, so it is virtually always plottable --
+the exactly-0.0/None skip below is a defensive no-op for the near-impossible
+float coincidence, kept in case a metric is ever missing rather than tiny,
+not because zeros are expected in normal operation. Each trace's final
 (converged) point is marked with a star, since that is the point the
-method actually stopped at, not just the largest value plotted. If every
-trace is empty for a metric (as currently happens for primal_dual_gap at
-tol=1e-6 -- all four methods converge on marginal violation before their
-raw gap turns positive), the panel is kept and annotated explaining why,
-rather than silently left blank.
+method actually stopped at (by marginal violation, in every case -- see
+trajectory.py), not just the largest value plotted. The empty-panel
+fallback below is a defensive path for the case where a metric genuinely
+has nothing to plot (e.g. missing trajectory files), not something normal
+runs are expected to hit anymore.
 """
 
 import argparse
@@ -121,19 +123,14 @@ def _render(traces, x_key, x_label, output_path):
         if any_plotted:
             ax.legend(fontsize=8, loc="upper right")
         else:
-            # every trace's value at every checkpoint was exactly 0.0 (the
-            # max(gap, 0.0) clamp firing everywhere) -- explain why the
-            # panel is blank rather than leaving an unexplained empty log
-            # axis, per the user's explicit choice to keep both panels.
-            tol = traces[0][2].get("tol")
+            # Defensive fallback: every trace was empty for this metric (e.g.
+            # missing trajectory files, or every checkpoint's value was None).
+            # Not expected to fire for primal_dual_gap anymore now that it's
+            # abs(primal - dual) rather than a >= 0 clamp -- see module
+            # docstring -- but kept so a genuinely empty panel is explained
+            # rather than left as an unlabeled blank log axis.
             ax.set_yticks([])
-            ax.text(0.5, 0.5,
-                    f"All methods converged (marginal violation ≤ tol"
-                    + (f"={tol:g}" if tol is not None else "")
-                    + f") before their raw {metric_title.lower()} crossed from\n"
-                    "negative to positive (main_pixel.py's own documented "
-                    "max(gap, 0.0) clamp -- see trajectory.py's docstring).\n"
-                    "No non-zero values to plot at this tolerance.",
+            ax.text(0.5, 0.5, f"No {metric_title.lower()} data to plot.",
                     ha="center", va="center", transform=ax.transAxes,
                     fontsize=9, color="dimgrey", wrap=True)
 

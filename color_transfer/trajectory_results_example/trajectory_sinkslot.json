@@ -11,45 +11,45 @@
   ],
   "n": 40711,
   "m": 56488,
-  "setup_time": 0.07146546401781961,
+  "setup_time": 0.06888864596839994,
   "checkpoints": [
     {
       "iters": 50,
-      "time": 0.15323993901256472,
+      "time": 0.14490459294756874,
       "marginal_viol": 0.00014178454875946045,
-      "primal_dual_gap": 0.0,
+      "primal_dual_gap": 0.0009671226143836975,
       "cost": 0.05254363641142845,
       "converged": false
     },
     {
       "iters": 100,
-      "time": 0.11469172697979957,
+      "time": 0.11222959397127852,
       "marginal_viol": 2.9455870389938354e-05,
-      "primal_dual_gap": 0.0,
+      "primal_dual_gap": 0.00023978948593139648,
       "cost": 0.05346633493900299,
       "converged": false
     },
     {
       "iters": 150,
-      "time": 0.13579190004384145,
+      "time": 0.13337147800484672,
       "marginal_viol": 6.185844540596008e-06,
-      "primal_dual_gap": 0.0,
+      "primal_dual_gap": 5.206838250160217e-05,
       "cost": 0.05366984382271767,
       "converged": false
     },
     {
       "iters": 200,
-      "time": 0.15148835704894736,
+      "time": 0.14343266194919124,
       "marginal_viol": 1.301988959312439e-06,
-      "primal_dual_gap": 0.0,
+      "primal_dual_gap": 1.1000782251358032e-05,
       "cost": 0.05371314287185669,
       "converged": false
     },
     {
       "iters": 209,
-      "time": 0.14853302499977872,
+      "time": 0.14574782300041988,
       "marginal_viol": 9.760260581970215e-07,
-      "primal_dual_gap": 0.0,
+      "primal_dual_gap": 8.314847946166992e-06,
       "cost": 0.05371597036719322,
       "converged": true
     }

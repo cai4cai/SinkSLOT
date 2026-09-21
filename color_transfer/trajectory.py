@@ -81,18 +81,21 @@ including for SinkSLOT.
 
 Requires a CUDA GPU, same as main_pixel.py.
 
-primal_dual_gap can read exactly 0.0 for many early checkpoints -- this is
-main_pixel.py's _kl_gap_sparse/_kl_gap_dense_chunked own documented
-max(gap, 0.0) clamp, not a bug: verified directly (raw, unclamped
-primal-dual value checked across n_iters=10..3000 on the default pair)
-that the true value is genuinely negative early on -- a known property of
-the feasible-plan-reconstruction approximation these functions use, whose
-error shrinks smoothly and monotonically alongside marginal violation and
-crosses over to genuinely positive once well-converged, not a stuck or
-unbounded artifact. Practical consequence: since a log-scale y-axis can't
-plot a literal 0.0, any plotting code consuming this script's output
-should skip checkpoints where primal_dual_gap == 0.0 for that curve
-specifically, rather than treat them as real (tiny) values.
+primal_dual_gap is abs(primal - dual), not max(primal - dual, 0.0):
+_kl_gap_sparse/_kl_gap_dense_chunked's feasible-plan-reconstruction
+approximation makes the raw (primal - dual) value genuinely negative far
+from convergence (verified directly: raw, unclamped value checked across
+n_iters=10..3000 on the default pair, shrinking smoothly and monotonically
+alongside marginal violation and crossing over to genuinely positive once
+well-converged, not a stuck or unbounded artifact) -- clamping that to 0.0
+would silently report "perfectly converged" for a checkpoint nowhere close,
+indistinguishable on a plot or in a stopping check from genuine convergence
+(this is why the clamped version's log-scale plot used to be empty for
+long stretches: this script found nothing but a wall of 0.0s to plot, not
+because the metric was uninformative). abs() keeps the true magnitude of
+the duality violation on both sides of the crossover, at the cost of the
+sign -- not needed here, since this value is only ever read as a
+convergence indicator (small vs not small).
 
 Why this is a separate script from main_pixel.py: main_pixel.py records one
 number per (pair, eps) -- whichever quantity --stop_mode selects, at

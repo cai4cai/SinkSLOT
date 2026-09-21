@@ -443,9 +443,18 @@ def flashsinkhorn_run(sc, tc, sw, tw, eps, n_iters, stop, block_n=2048):
 def _kl_gap_sparse(phi, psi, rows, cols, S, cost, a, b, eps):
     """Fenchel primal-dual gap for SinkSLOT's <C,P> + eps*KL(P||P^SOT)
     objective, evaluated at (phi, psi), restricted to the sparse support
-    (rows, cols, S). Returns a float clamped to >= 0 (the feasible-plan
-    reconstruction is an approximate correction, so the raw value can come
-    out very slightly negative near convergence).
+    (rows, cols, S). Returns abs(primal - dual), not max(primal - dual, 0.0):
+    the feasible-plan reconstruction is an approximate correction, so the
+    raw value can come out genuinely negative far from convergence (a known,
+    verified transient, not a bug -- see trajectory.py's own docstring for
+    the measured trajectory), and clamping to 0.0 in that regime silently
+    reports "perfectly converged" for checkpoints that are nowhere close,
+    indistinguishable from genuine convergence on a plot or in a stopping
+    check. abs() keeps the true magnitude of the duality violation in both
+    directions, at the cost of losing the sign (whether the estimate is
+    optimistic or pessimistic) -- not needed here, since this value is only
+    ever used as a convergence indicator (small vs not small), not to bound
+    the true objective from one side.
 
     `phi`/`psi` are SinkSLOT's own dimensionless log-potentials (already in
     "f/eps" units -- see `vals` below, which matches
@@ -476,7 +485,7 @@ def _kl_gap_sparse(phi, psi, rows, cols, S, cost, a, b, eps):
     entropy = (P_feas[positive] * (P_feas[positive].clamp_min(tiny).log() - log_S[positive] - 1.0)).sum()
     primal = float((cost * P_feas).sum() + eps * entropy)
 
-    return max(primal - dual, 0.0)
+    return abs(primal - dual)
 
 
 def _kl_gap_dense_chunked(f, g, sc, tc, sw, tw, eps, block_n=2048):
@@ -485,7 +494,9 @@ def _kl_gap_dense_chunked(f, g, sc, tc, sw, tw, eps, block_n=2048):
     dense (n,m) tensor: the implied plan is recomputed from (f,g) in three
     row-blocked passes (row sums; column sums of the row-rescaled
     intermediate; final feasible plan + primal objective), mirroring
-    flashsinkhorn_run's own chunked cost computation."""
+    flashsinkhorn_run's own chunked cost computation. Returns
+    abs(primal - dual), not max(primal - dual, 0.0) -- see _kl_gap_sparse's
+    own docstring for why."""
     n, m = sc.shape[0], tc.shape[0]
     tiny = torch.finfo(sc.dtype).tiny
     log_a = sw.clamp_min(tiny).log()
@@ -530,7 +541,7 @@ def _kl_gap_dense_chunked(f, g, sc, tc, sw, tw, eps, block_n=2048):
         del C_blk, P_blk, step1, P_feas
     primal = primal_lin + eps * entropy
 
-    return max(primal - dual, 0.0)
+    return abs(primal - dual)
 
 
 def sinkslot_run_primal_dual(sc, tc, sw, tw, eps, L, seed, max_iter, tol, check_every):

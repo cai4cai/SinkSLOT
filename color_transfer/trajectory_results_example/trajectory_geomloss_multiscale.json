@@ -15,50 +15,50 @@
   "checkpoints": [
     {
       "iters": 50,
-      "time": 0.4067792220157571,
+      "time": 0.3905439780210145,
       "marginal_viol": 0.00029691867530345917,
-      "primal_dual_gap": 0.0,
-      "cost": 0.06911108619533479,
+      "primal_dual_gap": 0.0033049975245376118,
+      "cost": 0.06911108712665737,
       "converged": false
     },
     {
       "iters": 100,
-      "time": 0.7568051369744353,
-      "marginal_viol": 8.611753582954407e-05,
-      "primal_dual_gap": 0.0,
-      "cost": 0.07269209099467844,
+      "time": 0.7582864330033772,
+      "marginal_viol": 8.611567318439484e-05,
+      "primal_dual_gap": 0.001242312497925016,
+      "cost": 0.07269209169317037,
       "converged": false
     },
     {
       "iters": 150,
-      "time": 1.1325128210010007,
-      "marginal_viol": 2.4469569325447083e-05,
-      "primal_dual_gap": 0.0,
-      "cost": 0.07388354447903112,
+      "time": 1.1338583789765835,
+      "marginal_viol": 2.446584403514862e-05,
+      "primal_dual_gap": 0.0003751312149688629,
+      "cost": 0.07388354541035369,
       "converged": false
     },
     {
       "iters": 200,
-      "time": 1.5357934460043907,
-      "marginal_viol": 6.90855085849762e-06,
-      "primal_dual_gap": 0.0,
-      "cost": 0.074234330910258,
+      "time": 1.5194778460427187,
+      "marginal_viol": 6.906688213348389e-06,
+      "primal_dual_gap": 0.00010750320507213473,
+      "cost": 0.07423433160874993,
       "converged": false
     },
     {
       "iters": 250,
-      "time": 1.9017206180142239,
-      "marginal_viol": 1.957640051841736e-06,
-      "primal_dual_gap": 0.0,
-      "cost": 0.07433421432506293,
+      "time": 1.9052562900469638,
+      "marginal_viol": 1.953914761543274e-06,
+      "primal_dual_gap": 3.0356415663845837e-05,
+      "cost": 0.07433421351015568,
       "converged": false
     },
     {
       "iters": 300,
-      "time": 2.2773173350142315,
-      "marginal_viol": 5.681067705154419e-07,
-      "primal_dual_gap": 0.0,
-      "cost": 0.07436238339869305,
+      "time": 2.2812564469641075,
+      "marginal_viol": 5.6438148021698e-07,
+      "primal_dual_gap": 8.527899626645241e-06,
+      "cost": 0.07436238304944709,
       "converged": true
     }
   ]

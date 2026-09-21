@@ -15,49 +15,49 @@
   "checkpoints": [
     {
       "iters": 50,
-      "time": 0.5197200159891509,
+      "time": 0.5105346100172028,
       "marginal_viol": 0.0003115721046924591,
-      "primal_dual_gap": 0.0,
+      "primal_dual_gap": 0.003393733414122836,
       "cost": 0.0688915245118551,
       "converged": false
     },
     {
       "iters": 100,
-      "time": 1.0069705140194856,
+      "time": 1.0058342959964648,
       "marginal_viol": 9.036622941493988e-05,
-      "primal_dual_gap": 0.0,
+      "primal_dual_gap": 0.0012979059945791988,
       "cost": 0.07261221116641536,
       "converged": false
     },
     {
       "iters": 150,
-      "time": 1.5032413830049336,
+      "time": 1.5053005570080131,
       "marginal_viol": 2.5665387511253357e-05,
-      "primal_dual_gap": 0.0,
+      "primal_dual_gap": 0.00039298481424339393,
       "cost": 0.07385988289024681,
       "converged": false
     },
     {
       "iters": 200,
-      "time": 2.002513387997169,
+      "time": 2.0024828080204315,
       "marginal_viol": 7.238239049911499e-06,
-      "primal_dual_gap": 0.0,
+      "primal_dual_gap": 0.00011264503118581931,
       "cost": 0.07422764174407348,
       "converged": false
     },
     {
       "iters": 250,
-      "time": 2.503427572955843,
+      "time": 2.5024476689868607,
       "marginal_viol": 2.0470470190048218e-06,
-      "primal_dual_gap": 0.0,
+      "primal_dual_gap": 3.181768697686771e-05,
       "cost": 0.07433233596384525,
       "converged": false
     },
     {
       "iters": 300,
-      "time": 2.999679376021959,
+      "time": 2.9984398530214094,
       "marginal_viol": 5.904585123062134e-07,
-      "primal_dual_gap": 0.0,
+      "primal_dual_gap": 8.939107647168432e-06,
       "cost": 0.07436185103142634,
       "converged": true
     }

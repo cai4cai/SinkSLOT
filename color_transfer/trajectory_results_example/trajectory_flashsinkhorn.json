@@ -15,17 +15,17 @@
   "checkpoints": [
     {
       "iters": 50,
-      "time": 0.9630833130213432,
+      "time": 0.96269392198883,
       "marginal_viol": 1.695193350315094e-05,
-      "primal_dual_gap": 0.0,
+      "primal_dual_gap": 0.00012880063732154806,
       "cost": 0.0742095101159066,
       "converged": false
     },
     {
       "iters": 80,
-      "time": 1.5073391870246269,
+      "time": 1.5081715740379877,
       "marginal_viol": 7.674098014831543e-07,
-      "primal_dual_gap": 0.0,
+      "primal_dual_gap": 5.926808808003059e-06,
       "cost": 0.07436587492702529,
       "converged": true
     }
