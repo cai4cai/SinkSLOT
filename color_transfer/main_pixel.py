@@ -82,9 +82,15 @@ rather than benchmarking one method against itself:
     from a run that hit the iteration cap isn't comparable to one that
     actually converged.
 
-Resume-safe: if --output_dir already has a record file for this method,
-already-completed (pair, eps) rows are skipped, so a run that gets
-interrupted can be resubmitted to pick up where it left off.
+Resume-safe: if --output_dir already has a record file for this
+(method, stop_mode) pair, already-completed (pair, eps) rows are skipped,
+so a run that gets interrupted can be resubmitted to pick up where it left
+off. The record filename includes stop_mode specifically so that running
+the same method under a different --stop_mode against the same
+--output_dir starts fresh rather than silently reusing another mode's
+results (--tol/--max_iter are not part of the filename, so changing those
+against an existing --output_dir does still resume from old results --
+use a different --output_dir for a genuinely different sweep).
 """
 
 import argparse
@@ -416,7 +422,7 @@ def main():
     torch.backends.cudnn.allow_tf32 = False
 
     os.makedirs(args.output_dir, exist_ok=True)
-    out_path = os.path.join(args.output_dir, f"pixel_records_{args.method}.json")
+    out_path = os.path.join(args.output_dir, f"pixel_records_{args.method}_{args.stop_mode}.json")
     existing = load_existing(out_path)
     if existing is not None:
         print(f"Resuming from existing {out_path}")
