@@ -407,6 +407,17 @@ def main():
 
     # untimed warmup: absorb this shape's Triton/KeOps JIT/autotune cost
     # before the timed checkpoint loop, so it doesn't leak into checkpoint 1.
+    # Uses the SAME stop mode/code path as the timed loop below (not
+    # stop=None/threshold=None) -- an earlier version warmed up the "fixed"
+    # branch while the timed loop used "marginal", which are genuinely
+    # different code paths in these solvers (confirmed for SinkSLOT: the
+    # "marginal" branch's own torch.utils.swap_tensors-based update and
+    # violation reduction are never exercised by a "fixed"-mode warmup), so
+    # the first timed call paid a real, un-absorbed one-time cost -- visible
+    # as SinkSLOT's first checkpoint (iters=10) taking LONGER than several
+    # later ones (iters=20..90) despite doing less nominal work, which made
+    # the runtime-axis plot briefly move backward in time right at the
+    # start.
     if args.method == "sinkslot":
         from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
         from sinkslot.solver import sot_plan_coo, sparse_sqeuclidean_cost, to_csr
@@ -418,21 +429,25 @@ def main():
         c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, tc.shape[0])
         sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
                                      sw.log(), tw.log(), sc.shape[0], tc.shape[0],
-                                     args.warmup_iters, stop=None)
+                                     args.warmup_iters,
+                                     stop=StopCfg(mode="marginal", max_iter=args.warmup_iters,
+                                                  check_every=1, tol=args.tol))
         torch.cuda.synchronize()
         setup_time, checkpoints = sinkslot_trajectory(
             sc, tc, sw, tw, args.eps, args.max_iter, args.check_every, args.tol, args.sinkslot_L)
     elif args.method == "flashsinkhorn":
         from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_alternating
         sinkhorn_flashstyle_alternating(sc, tc, sw, tw, eps=args.eps, n_iters=args.warmup_iters,
-                                         threshold=None, allow_tf32=False)
+                                         threshold=args.tol, check_every=5, stop_mode="marginal",
+                                         allow_tf32=False)
         torch.cuda.synchronize()
         setup_time, checkpoints = flashsinkhorn_trajectory(
             sc, tc, sw, tw, args.eps, args.max_iter, args.check_every, args.tol)
     elif args.method == "flashsinkhorn_symmetric":
         from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_symmetric
         sinkhorn_flashstyle_symmetric(sc, tc, sw, tw, use_epsilon_scaling=False, eps=args.eps,
-                                       n_iters=args.warmup_iters, threshold=None, allow_tf32=False)
+                                       n_iters=args.warmup_iters, threshold=args.tol, check_every=5,
+                                       stop_mode="marginal", allow_tf32=False)
         torch.cuda.synchronize()
         setup_time, checkpoints = flashsinkhorn_symmetric_trajectory(
             sc, tc, sw, tw, args.eps, args.max_iter, args.check_every, args.tol)
