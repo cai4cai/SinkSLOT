@@ -1,0 +1,65 @@
+{
+  "method": "flashsinkhorn_symmetric",
+  "geomloss_backend": null,
+  "eps": 0.1,
+  "tol": 1e-06,
+  "max_iter": 2000,
+  "check_every": 50,
+  "pair": [
+    "banks-of-rivers-the-thames-hampton-court-first-week-of-october-1874.jpg",
+    "the-toques-at-saint-arnoult-1891.jpg"
+  ],
+  "n": 40711,
+  "m": 56488,
+  "setup_time": 0.0,
+  "checkpoints": [
+    {
+      "iters": 52,
+      "time": 1.0842034660163336,
+      "marginal_viol": 0.00029651448130607605,
+      "primal_dual_gap": 0.0,
+      "cost": 0.06911807169672102,
+      "converged": false
+    },
+    {
+      "iters": 102,
+      "time": 1.9437418019515462,
+      "marginal_viol": 8.589029312133789e-05,
+      "primal_dual_gap": 0.0,
+      "cost": 0.07269624626496807,
+      "converged": false
+    },
+    {
+      "iters": 152,
+      "time": 2.8960699719609693,
+      "marginal_viol": 2.436898648738861e-05,
+      "primal_dual_gap": 0.0,
+      "cost": 0.07388525322312489,
+      "converged": false
+    },
+    {
+      "iters": 202,
+      "time": 3.8486575040151365,
+      "marginal_viol": 6.886199116706848e-06,
+      "primal_dual_gap": 0.0,
+      "cost": 0.07423487957566977,
+      "converged": false
+    },
+    {
+      "iters": 252,
+      "time": 4.801383693993557,
+      "marginal_viol": 1.9166618585586548e-06,
+      "primal_dual_gap": 0.0,
+      "cost": 0.0743343606009148,
+      "converged": false
+    },
+    {
+      "iters": 287,
+      "time": 5.469102406001184,
+      "marginal_viol": 7.80448317527771e-07,
+      "primal_dual_gap": 0.0,
+      "cost": 0.07435733213787898,
+      "converged": true
+    }
+  ]
+}
