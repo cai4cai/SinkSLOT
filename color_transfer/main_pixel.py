@@ -1,12 +1,14 @@
-"""Pixel-space color transfer: SinkSLOT vs. FlashSinkhorn, head to head.
+"""Pixel-space color transfer: SinkSLOT vs. FlashSinkhorn vs. GeomLoss, head to head.
 
     python -m color_transfer.main_pixel --output_dir DIR --method sinkslot
     python -m color_transfer.main_pixel --output_dir DIR --method flashsinkhorn
+    python -m color_transfer.main_pixel --output_dir DIR --method geomloss --geomloss_backend online
 
-Requires a CUDA GPU (both solvers dispatch to fused Triton kernels with no
-pure-torch fallback here). Install the FlashSinkhorn side of the comparison
-via the `bench` extra (`pip install sinkslot[bench]`); SinkSLOT's own path
-needs nothing beyond the core package.
+Requires a CUDA GPU (all three solvers dispatch to fused Triton/KeOps
+kernels with no pure-torch fallback here). Install the FlashSinkhorn side
+of the comparison via the `bench` extra (`pip install sinkslot[bench]`);
+the GeomLoss side needs `geomloss` and `pykeops` (both already `dev`-extra
+dependencies); SinkSLOT's own path needs nothing beyond the core package.
 
 Point cloud: the UNIQUE RGB colors of each image, not raw pixels and not a
 palette/cluster reduction -- duplicate pixels collapse into one point, and
@@ -21,7 +23,9 @@ ordered pair is run. color_transfer/paintings/ ships 12 Monet paintings
 (public domain; Monet died 1926) for this purpose -- point --paintings_dir
 elsewhere to use your own photos or paintings instead.
 
-Three stopping modes (--stop_mode):
+Three stopping modes (--stop_mode); GeomLoss only supports the last two
+(see geomloss_run's docstring -- its low-level API exposes no internal
+stopping check at all, under any name):
   * "potential": each library's own internal potential-change stop, trusted
     directly (SinkSLOT's own "potential" name; translated to FlashSinkhorn's
     "potential_linf", since the two libraries name the same rule
@@ -29,68 +33,83 @@ Three stopping modes (--stop_mode):
     comparing to tol, FlashSinkhorn's potential_linf does not, so the same
     --tol is roughly 1/eps stricter for FlashSinkhorn than for SinkSLOT --
     can cause a spurious non-convergence at small eps if not accounted for.
-  * "marginal": each library's own internal marginal-violation stop, trusted
-    directly. Simplest to reason about, but only as trustworthy as each
-    library's own internal check actually is.
+  * "marginal": SinkSLOT's/FlashSinkhorn's own internal marginal-violation
+    stop, trusted directly. For GeomLoss, which has no internal check to
+    trust, this is instead computed post-hoc from the returned potentials
+    (_marginal_violation_dense_chunked) via the same restart-based
+    checkpointing "primal_dual" always needs (see below) -- simplest to
+    reason about for SinkSLOT/FlashSinkhorn, but only as trustworthy as
+    each library's own internal check actually is; exact but more
+    expensive for GeomLoss.
   * "primal_dual": a genuine Fenchel primal-dual duality-gap stop, computed
-    identically for both libraries in this script (_kl_gap_sparse /
-    _kl_gap_dense_chunked below) rather than trusting either library's own
-    internal signal. Both solvers regularize toward a non-uniform reference
-    measure (SinkSLOT's sparse P^SOT; FlashSinkhorn's product coupling
-    a⊗b), so the gap used here is the generalized-KL Fenchel dual for a
-    normalized reference measure Q (sum(Q)=1):
+    identically for all three methods in this script (_kl_gap_sparse /
+    _kl_gap_dense_chunked below) rather than trusting any library's own
+    internal signal. All three solvers regularize toward a non-uniform
+    reference measure (SinkSLOT's sparse P^SOT; FlashSinkhorn's and
+    GeomLoss's shared product coupling a⊗b), so the gap used here is the
+    generalized-KL Fenchel dual for a normalized reference measure Q
+    (sum(Q)=1):
         dual(f,g)   = <f,a> + <g,b> - eps * sum_ij Q_ij * exp((f_i+g_j-C_ij)/eps)
         primal(P)   = <C,P> + eps * sum_ij P_ij * (log(P_ij/Q_ij) - 1)
     with P the feasible plan obtained by row-then-column rescaling the
     (possibly infeasible) plan implied by (f,g) -- verified on a small CPU
     toy problem that the gap shrinks monotonically to ~0 as Sinkhorn
-    iterates converge. Neither sinkslot_solve nor
-    sinkhorn_flashstyle_alternating support warm-starting, so a genuine
-    per-check early stop can't resume from a previous call's potentials:
-    each check re-solves from scratch, at a geometrically-doubling iteration
-    budget (check_every, 2*check_every, 4*check_every, ..., capped at
-    max_iter) to bound the total restart overhead at roughly 2-3x a single
-    full-budget solve rather than 5x+ under linear stepping. This is real,
-    measurable overhead beyond the other two modes.
+    iterates converge. None of sinkslot_solve,
+    sinkhorn_flashstyle_alternating, or GeomLoss's low-level sinkhorn_loop
+    support warm-starting, so a genuine per-check early stop can't resume
+    from a previous call's potentials: each check re-solves from scratch,
+    at a geometrically-doubling iteration budget (check_every,
+    2*check_every, 4*check_every, ..., capped at max_iter) to bound the
+    total restart overhead at roughly 2-3x a single full-budget solve
+    rather than 5x+ under linear stepping. This is real, measurable
+    overhead beyond a native single-call check -- paid by SinkSLOT/
+    FlashSinkhorn only under "primal_dual", and by GeomLoss under BOTH
+    supported modes, since it has no native check under either.
 
-Fairness details, since this compares two independently-developed libraries
-rather than benchmarking one method against itself:
+Fairness details, since this compares three independently-developed
+libraries rather than benchmarking one method against itself:
   * TF32 is disabled globally (torch.backends.cuda.matmul.allow_tf32 = False
-    etc.) before either solver touches the GPU. sinkslot_solve has no
+    etc.) before any solver touches the GPU. sinkslot_solve has no
     per-call TF32 argument -- it inherits whatever the global flag happens
     to be, which defaults to enabled on Ampere+ -- while FlashSinkhorn is
     passed allow_tf32=False explicitly; without the global override this
-    would be a real, easy-to-miss precision/speed asymmetry.
+    would be a real, easy-to-miss precision/speed asymmetry. (GeomLoss's
+    KeOps kernels are not known to respect this flag either way; disabling
+    it globally is still the safest default.)
   * An untimed warmup call (small n_iters, its own --warmup_check_every so
     any periodic-check-specific kernel still fires at least once) runs
     immediately before every timed call, so a shape's first-occurrence
-    Triton JIT/autotune cost never leaks into that pair's measured time.
-    Point cloud sizes vary several-fold across a real image set, and Triton
-    kernels specialize per shape.
-  * SinkSLOT and FlashSinkhorn should be run as separate OS processes (two
+    Triton/KeOps JIT/autotune cost never leaks into that pair's measured
+    time. Point cloud sizes vary several-fold across a real image set, and
+    both kernel families specialize per shape.
+  * The three methods should be run as separate OS processes (separate
     invocations of this script with different --method, e.g. from a job
     script), not back-to-back in one process: `reset_peak_memory_stats`
     resets the counter but not the caching allocator, so one method's
-    cached blocks would pollute the other's peak-memory reading if they
+    cached blocks would pollute another's peak-memory reading if they
     shared a CUDA context.
-  * `support_size` is recorded for both methods: SinkSLOT's plan lives only
-    on its L-slice sparse support (support_size < n*m); FlashSinkhorn's is
-    the full dense grid (support_size = n*m). The reported <C,P> is
-    therefore a support-restricted-vs-dense comparison, not two estimates
-    of the same object, and the output records this explicitly.
+  * `support_size` is recorded for all three methods: SinkSLOT's plan lives
+    only on its L-slice sparse support (support_size < n*m); FlashSinkhorn's
+    and GeomLoss's are the full dense grid (support_size = n*m) even though
+    neither ever materializes it. The reported <C,P> is therefore a
+    support-restricted-vs-dense comparison for SinkSLOT vs. the other two,
+    not three estimates of the same object, and the output records this
+    explicitly.
   * `hit_max_iters` is recorded separately from `converged`: a cost value
     from a run that hit the iteration cap isn't comparable to one that
     actually converged.
 
 Resume-safe: if --output_dir already has a record file for this
-(method, stop_mode) pair, already-completed (pair, eps) rows are skipped,
-so a run that gets interrupted can be resubmitted to pick up where it left
-off. The record filename includes stop_mode specifically so that running
-the same method under a different --stop_mode against the same
---output_dir starts fresh rather than silently reusing another mode's
-results (--tol/--max_iter are not part of the filename, so changing those
-against an existing --output_dir does still resume from old results --
-use a different --output_dir for a genuinely different sweep).
+(method, stop_mode) combination (also keyed by --geomloss_backend when
+--method geomloss), already-completed (pair, eps) rows are skipped, so a
+run that gets interrupted can be resubmitted to pick up where it left off.
+Keying the filename this way means running the same method under a
+different --stop_mode (or, for geomloss, a different --geomloss_backend)
+against the same --output_dir starts fresh rather than silently reusing
+another configuration's results (--tol/--max_iter are not part of the
+filename, so changing those against an existing --output_dir does still
+resume from old results -- use a different --output_dir for a genuinely
+different sweep).
 """
 
 import argparse
@@ -116,9 +135,13 @@ def parse_args():
                     help=f"Defaults to the 12 bundled Monet paintings ({DEFAULT_PAINTINGS_DIR}); "
                          "point elsewhere for your own same-sized RGB images.")
     p.add_argument("--output_dir", type=str, required=True)
-    p.add_argument("--method", type=str, required=True, choices=["sinkslot", "flashsinkhorn"])
+    p.add_argument("--method", type=str, required=True, choices=["sinkslot", "flashsinkhorn", "geomloss"])
     p.add_argument("--eps_list", type=float, nargs="+", default=[0.01])
     p.add_argument("--sinkslot_L", type=int, default=100)
+    p.add_argument("--geomloss_backend", type=str, default="online", choices=["online", "multiscale"],
+                    help="Only used by --method geomloss: 'online' (KeOps, flat) or 'multiscale' "
+                         "(KeOps, coarse-to-fine for every iteration but the last). See "
+                         "_geomloss_solve_online / _geomloss_solve_multiscale.")
     p.add_argument("--max_iter", type=int, default=5000)
     p.add_argument("--stop_mode", type=str, default="potential",
                     choices=["potential", "marginal", "primal_dual"],
@@ -195,6 +218,195 @@ def sinkslot_run(sc, tc, sw, tw, eps, L, seed, n_iters, stop):
     converged_out = bool(converged) if converged is not None else None
     viol_out = float(viol) if viol is not None else None
     return cost_val, int(it), converged_out, viol_out, int(rows.shape[0])
+
+
+def _geomloss_solve_online(sc, tc, sw, tw, eps, n_iters):
+    """Raw call into GeomLoss's low-level, KeOps-backed ("online") Sinkhorn
+    loop: debias=False (a single, non-debiased entropic OT plan, matching
+    sinkslot_run/flashsinkhorn_run's own convention, not a Sinkhorn
+    divergence), fixed n_iters. Like sinkslot_solve/
+    sinkhorn_flashstyle_alternating, exposes no warm-start parameter, but
+    unlike them also exposes NO internal stopping check at all at this
+    level (no stop_mode/threshold argument to pass) -- see geomloss_run.
+
+    Uses the online (KeOps) backend, not the dense/tensorized one: at this
+    experiment's scale (up to ~2.5x10^5 unique colors per image), a dense
+    (n,m) cost tensor would need tens of GB and OOM even on an 80GB GPU --
+    the same reason FlashSinkhorn's own fused kernels never materialize one
+    either (see sinkslot/bench/bench_forward.py's bench_geomloss_online,
+    which this mirrors). See _geomloss_solve_multiscale for the other
+    available backend.
+
+    Cost convention: SqDist(X,Y) = ||x-y||^2, matching this script's and
+    FlashSinkhorn's own convention exactly -- unlike GeomLoss's high-level
+    SamplesLoss/cost_routines[2], which use 0.5*||x-y||^2, no eps/output
+    correction is needed here since this cost is never built through
+    cost_routines.
+
+    Returns (f, g): potentials on (source, target), in FlashSinkhorn's
+    convention (same-as-cost-scale, entering (f+g-C)/eps) -- not SinkSLOT's
+    own already-eps-divided phi/psi convention (see _kl_gap_sparse's
+    docstring for that contrast), so _kl_gap_dense_chunked and
+    flashsinkhorn_run's own chunked-cost pattern both apply unchanged.
+    """
+    from functools import partial
+
+    from geomloss._legacy.sinkhorn_divergence import log_weights, sinkhorn_loop
+    from geomloss._legacy.sinkhorn_samples import lse_genred, softmin_online
+
+    d = sc.shape[1]
+    a_log, b_log = log_weights(sw), log_weights(tw)
+    softmin = partial(softmin_online, log_conv=lse_genred("SqDist(X,Y)", d))
+    C_xy = (sc, tc.detach())
+    C_yx = (tc, sc.detach())
+    eps_list = [eps] * n_iters
+    _, _, g_ab, f_ba = sinkhorn_loop(
+        softmin, a_log, b_log, None, None,
+        C_xy, C_yx, eps_list, rho=None, debias=False, last_extrapolation=False,
+    )
+    return f_ba.squeeze(0), g_ab.squeeze(0)
+
+
+def _geomloss_solve_multiscale(sc, tc, sw, tw, eps, n_iters, coarse_frac=0.25):
+    """Raw call into GeomLoss's low-level, coarse-to-fine ("multiscale")
+    Sinkhorn loop: debias=False, fixed n_iters at fixed eps -- unlike the
+    reference sinkhorn_multiscale (geomloss._legacy.sinkhorn_samples),
+    which derives an annealed eps_list from scaling_parameters and decides
+    WHEN to jump from coarse to fine from that schedule, this experiment
+    fixes both eps and n_iters like every other arm, so there is no
+    schedule to derive a jump point from.
+
+    Policy used here: jump from the voxel-clustered, reduced point cloud to
+    the full-resolution one after `coarse_frac` (default 1/4) of the
+    iteration budget, then keep genuinely iterating at full resolution for
+    the rest. An EARLIER version of this function jumped only on the very
+    last iteration, to sidestep GeomLoss's kernel_truncation step (invoked
+    for any jump that isn't the last one) -- but that meant no real
+    fine-resolution refinement ever happened, only a single one-shot
+    coarse-to-fine extrapolation: verified on GPU that the resulting
+    marginal violation was stuck at a hard floor (~1.29e-6) regardless of
+    whether n_iters was 200, 400, or 2000, and that _kl_gap_dense_chunked's
+    primal-dual gap was always (falsely) ~0 for these non-optimal
+    extrapolated potentials -- the same failure signature as the
+    _kl_gap_sparse bug elsewhere in this file, here from a different root
+    cause (non-optimal potentials, not a units bug).
+
+    Jumping before the last iteration turned out not to need the
+    cost-convention care this originally seemed to require: passing
+    truncate=None makes GeomLoss's own kernel_truncation a pure passthrough
+    (see its source -- `if truncate is None: return C_xy_, C_yx_`) that
+    never calls its own `cost` callable at all, so there is no second cost
+    convention to keep consistent with `softmin`'s log_conv formula below,
+    and "SqDist(X,Y)" (this script's own ||x-y||^2 convention, matching
+    _geomloss_solve_online exactly, not cost_formulas[2]'s 0.5*||x-y||^2)
+    can be used throughout unchanged.
+
+    Returns (f, g): potentials on the ORIGINAL (unclustered, unsorted)
+    (source, target) point order, de-permuted from clusterize's own
+    internal sort -- same contract as _geomloss_solve_online.
+    """
+    from functools import partial
+
+    from geomloss._legacy.sinkhorn_divergence import log_weights, scaling_parameters, sinkhorn_loop
+    from geomloss._legacy.sinkhorn_samples import (
+        clusterize, extrapolate_samples, kernel_truncation, keops_lse, softmin_multiscale,
+    )
+
+    d = sc.shape[1]
+    # Only the diameter is used, from GeomLoss's own formula relating cluster
+    # size to point-cloud diameter -- the eps_list/eps/rho this also returns
+    # are discarded, since this experiment fixes eps itself.
+    diameter, _, _, _ = scaling_parameters(sc, tc, 2, eps ** 0.5, None, None, 0.5)
+    cluster_scale = diameter / (d ** 0.5 * 2000 ** (1.0 / d))
+
+    [a_c, a], [x_c, x], [ranges_x], perm_x = clusterize(sw, sc, scale=cluster_scale)
+    [b_c, b], [y_c, y], [ranges_y], perm_y = clusterize(tw, tc, scale=cluster_scale)
+
+    softmin = partial(softmin_multiscale, log_conv=keops_lse("SqDist(X,Y)", d, dtype=str(sc.dtype)[6:]))
+    extrapolate = partial(extrapolate_samples, softmin=softmin)
+
+    a_logs = [log_weights(a_c), log_weights(a)]
+    b_logs = [log_weights(b_c), log_weights(b)]
+    C_xys = [(x_c, y_c.detach(), ranges_x, ranges_y, None), (x, y.detach(), None, None, None)]
+    C_yxs = [(y_c, x_c.detach(), ranges_y, ranges_x, None), (y, x.detach(), None, None, None)]
+    eps_list = [eps] * n_iters
+    jumps = [max(1, min(n_iters - 1, round(n_iters * coarse_frac)))]
+
+    _, _, g_ab, f_ba = sinkhorn_loop(
+        softmin, a_logs, b_logs, None, None, C_xys, C_yxs, eps_list,
+        rho=None, jumps=jumps, kernel_truncation=partial(kernel_truncation, verbose=False),
+        truncate=None, extrapolate=extrapolate, debias=False, last_extrapolation=False,
+    )
+    f_ba, g_ab = f_ba.squeeze(0), g_ab.squeeze(0)
+    f = torch.empty_like(f_ba)
+    f[perm_x] = f_ba
+    g = torch.empty_like(g_ab)
+    g[perm_y] = g_ab
+    return f, g
+
+
+_GEOMLOSS_BACKENDS = {"online": _geomloss_solve_online, "multiscale": _geomloss_solve_multiscale}
+
+
+def _marginal_violation_dense_chunked(f, g, sc, tc, sw, tw, eps, block_n=2048):
+    """Max row/col marginal violation of the plan implied by (f, g), for the
+    standard EOT objective <C,P> + eps*KL(P||a(x)b) (GeomLoss's/
+    FlashSinkhorn's shared reference-measure convention). Never
+    materializes a dense (n,m) tensor -- row-blocked passes, mirroring
+    _kl_gap_dense_chunked's own chunking."""
+    n, m = sc.shape[0], tc.shape[0]
+    row_sum = torch.zeros(n, device=sc.device, dtype=sc.dtype)
+    col_sum = torch.zeros(m, device=sc.device, dtype=sc.dtype)
+    for start in range(0, n, block_n):
+        end = min(start + block_n, n)
+        C_blk = torch.cdist(sc[start:end][None], tc[None], p=2).pow(2)[0]
+        P_blk = sw[start:end, None] * tw[None, :] * torch.exp(
+            (f[start:end, None] + g[None, :] - C_blk) / eps)
+        row_sum[start:end] = P_blk.sum(1)
+        col_sum += P_blk.sum(0)
+        del C_blk, P_blk
+    return float(torch.maximum((row_sum - sw).abs().max(), (col_sum - tw).abs().max()))
+
+
+def geomloss_run(sc, tc, sw, tw, eps, max_iter, tol, check_every, mode, backend="online", block_n=2048):
+    """Restart-based checkpointing for GeomLoss's low-level sinkhorn_loop.
+
+    Unlike sinkslot_solve/sinkhorn_flashstyle_alternating, GeomLoss exposes
+    no internal stopping check at all at this level under EITHER
+    --stop_mode (no "marginal"/"potential" flag to pass in), and like them,
+    no warm-start parameter -- so here BOTH stop modes checkpoint by
+    re-solving from scratch at a geometrically-doubling iteration budget
+    (whereas sinkslot/flashsinkhorn only pay this restart cost under
+    --stop_mode=primal_dual; their marginal/potential modes get a native,
+    single-call check). mode: "marginal" or "primal_dual" -- selects which
+    post-hoc quantity is checked against tol at each restart. backend:
+    "online" (KeOps, flat) or "multiscale" (KeOps, coarse-to-fine for every
+    iteration but the last -- see _geomloss_solve_multiscale). Returns
+    (cost, iters, converged, metric, support_size)."""
+    solve = _GEOMLOSS_BACKENDS[backend]
+    n, m = sc.shape[0], tc.shape[0]
+    n_try = check_every
+    last = None
+    while True:
+        f, g = solve(sc, tc, sw, tw, eps, n_try)
+        if mode == "marginal":
+            metric = _marginal_violation_dense_chunked(f, g, sc, tc, sw, tw, eps, block_n)
+        else:  # primal_dual
+            metric = _kl_gap_dense_chunked(f, g, sc, tc, sw, tw, eps, block_n)
+        cost_val = 0.0
+        for start in range(0, n, block_n):
+            end = min(start + block_n, n)
+            C_blk = torch.cdist(sc[start:end][None], tc[None], p=2).pow(2)[0]
+            P_blk = sw[start:end, None] * tw[None, :] * torch.exp(
+                (f[start:end, None] + g[None, :] - C_blk) / eps)
+            cost_val += float((P_blk * C_blk).sum())
+            del C_blk, P_blk
+        last = (cost_val, n_try, metric)
+        if metric <= tol or n_try >= max_iter:
+            break
+        n_try = min(n_try * 2, max_iter)
+    cost_val, iters, metric = last
+    return cost_val, iters, metric <= tol, metric, n * m
 
 
 def flashsinkhorn_run(sc, tc, sw, tw, eps, n_iters, stop, block_n=2048):
@@ -409,8 +621,12 @@ def already_done(records, eps, pair_idx):
 def main():
     args = parse_args()
     if args.device != "cuda" or not torch.cuda.is_available():
-        raise RuntimeError("This experiment requires a CUDA GPU (both solvers dispatch to fused "
-                            "Triton kernels with no pure-torch fallback here).")
+        raise RuntimeError("This experiment requires a CUDA GPU (all three solvers dispatch to "
+                            "fused Triton/KeOps kernels with no pure-torch fallback here).")
+    if args.method == "geomloss" and args.stop_mode == "potential":
+        raise ValueError("--method geomloss has no potential-change signal to trust (GeomLoss's "
+                          "low-level sinkhorn_loop exposes no internal stopping check at all); "
+                          "use --stop_mode marginal or primal_dual instead.")
     device = torch.device(args.device)
     dtype = torch.float32
     # SinkSLOT's matmuls (e.g. sot_plan_coo's random projections) have no
@@ -422,7 +638,8 @@ def main():
     torch.backends.cudnn.allow_tf32 = False
 
     os.makedirs(args.output_dir, exist_ok=True)
-    out_path = os.path.join(args.output_dir, f"pixel_records_{args.method}_{args.stop_mode}.json")
+    method_key = f"{args.method}_{args.geomloss_backend}" if args.method == "geomloss" else args.method
+    out_path = os.path.join(args.output_dir, f"pixel_records_{method_key}_{args.stop_mode}.json")
     existing = load_existing(out_path)
     if existing is not None:
         print(f"Resuming from existing {out_path}")
@@ -459,12 +676,19 @@ def main():
             print(f"[{pair_idx}/{P_pairs}] n={n} m={m} eps={eps} "
                   f"({os.path.basename(paths[i])} -> {os.path.basename(paths[j])})")
 
-            # untimed warmup: absorb this shape's Triton JIT/autotune cost
-            # before the timed call, using a tiny iteration budget. Under
-            # primal_dual, warmup is a single plain fixed-iters call (no gap
-            # logic) -- it only needs to touch the same kernels for JIT, not
-            # produce a meaningful result.
-            if args.stop_mode == "primal_dual":
+            # untimed warmup: absorb this shape's Triton/KeOps JIT/autotune
+            # cost before the timed call, using a tiny iteration budget.
+            # Under primal_dual (and always, for geomloss), warmup is a
+            # single plain fixed-iters call (no gap/violation logic) -- it
+            # only needs to touch the same kernels for JIT, not produce a
+            # meaningful result.
+            if args.method == "geomloss":
+                solve = _GEOMLOSS_BACKENDS[args.geomloss_backend]
+                warmup = lambda: solve(sc, tc, sw, tw, eps, args.warmup_iters)
+                real = lambda: geomloss_run(
+                    sc, tc, sw, tw, eps, args.max_iter, args.tol, args.check_every,
+                    args.stop_mode, backend=args.geomloss_backend)
+            elif args.stop_mode == "primal_dual":
                 if args.method == "sinkslot":
                     warmup = lambda: sinkslot_solve(
                         sc, tc, sw, tw, eps=eps, L=args.sinkslot_L, seed=0,
@@ -514,6 +738,7 @@ def main():
         with open(out_path, "w") as f:
             json.dump({"method": args.method, "num_images": len(paths), "num_pairs": P_pairs,
                        "sinkslot_L": args.sinkslot_L if args.method == "sinkslot" else None,
+                       "geomloss_backend": args.geomloss_backend if args.method == "geomloss" else None,
                        "stop_mode": args.stop_mode, "tol": args.tol, "max_iter": args.max_iter,
                        "warmup_iters": args.warmup_iters,
                        "records": records}, f, indent=2)
