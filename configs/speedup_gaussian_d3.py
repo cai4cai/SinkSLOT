@@ -38,7 +38,7 @@ CONFIG = BenchConfig(
     ],
     n_iters=20000,
 
-    stop_mode="potential_linf",  # not "potential" -- see configs/speedup.py's comment
+    stop_mode="potential",  # see configs/speedup.py's comment
     max_iter=10000,
     stop_tol=1e-6,
     potential_tol=1e-6,

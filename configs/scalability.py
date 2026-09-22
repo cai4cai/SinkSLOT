@@ -53,12 +53,10 @@ N_EXP3 = 10000
 
 METHODS = ["sinkslotcuda", "flash_alternating", "srot"]
 
-# shared solver policy. Use "potential_linf" (not "potential"!) for genuine
-# potential-change stopping: the CLI string "potential" is translated to
-# sinkslotcuda's marginal-equivalent mode and to SROT's own, different
-# scaling-variable check -- see bench_forward.py's translation comment near
-# sinkslot_alternating_triton's call site.
-STOP_MODE = "potential_linf"
+# shared solver policy: "potential" is the true potential-change criterion,
+# the same max(|df|,|dg|) rule for sinkslotcuda, flash_alternating and srot
+# alike (see bench_forward.py's StopCfg docstring).
+STOP_MODE = "potential"
 MAX_ITER = 20000
 STOP_TOL = 1e-6
 POTENTIAL_TOL = 1e-6

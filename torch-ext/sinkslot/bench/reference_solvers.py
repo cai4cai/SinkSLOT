@@ -166,7 +166,7 @@ def sinkslot_marginal_violation(
 def geomloss_online_native(
     sc: torch.Tensor, tc: torch.Tensor, sw: torch.Tensor, tw: torch.Tensor,
     eps: float, max_iter: int, threshold: Optional[float] = None, check_every: int = 5,
-    stop_mode: str = "potential_linf",
+    stop_mode: str = "potential",
 ) -> Tuple[torch.Tensor, torch.Tensor, int, Optional[bool], float, float]:
     """GeomLoss online (KeOps): reimplements sinkhorn_loop's own update math
     at a fixed eps (single-scale, debias=False), since sinkhorn_loop has no
@@ -175,7 +175,7 @@ def geomloss_online_native(
     same scheme as flashsinkhorn_native_run(symmetric=True); GeomLoss has no
     alternating/Gauss-Seidel option at any level.
 
-    stop_mode="potential_linf" (default): max(|df|, |dg|) < threshold, same
+    stop_mode="potential" (default): max(|df|, |dg|) < threshold, same
     rule as flashsinkhorn_native_run's own default and SinkSLOT's "potential"
     mode. stop_mode="marginal": max row/col violation of the dense a(x)b
     plan, |P_i. - a_i| / |P_.j - b_j| <= threshold, matching FlashSinkhorn's/

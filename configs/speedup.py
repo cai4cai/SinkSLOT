@@ -61,11 +61,10 @@ CONFIG = BenchConfig(
     ],
     n_iters=20000,  # vestigial under potential-change (max_iter governs the loop instead)
 
-    # "potential_linf", not "potential": the latter is Spar-Sink's own,
-    # different scaling-variable check. potential_linf is the shared
-    # max(|df|,|dg|) rule every method here (sinkslotcuda, srot,
-    # flash_alternating, spar_sink) implements the same way.
-    stop_mode="potential_linf",
+    # "potential" is the shared max(|df|,|dg|) rule every method here
+    # (sinkslotcuda, srot, flash_alternating, spar_sink) implements the same
+    # way -- not "scaling", Spar-Sink's own, different scaling-variable check.
+    stop_mode="potential",
     max_iter=10000,
     stop_tol=1e-6,
     potential_tol=1e-6,

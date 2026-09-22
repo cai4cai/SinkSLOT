@@ -615,17 +615,31 @@ class StopCfg:
 
     mode="fixed" runs exactly n_iters. mode="marginal" runs up to max_iter,
     stopping when the max (L-infinity) row/col marginal violation <= tol --
-    srot/sinkslot/sinkslotcuda/spar_sink/rand_sink's proven default (see SLOT
-    repo), and now also implemented natively in FlashSinkhorn's own solvers
-    (sinkhorn_solvers.py) for flash_symmetric/flash_alternating, so it's
-    directly comparable across every method. Not gated on total mass -- the
-    working rule doesn't check mass separately. mode="potential" stops on
-    ||du||_1+||dv||_1 <= tol (Spar-Sink's rule; no FlashSinkhorn equivalent --
-    Flash falls back to potential_linf for this mode). mode="potential_linf" stops
-    once the dual potentials themselves stop moving, max(|Δf|, |Δg|) < tol since
-    the last check -- FlashSinkhorn's own native rule (see sinkhorn_solvers.py),
-    reproduced verbatim for srot/sinkslot/sinkslotcuda/spar_sink/rand_sink so every
-    method can share the identical stopping rule, check frequency and threshold.
+    srot/sinkslot/sinkslotcuda/spar_sink/rand_sink's original default (see SLOT
+    repo), and also implemented natively in FlashSinkhorn's own solvers
+    (sinkhorn_solvers.py) for flash_symmetric/flash_alternating (though Flash
+    no longer distinguishes it from mode="potential" -- see bench_flashsinkhorn).
+    Not gated on total mass -- the working rule doesn't check mass separately.
+
+    mode="potential" (the default policy for every published benchmark here)
+    stops once the dual potentials themselves stop moving, max(|Δf|, |Δg|) <
+    tol since the last check -- FlashSinkhorn's own native rule (see
+    sinkhorn_solvers.py), reproduced verbatim for srot/sinkslot/sinkslotcuda/
+    spar_sink/rand_sink so every method shares the identical stopping rule,
+    check frequency and threshold (verified: SinkSLOT's eps*max(|Δphi|,
+    |Δpsi|) and Flash's max(|Δf|,|Δg|) are the same quantity once phi=f/eps is
+    accounted for).
+
+    mode="scaling" stops on max(||du||_inf, ||dv||_inf) <= potential_tol, the
+    change in the scaling vectors u=exp(f/eps), v=exp(g/eps) -- Spar-Sink's
+    own rule (Li, Yu, Li, Meng, JMLR), a genuinely different quantity from
+    mode="potential" above. Only meaningful for spar_sink/rand_sink (via
+    _sparsink_sinkhorn); flash_symmetric/flash_alternating and geomloss_online
+    fall back to mode="potential" for it (no equivalent to fall back TO
+    otherwise), but srot/sinkslot/sinkslotcuda have no such fallback and
+    would silently run it as mode="marginal"/dispatch on an unrecognized
+    string instead -- don't request mode="scaling" for those.
+
     Checked every `check_every` iterations. `fixed(n)` is the no-stopping default.
 
     Known asymmetry: the two FlashSinkhorn backends aren't equally cheap to check
@@ -855,12 +869,14 @@ def _srot_sinkhorn(
     which reduces to the standard updates when pi_SOT = a (x) b.
 
     Returns (f, g, iters_run, converged, final_viol). stop None / "fixed" runs
-    n_iters. "marginal"/"potential" run to stop.max_iter, stopping on the max
-    (L-infinity) marginal violation (row marginal = exp(f/eps + LSE_row(g));
-    col is exactly b) -- matches the SLOT repo's actual working "marg_viol"
-    rule, not a total-variation sum (which is unreachable at n=10,000
-    regardless of convergence).
-    "potential_linf" reproduces FlashSinkhorn's own native rule exactly: stop once
+    n_iters. "marginal" (also the fallback for any mode besides "fixed"/
+    "potential", including "scaling" -- SROT has no scaling-variable rule)
+    runs to stop.max_iter, stopping on the max (L-infinity) marginal
+    violation (row marginal = exp(f/eps + LSE_row(g)); col is exactly b) --
+    matches the SLOT repo's actual working "marg_viol" rule, not a
+    total-variation sum (which is unreachable at n=10,000 regardless of
+    convergence).
+    "potential" reproduces FlashSinkhorn's own native rule exactly: stop once
     the dual potentials themselves stop moving, max(|Δf|, |Δg|) < stop.tol, measured
     since the last check (not the last iteration) -- see the identical check in
     sinkhorn_solvers.py. f, g here are already the standard (non-absorbed) potentials,
@@ -883,7 +899,7 @@ def _srot_sinkhorn(
             g = eps * (log_b - _col_lse(f))
         return f, g, n_iters, None, None
 
-    if mode == "potential_linf":
+    if mode == "potential":
         prev_f, prev_g = f, g
         it = 0
         converged = False
@@ -1202,8 +1218,8 @@ def bench_geomloss_online(
     sinkhorn_loop update math (verified bit-exact against it) with a real
     early-stop hook added -- sinkhorn_loop itself has none. mode="marginal"
     maps to geomloss_online_native's own "marginal" stop_mode; anything else
-    (including Spar-Sink's "potential", which has no GeomLoss equivalent,
-    same fallback bench_flashsinkhorn already uses) maps to "potential_linf",
+    (including Spar-Sink's "scaling", which has no GeomLoss equivalent, same
+    fallback bench_flashsinkhorn already uses) maps to "potential",
     FlashSinkhorn's/SinkSLOT's native potential-change rule -- the intended
     default for early stopping here, matching SinkSLOT's own "potential"
     stop mode once phi=f/eps is accounted for (verified in
@@ -1264,7 +1280,7 @@ def bench_geomloss_online(
                 rho=None, debias=False, last_extrapolation=False,
             )
     else:
-        gl_stop_mode = "marginal" if _stop.mode == "marginal" else "potential_linf"
+        gl_stop_mode = "marginal" if _stop.mode == "marginal" else "potential"
         try:
             f_ba_flat, g_ab_flat, iters_run, converged, _, _ = geomloss_online_native(
                 x, y, a, b, eps, _stop.max_iter, threshold=_stop.tol,
@@ -1670,11 +1686,11 @@ def _sparsink_sinkhorn(
             g = eps * (log_b - _col_lse(f))
         return f, g, empty, n_iters, None, None
 
-    if mode == "potential_linf":
+    if mode == "potential":
         # FlashSinkhorn's own rule, verbatim: max(|Δf|, |Δg|) < stop.tol since the
         # last check. f, g are already standard-scale here (f = eps*(...)), matching
         # Flash's unshifted potentials, so stop.tol needs no rescaling. Distinct from
-        # Spar-Sink's own "potential" mode below, which uses max change in the scaling
+        # Spar-Sink's own "scaling" mode below, which uses max change in the scaling
         # vectors u=exp(f/eps), checked every stop.check_every iterations like everyone else.
         #
         # Caveat (found while verifying this against a deep-converged reference):
@@ -1724,7 +1740,7 @@ def _sparsink_sinkhorn(
             # working "marg_viol" rule. Not gated on mass either, matching
             # SLOT exactly.
             viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
-            if stop.mode == "potential":
+            if stop.mode == "scaling":
                 # Spar-Sink's rule: max(||du||_inf, ||dv||_inf) on the scaling
                 # vectors u=exp(f/eps). Also switched from sum to max: same
                 # n-invariance reasoning as marg_viol above -- SLOT doesn't
@@ -1997,23 +2013,18 @@ def bench_sinkslot(
                             seed=seed)
 
     _stop = stop or StopCfg.fixed()
-    # sinkslot's own _STOP_MODES dropped "potential" (it was byte-for-byte
-    # identical to "marginal") and renamed "potential_linf" -> "potential"
-    # (see torch-ext/sinkslot/sinkhorn_solvers.py, issue #47) -- this CLI's
-    # --stop-mode vocabulary is unchanged (still shared with srot/spar_sink/
-    # rand_sink, where the old distinction still matters), so translate here
-    # rather than propagate the old names into sinkslot's own solve loop.
-    _sinkslot_stop_mode = {"potential": "marginal", "potential_linf": "potential"}.get(
-        _stop.mode, _stop.mode)
-    _sinkslot_stop = StopCfg(mode=_sinkslot_stop_mode, max_iter=_stop.max_iter,
-                              tol=_stop.tol, potential_tol=_stop.potential_tol,
-                              check_every=_stop.check_every)
+    # sinkslot's own _STOP_MODES = ("fixed", "marginal", "potential") (see
+    # torch-ext/sinkslot/sinkhorn_solvers.py, issue #47) now matches this
+    # CLI's own vocabulary exactly, so _stop passes straight through --
+    # unlike srot/spar_sink/rand_sink, which also support "scaling"
+    # (Spar-Sink's own, different scaling-variable rule; sinkslot has no
+    # equivalent and would not handle it).
 
     def run():
-        sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
+        sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
 
     phi, psi, iters_run, converged, final_viol = sinkslot_alternating_triton(
-        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
+        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
     cost_gap_pct = None
     bary = None
     if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
@@ -2120,19 +2131,15 @@ def bench_sinkslotcuda(
                             seed=seed)
 
     _stop = stop or StopCfg.fixed()
-    # See bench_sinkslot's matching comment: translates this CLI's stop-mode
-    # vocabulary to sinkslot's own (now 3-value) _STOP_MODES.
-    _sinkslot_stop_mode = {"potential": "marginal", "potential_linf": "potential"}.get(
-        _stop.mode, _stop.mode)
-    _sinkslot_stop = StopCfg(mode=_sinkslot_stop_mode, max_iter=_stop.max_iter,
-                              tol=_stop.tol, potential_tol=_stop.potential_tol,
-                              check_every=_stop.check_every)
+    # See bench_sinkslot's matching comment: this CLI's vocabulary now
+    # matches sinkslot's own _STOP_MODES exactly, so _stop passes straight
+    # through.
 
     def run():
-        sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
+        sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
 
     phi, psi, iters_run, converged, final_viol = sinkslot_alternating_triton(
-        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
+        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
     cost_gap_pct = None
     bary = None
     if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
@@ -3553,12 +3560,13 @@ def main() -> None:
     )
     parser.add_argument("--no-srot", action="store_true", help="Skip SROT benchmarks.")
     parser.add_argument("--no-sinkslot", action="store_true", help="Skip SinkSLOT benchmarks.")
-    parser.add_argument("--stop-mode", choices=("fixed", "marginal", "potential", "potential_linf"),
+    parser.add_argument("--stop-mode", choices=("fixed", "marginal", "potential", "scaling"),
                         default="fixed",
-                        help="Early stopping: 'fixed' runs n_iters; 'marginal'/'potential' run to "
-                             "convergence; 'potential_linf' reproduces FlashSinkhorn's own native rule "
-                             "(max L_inf change in the dual potentials) for srot/sinkslot/sinkslotcuda/"
-                             "spar_sink/rand_sink too.")
+                        help="Early stopping: 'fixed' runs n_iters; 'marginal' runs to convergence on "
+                             "the max L_inf marginal violation; 'potential' reproduces FlashSinkhorn's "
+                             "own native rule (max L_inf change in the dual potentials) for every "
+                             "method here (the default for published results); 'scaling' is Spar-Sink's "
+                             "own, different scaling-variable rule (spar_sink/rand_sink only).")
     parser.add_argument("--max-iter", type=int, default=10000, help="Iteration cap in non-fixed stop modes.")
     parser.add_argument("--stop-tol", type=float, default=1e-4, help="Max (L-infinity) marginal-violation threshold.")
     parser.add_argument("--potential-tol", type=float, default=1e-6, help="Spar-Sink ||du||+||dv|| threshold.")
