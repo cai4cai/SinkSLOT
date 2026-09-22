@@ -193,8 +193,8 @@ CONFIG = BenchConfig(
     n_iters=50,
 
     # Convergence / early stopping (see the class docstring). The published
-    # protocol is stop_mode="marginal" (time-to-accuracy, stop_tol=1e-6); see
-    # configs/speedup.py. "fixed" here runs exactly n_iters for every method, for
+    # protocol is stop_mode="potential_linf" (time-to-accuracy, stop_tol=1e-6);
+    # see configs/speedup.py. "fixed" here runs exactly n_iters for every method, for
     # a quick per-iteration throughput check while wiring is being changed.
     stop_mode="fixed",
     max_iter=10000,

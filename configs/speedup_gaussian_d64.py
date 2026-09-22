@@ -1,9 +1,15 @@
 """Speedup benchmark, part 3 of 3 -- Gaussian only, d=64 only, "easy" high-eps
-regime. N=M=10,000, marginal stopping, stop_tol=1e-6, max_iter=20000 (up from
-configs/speedup.py's 10000 -- this sweep sits entirely in the eps range the
-earlier convcheck_d64 probe showed reliably converges, so the higher budget
-is just headroom, not expected to be needed). See configs/speedup.py's
-docstring for how the 3 speedup files relate.
+regime. N=M=10,000, potential-change stopping, stop_tol=1e-6, max_iter=20000
+(up from configs/speedup.py's 10000 -- this sweep sits entirely in the eps
+range the earlier convcheck_d64 probe showed reliably converges, so the
+higher budget is just headroom, not expected to be needed). See
+configs/speedup.py's docstring for how the 3 speedup files relate.
+
+NOTE: the completed run this docstring describes below (SROT and
+Flash-alternating in output/table1_gaussian_d64_h100/) was produced under
+stop_mode="marginal", before this config switched to "potential_linf" --
+re-running against this config now will use a different stopping rule than
+those committed results.
 
 eps: 8-point log grid spanning exactly one decade, [0.1, 1] (both endpoints
 exact -- lo=hi/10 over 7 steps), chosen so 0.1 and 1 are themselves grid
@@ -46,7 +52,7 @@ CONFIG = BenchConfig(
     ],
     n_iters=20000,
 
-    stop_mode="marginal",
+    stop_mode="potential_linf",  # not "potential" -- see configs/speedup.py's comment
     max_iter=20000,
     stop_tol=1e-6,
     potential_tol=1e-6,

@@ -1,6 +1,6 @@
 """Speedup benchmark, part 2 of 3 -- Gaussian dataset at d=3, same grid/stop
-policy as configs/speedup.py (eps/L/S all 8-point, max_iter=10000, marginal,
-stop_tol=1e-6). See configs/speedup.py's docstring for how the 3 speedup files
+policy as configs/speedup.py (eps/L/S all 8-point, max_iter=10000,
+potential-change, stop_tol=1e-6). See configs/speedup.py's docstring for how the 3 speedup files
 relate -- this one exists only because a single BenchConfig can't mix dims
 across datasets (dims applies uniformly to every dataset in cfg.datasets), so
 this Gaussian-at-d=3 slice has to be its own config.
@@ -38,7 +38,7 @@ CONFIG = BenchConfig(
     ],
     n_iters=20000,
 
-    stop_mode="marginal",
+    stop_mode="potential_linf",  # not "potential" -- see configs/speedup.py's comment
     max_iter=10000,
     stop_tol=1e-6,
     potential_tol=1e-6,
