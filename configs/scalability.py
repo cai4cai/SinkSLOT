@@ -1,15 +1,18 @@
-"""Scalability: 3 N-scaling/d-scaling experiments, 5 seeds each, SinkSLOT-CUDA
-vs SROT vs FlashSinkhorn-alternating. Same marginal stopping policy as
-configs/speedup.py: stop_tol=1e-6, max_iter=20000.
+"""Scalability: 3 N-scaling/d-scaling experiments, 5 seeds each, 6 methods --
+SinkSLOT-CUDA, SROT, FlashSinkhorn-alternating, FlashSinkhorn-symmetric,
+GeomLoss-online, Spar-Sink (plain SinkSLOT and Rand-Sink dropped: SinkSLOT-CUDA
+already covers SinkSLOT, and Rand-Sink is redundant with Spar-Sink here). Same
+potential-change stopping policy as configs/speedup.py: stop_tol=1e-6,
+max_iter=20000.
 
-Spar-Sink data was also collected for this experiment (same s = k*s0(n)
-recipe as configs/speedup.py, run over 5 seeds) but is not part of the final
-scalability figure: it fails to reach N=50,000 in experiments 1/2 (its
-sampling step builds a dense N x M mask, which exceeds torch.nonzero()'s
-int32 index limit at N=M=50,000 -- see build_sparse_kernel's docstring in
-bench_forward.py) and was dropped from the plotted comparison as a result.
-Spar-Sink is intentionally excluded from METHODS below; re-add it there if
-it's ever needed again.
+Spar-Sink does not reach N=50,000 in experiments 1/2: its sampling step builds
+a dense N x M mask, which exceeds torch.nonzero()'s int32 index limit at
+N=M=50,000 (see build_sparse_kernel's docstring in bench_forward.py). This is
+a hard framework limit, not a tuning issue -- Spar-Sink's N=50,000 units are
+still generated below (so a plain --execute correctly runs everything else),
+but expect that specific run to fail; drop that one data point from the final
+analysis, as was already done the first time Spar-Sink data was collected for
+this experiment.
 
 Not expressed as a plain BenchConfig / run.py sweep: SinkSLOT-CUDA and SROT
 both need L swept independently of N/d (a per-method axis run.py's
@@ -29,10 +32,13 @@ Experiment 3 -- d-scaling, Gaussian, N=10,000 fixed, eps=0.1, d in
   {4,8,16,32,64,128,256,512,1024}.
 
 SinkSLOT-CUDA and SROT are swept over the same 3 L values in every
-experiment. Experiment 3 (d-scaling) additionally needs --no-rmae-check on
-SinkSLOT-CUDA: at large d/L its cost_gap_pct/barycentric_sym diagnostics
-build a dense exact-OT reference that OOMs (confirmed at d>=256, L=4096);
-Flash-alternating and SROT never hit this and keep full diagnostics.
+experiment; Spar-Sink is swept over its own 4 s values (s_for(n) below,
+matching configs/speedup.py's recipe) instead. FlashSinkhorn-symmetric and
+GeomLoss-online have no such per-method axis and run once per (n, seed).
+Experiment 3 (d-scaling) additionally needs --no-rmae-check on SinkSLOT-CUDA:
+at large d/L its cost_gap_pct/barycentric_sym diagnostics build a dense
+exact-OT reference that OOMs (confirmed at d>=256, L=4096); the other methods
+never hit this and keep full diagnostics.
 """
 
 import math
@@ -51,15 +57,18 @@ D_EXP1 = 3
 D_EXP2 = 64
 N_EXP3 = 10000
 
-METHODS = ["sinkslotcuda", "flash_alternating", "srot"]
+METHODS = ["sinkslotcuda", "flash_alternating", "srot", "flash_symmetric", "geomloss", "spar_sink"]
 
-# shared solver policy, same as configs/speedup.py
-STOP_MODE = "marginal"
+# shared solver policy: "potential" is the true potential-change criterion,
+# the same max(|df|,|dg|) rule for sinkslotcuda, flash_alternating and srot
+# alike (see bench_forward.py's StopCfg docstring).
+STOP_MODE = "potential"
 MAX_ITER = 20000
 STOP_TOL = 1e-6
 POTENTIAL_TOL = 1e-6
 CHECK_EVERY = 10
 SROT_DELTA = 1e-8
+SPARSINK_REPLICATES = 50  # matches configs/speedup.py
 
 # Both SROT and Spar-Sink build a dense N x M intermediate (SROT's own pi_SOT
 # reference plan; Spar-Sink's sampling mask), gated by bench_forward.py's
@@ -72,9 +81,6 @@ MAX_DENSE_SIZE_DSCALE = 10000
 def s_for(n: int) -> list[int]:
     """Spar-Sink sample sizes for a given N, matching configs/speedup.py's
     formula: s = k * s0(n), s0(n) = 1e-3 * n * log(n)^4, k in {5, 10, 15, 20}.
-    Kept here (unused by METHODS above) only so anyone re-adding Spar-Sink
-    to this experiment starts from the same recipe as configs/speedup.py,
-    not the retired density-based grid this file used to carry.
     """
     s0 = 1e-3 * n * (math.log(n) ** 4)
     return [int(round(k * s0)) for k in [5, 10, 15, 20]]

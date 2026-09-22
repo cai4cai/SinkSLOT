@@ -1,7 +1,7 @@
 """Speedup benchmark, part 1 of 3 -- non-Gaussian datasets. N=M=10,000, d=2
-(native, no padding), marginal stopping, stop_tol=1e-6, max_iter=10000 (down
-from the first pass's 20000, to fit the slow methods within a 2h dev-queue
-budget once split by dataset).
+(native, no padding), potential-change stopping, stop_tol=1e-6, max_iter=10000
+(down from the first pass's 20000, to fit the slow methods within a 2h
+dev-queue budget once split by dataset).
 
 THIS FILE IS ONE OF THREE that together define the complete speedup
 benchmark -- each is a separate BenchConfig only because a single BenchConfig
@@ -11,7 +11,7 @@ different. Read all three together for the full picture:
     two_rings, all d=2.
   - configs/speedup_gaussian_d3.py -- Gaussian, d=3, same eps/L/S grid.
   - configs/speedup_gaussian_d64.py -- Gaussian, d=64, wider eps range [0.1, 1].
-All three share the same solver policy (marginal, stop_tol=1e-6, same L/S
+All three share the same solver policy (potential-change, stop_tol=1e-6, same L/S
 grids) and the same 5 methods below. Execution was additionally split into
 many per-dataset/per-method SLURM jobs purely for cluster scheduling (2h dev
 queue vs 20h t3 queue) -- that job splitting has no bearing on what the
@@ -59,9 +59,12 @@ CONFIG = BenchConfig(
         0.001, 0.0019307, 0.0037276, 0.0071969,
         0.013895, 0.026827, 0.0517947, 0.1,
     ],
-    n_iters=20000,  # vestigial under marginal (max_iter governs the loop instead)
+    n_iters=20000,  # vestigial under potential-change (max_iter governs the loop instead)
 
-    stop_mode="marginal",
+    # "potential" is the shared max(|df|,|dg|) rule every method here
+    # (sinkslotcuda, srot, flash_alternating, spar_sink) implements the same
+    # way -- not "scaling", Spar-Sink's own, different scaling-variable check.
+    stop_mode="potential",
     max_iter=10000,
     stop_tol=1e-6,
     potential_tol=1e-6,

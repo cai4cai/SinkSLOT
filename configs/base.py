@@ -99,6 +99,8 @@ class BenchConfig:
             footprint. Costs ~5s of CUDA/JIT startup per row.
 
         tensorized: Include the dense O(n^2) GeomLoss baseline.
+        multiscale: Include GeomLoss multiscale (coarse-to-fine, KeOps) alongside
+            GeomLoss online.
         max_dense_size: Largest n for which dense methods run -- the tensorized
             baseline, SROT, and Spar-Sink/Rand-Sink's probability build.
 
@@ -123,16 +125,19 @@ class BenchConfig:
     # mass: a TV sum over n terms against a fixed absolute tolerance is
     # unreachable at n=10,000 however converged the solve actually is, which is
     # what made marginal stopping look broken before it was measured
-    # correctly. The max rule is the n-invariant one. "potential"
-    # reproduces Spar-Sink's rule, ||du||_1+||dv||_1 <= potential_tol. "potential_linf"
-    # reproduces FlashSinkhorn's own native rule, max(|df|,|dg|) <= stop_tol since the
-    # last check -- implemented (in addition to marginal) for srot/sinkslot/
-    # sinkslotcuda/spar_sink/rand_sink, and flash already uses it natively under any
-    # non-"fixed" mode; geomloss has no early-stopping hook and stays fixed regardless.
-    stop_mode: str = "fixed"     # "fixed" | "marginal" | "potential" | "potential_linf"
+    # correctly. The max rule is the n-invariant one. "potential" (the default
+    # policy for every published benchmark) reproduces FlashSinkhorn's own
+    # native rule, max(|df|,|dg|) <= stop_tol since the last check --
+    # implemented (in addition to marginal) for srot/sinkslot/sinkslotcuda/
+    # spar_sink/rand_sink, and flash already uses it natively under any
+    # non-"fixed" mode; geomloss has no early-stopping hook and stays fixed
+    # regardless. "scaling" reproduces Spar-Sink's own, different rule,
+    # max(||du||_inf, ||dv||_inf) <= potential_tol -- only meaningful for
+    # spar_sink/rand_sink.
+    stop_mode: str = "fixed"     # "fixed" | "marginal" | "potential" | "scaling"
     max_iter: int = 10000        # cap in non-fixed modes (n_iters is the count in "fixed")
-    stop_tol: float = 1e-4       # marginal/potential_linf threshold, n-independent
-    potential_tol: float = 1e-6  # Spar-Sink's ||du||+||dv|| threshold ("potential" mode)
+    stop_tol: float = 1e-4       # marginal/potential threshold, n-independent
+    potential_tol: float = 1e-6  # Spar-Sink's ||du||/||dv|| threshold ("scaling" mode)
     check_every: int = 10        # iterations between convergence checks
     warmup: int = 5
     rep: int = 15
@@ -170,6 +175,7 @@ class BenchConfig:
     isolate: bool = True
 
     tensorized: bool = False
+    multiscale: bool = False
     max_dense_size: int = 512
 
     verify: bool = False
@@ -193,8 +199,8 @@ CONFIG = BenchConfig(
     n_iters=50,
 
     # Convergence / early stopping (see the class docstring). The published
-    # protocol is stop_mode="marginal" (time-to-accuracy, stop_tol=1e-6); see
-    # configs/speedup.py. "fixed" here runs exactly n_iters for every method, for
+    # protocol is stop_mode="potential" (time-to-accuracy, stop_tol=1e-6);
+    # see configs/speedup.py. "fixed" here runs exactly n_iters for every method, for
     # a quick per-iteration throughput check while wiring is being changed.
     stop_mode="fixed",
     max_iter=10000,

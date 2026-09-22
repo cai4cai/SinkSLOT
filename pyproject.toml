@@ -64,13 +64,15 @@ triton = [
 # still work on CPU-only hosts, which is exactly what the CPU fallback and
 # its CI matrix exist to guarantee.
 #
-# Pinned to a SHA on cai4cai's fork rather than PyPI's flash-sinkhorn:
-# the released 0.3.3.post1 predates stop_mode="marginal", which the
-# benchmark needs to stop FlashSinkhorn on the same rule as SinkSLOT,
-# SROT and Spar-Sink. Repoint this at "flash-sinkhorn>=0.4" if upstream
-# releases the change.
+# Official upstream release, not cai4cai's fork: the benchmark now calls
+# sinkhorn_flashstyle_symmetric/_alternating directly (see
+# sinkslot.bench.reference_solvers.flashsinkhorn_native_run) instead of
+# going through SamplesLoss, so it no longer needs the fork's
+# stop_mode="marginal" patch -- upstream's native threshold/check_every
+# already give potential-change early stopping, which is what every
+# benchmark here now uses.
 bench = [
-  "flash-sinkhorn @ git+https://github.com/cai4cai/flash-sinkhorn.git@ab28c56a26bbb5c47c454fd0ff74864d0abafaae",
+  "flash-sinkhorn>=0.3.3",
 ]
 dev = [
   "pytest",

@@ -502,6 +502,8 @@ def _cached_exact_ot_reference(
     Cached as .npz (unlike the scalar entropic reference's JSON cache) since this
     also needs to persist the bary_x/bary_y arrays, not just a float.
     """
+    import zipfile
+
     import numpy as np
 
     key = f"{dataset}_n{n}_m{m}_d{d}_seed{seed}_v{_EXACT_REF_CACHE_VERSION}"
@@ -515,8 +517,8 @@ def _cached_exact_ot_reference(
             ref = ExactRef(cost=float(blob["cost"]), bary_x=blob["bary_x"], bary_y=blob["bary_y"])
             _exact_ref_cache[key] = ref
             return ref
-        except (OSError, ValueError, KeyError):
-            pass  # corrupt/partial cache file -- recompute below
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile):
+            pass  # corrupt/partial cache file (e.g. truncated by a killed writer) -- recompute below
 
     ref = compute_exact_ot_reference(x, y, a, b)
     _exact_ref_cache[key] = ref
@@ -613,17 +615,31 @@ class StopCfg:
 
     mode="fixed" runs exactly n_iters. mode="marginal" runs up to max_iter,
     stopping when the max (L-infinity) row/col marginal violation <= tol --
-    srot/sinkslot/sinkslotcuda/spar_sink/rand_sink's proven default (see SLOT
-    repo), and now also implemented natively in FlashSinkhorn's own solvers
-    (sinkhorn_solvers.py) for flash_symmetric/flash_alternating, so it's
-    directly comparable across every method. Not gated on total mass -- the
-    working rule doesn't check mass separately. mode="potential" stops on
-    ||du||_1+||dv||_1 <= tol (Spar-Sink's rule; no FlashSinkhorn equivalent --
-    Flash falls back to potential_linf for this mode). mode="potential_linf" stops
-    once the dual potentials themselves stop moving, max(|Δf|, |Δg|) < tol since
-    the last check -- FlashSinkhorn's own native rule (see sinkhorn_solvers.py),
-    reproduced verbatim for srot/sinkslot/sinkslotcuda/spar_sink/rand_sink so every
-    method can share the identical stopping rule, check frequency and threshold.
+    srot/sinkslot/sinkslotcuda/spar_sink/rand_sink's original default (see SLOT
+    repo), and also implemented natively in FlashSinkhorn's own solvers
+    (sinkhorn_solvers.py) for flash_symmetric/flash_alternating (though Flash
+    no longer distinguishes it from mode="potential" -- see bench_flashsinkhorn).
+    Not gated on total mass -- the working rule doesn't check mass separately.
+
+    mode="potential" (the default policy for every published benchmark here)
+    stops once the dual potentials themselves stop moving, max(|Δf|, |Δg|) <
+    tol since the last check -- FlashSinkhorn's own native rule (see
+    sinkhorn_solvers.py), reproduced verbatim for srot/sinkslot/sinkslotcuda/
+    spar_sink/rand_sink so every method shares the identical stopping rule,
+    check frequency and threshold (verified: SinkSLOT's eps*max(|Δphi|,
+    |Δpsi|) and Flash's max(|Δf|,|Δg|) are the same quantity once phi=f/eps is
+    accounted for).
+
+    mode="scaling" stops on max(||du||_inf, ||dv||_inf) <= potential_tol, the
+    change in the scaling vectors u=exp(f/eps), v=exp(g/eps) -- Spar-Sink's
+    own rule (Li, Yu, Li, Meng, JMLR), a genuinely different quantity from
+    mode="potential" above. Only meaningful for spar_sink/rand_sink (via
+    _sparsink_sinkhorn); flash_symmetric/flash_alternating and geomloss_online
+    fall back to mode="potential" for it (no equivalent to fall back TO
+    otherwise), but srot/sinkslot/sinkslotcuda have no such fallback and
+    would silently run it as mode="marginal"/dispatch on an unrecognized
+    string instead -- don't request mode="scaling" for those.
+
     Checked every `check_every` iterations. `fixed(n)` is the no-stopping default.
 
     Known asymmetry: the two FlashSinkhorn backends aren't equally cheap to check
@@ -853,12 +869,14 @@ def _srot_sinkhorn(
     which reduces to the standard updates when pi_SOT = a (x) b.
 
     Returns (f, g, iters_run, converged, final_viol). stop None / "fixed" runs
-    n_iters. "marginal"/"potential" run to stop.max_iter, stopping on the max
-    (L-infinity) marginal violation (row marginal = exp(f/eps + LSE_row(g));
-    col is exactly b) -- matches the SLOT repo's actual working "marg_viol"
-    rule, not a total-variation sum (which is unreachable at n=10,000
-    regardless of convergence).
-    "potential_linf" reproduces FlashSinkhorn's own native rule exactly: stop once
+    n_iters. "marginal" (also the fallback for any mode besides "fixed"/
+    "potential", including "scaling" -- SROT has no scaling-variable rule)
+    runs to stop.max_iter, stopping on the max (L-infinity) marginal
+    violation (row marginal = exp(f/eps + LSE_row(g)); col is exactly b) --
+    matches the SLOT repo's actual working "marg_viol" rule, not a
+    total-variation sum (which is unreachable at n=10,000 regardless of
+    convergence).
+    "potential" reproduces FlashSinkhorn's own native rule exactly: stop once
     the dual potentials themselves stop moving, max(|Δf|, |Δg|) < stop.tol, measured
     since the last check (not the last iteration) -- see the identical check in
     sinkhorn_solvers.py. f, g here are already the standard (non-absorbed) potentials,
@@ -881,7 +899,7 @@ def _srot_sinkhorn(
             g = eps * (log_b - _col_lse(f))
         return f, g, n_iters, None, None
 
-    if mode == "potential_linf":
+    if mode == "potential":
         prev_f, prev_g = f, g
         it = 0
         converged = False
@@ -1089,8 +1107,18 @@ def bench_flashsinkhorn(
 
     Uses full squared Euclidean cost C(x,y) = ||x-y||² (half_cost=False default).
     Autotuning is enabled for best Triton kernel performance (~2-3s first call overhead).
+
+    Calls sinkhorn_flashstyle_symmetric/_alternating directly via
+    reference_solvers.flashsinkhorn_native_run, not SamplesLoss: upstream's
+    SamplesLoss(potentials=True, backend="alternating") never threads
+    threshold/check_every through to the low-level call, so early stopping
+    silently no-ops for that one combination -- calling the low-level
+    functions ourselves sidesteps it entirely and drops the need for the
+    cai4cai fork. This also means "marginal" stop mode is no longer
+    available for Flash (upstream's only native rule is potential-change);
+    any non-fixed stop.mode here means potential-change stopping.
     """
-    from flash_sinkhorn import SamplesLoss
+    from sinkslot.bench.reference_solvers import flashsinkhorn_native_run
 
     torch.manual_seed(seed)
     x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
@@ -1101,90 +1129,41 @@ def bench_flashsinkhorn(
     b = b / b.sum()
 
     _stop = stop or StopCfg.fixed()
-    if _stop.mode == "fixed":
-        _fs_kwargs = {}
-    else:
-        # FlashSinkhorn's own SamplesLoss only knows "potential_linf" (its native
-        # rule) and "marginal" (added to match SROT/SinkSLOT/Spar-Sink's proven
-        # convention). Spar-Sink's own "potential" mode (max change in the scaling
-        # variable, a different quantity) has no Flash equivalent -- fall back to
-        # potential_linf for it, preserving this function's pre-existing behavior
-        # for that mode (it never distinguished "potential" from "potential_linf").
-        _fs_stop_mode = "marginal" if _stop.mode == "marginal" else "potential_linf"
-        _fs_kwargs = {
-            "threshold": _stop.tol, "inner_iterations": _stop.check_every,
-            "stop_mode": _fs_stop_mode,
-        }
     _fs_iters = n_iters if _stop.mode == "fixed" else _stop.max_iter
-    loss_fn = SamplesLoss(
-        "sinkhorn",
-        backend=backend,
-        use_epsilon_scaling=False,
-        eps=eps,
-        n_iters=_fs_iters,
-        debias=False,
-        potentials=False,
-        normalize=False,
-        autotune=True,  # Enable Triton kernel tuning (~2-3s first call overhead)
-        last_extrapolation=False,  # Match GeomLoss benchmark setting
-        allow_tf32=allow_tf32,
-        **_fs_kwargs,
-    )
-
+    _threshold = None if _stop.mode == "fixed" else _stop.tol
+    symmetric = backend == "symmetric"
     method_name = f"flash_{backend}"
 
     def run():
-        _ = loss_fn(a, x, b, y)
+        flashsinkhorn_native_run(
+            x, y, a, b, eps, _fs_iters, threshold=_threshold,
+            check_every=_stop.check_every, symmetric=symmetric, allow_tf32=allow_tf32,
+        )
 
     try:
-        # Trigger Triton JIT compilation + autotuning here, outside the peak-memory
-        # window, so the one-time compile overhead doesn't get counted as steady-state
-        # memory (matches the GeomLoss/KeOps benchmark's pre-JIT warmup below).
-        loss_fn(a, x, b, y)
+        # This same call also triggers Triton JIT compilation + autotuning,
+        # outside the peak-memory window below, and doubles as the untimed
+        # potentials extraction (f, g, iters_run) needed regardless of
+        # rmae_check -- one call covers warmup, iteration tracking, and the
+        # cost_gap/barycentric_sym inputs, where SamplesLoss needed up to
+        # three separate calls for the same information.
+        f, g, iters_run, converged, _cost = flashsinkhorn_native_run(
+            x, y, a, b, eps, _fs_iters, threshold=_threshold,
+            check_every=_stop.check_every, symmetric=symmetric, allow_tf32=allow_tf32,
+        )
         torch.cuda.synchronize()
     except torch.cuda.OutOfMemoryError:
         return TimingResult(method_name, n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
 
+    hit_max_iters = None if _stop.mode == "fixed" else iters_run >= _fs_iters
+
     cost_gap_pct = None
     bary = None
     feas: dict = {}
-    iters_run = n_iters if _stop.mode == "fixed" else None
-    converged = None
-    hit_max_iters = None
-    f = g = None
-
-    # Iteration tracking is decoupled from the cost_gap machinery below: the
-    # timed run() above goes through _SinkhornCostFn.apply (an autograd.Function,
-    # tensors-only return), so return_n_iters has no side channel there -- but
-    # this untimed potentials call is O(n) (no dense n*m materialization), so
-    # it's safe to run even at N where the dense plan reconstruction below would
-    # OOM. Always get it when early stopping is in play, independent of rmae_check.
-    if _stop.mode != "fixed":
-        potentials_fn = SamplesLoss(
-            "sinkhorn", backend=backend, use_epsilon_scaling=False, eps=eps,
-            n_iters=_fs_iters, debias=False, potentials=True, normalize=False,
-            autotune=True, last_extrapolation=False, allow_tf32=allow_tf32,
-            return_n_iters=True,
-            **_fs_kwargs,
-        )
-        f, g, iters_run = potentials_fn(a, x, b, y)
-        converged = iters_run < _stop.max_iter
-        hit_max_iters = iters_run >= _stop.max_iter
-
     if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
         # Flash never materializes a plan (the point of its streaming kernels), so
-        # cost_gap/barycentric_sym need (f, g) from an UNTIMED potentials call, then
+        # cost_gap/barycentric_sym need (f, g) from the untimed call above, then
         # a dense O(n*m) plan materialized post-hoc, outside the timed region.
-        # Reuse the potentials already computed above if we have them (deterministic
-        # solve, so identical to a fresh call); only fixed mode needs one here.
-        if f is None:
-            potentials_fn = SamplesLoss(
-                "sinkhorn", backend=backend, use_epsilon_scaling=False, eps=eps,
-                n_iters=_fs_iters, debias=False, potentials=True, normalize=False,
-                autotune=True, last_extrapolation=False, allow_tf32=allow_tf32,
-                **_fs_kwargs,
-            )
-            f, g = potentials_fn(a, x, b, y)
         cost = torch.cdist(x, y, p=2) ** 2
         T = a.unsqueeze(1) * b.unsqueeze(0) * ((f.unsqueeze(1) + g.unsqueeze(0) - cost) / eps).exp()
         plan_cost = float((T * cost).sum())
@@ -1226,12 +1205,25 @@ def bench_geomloss_online(
     nvtx: bool = False,
     rmae_check: bool = True,
     dataset: str = "gaussian",
+    stop: "StopCfg" = None,
     seed: int = 0,
 ) -> TimingResult:
-    """Benchmark GeomLoss online (KeOps) with fixed iterations.
+    """Benchmark GeomLoss online (KeOps).
 
-    Uses low-level `sinkhorn_loop` with `eps_list=[eps]*n_iters` to force exactly
-    `n_iters` iterations (matching FlashSinkhorn / OTT-JAX settings).
+    stop=None or mode="fixed" (the original behavior): uses low-level
+    `sinkhorn_loop` with `eps_list=[eps]*n_iters` to force exactly `n_iters`
+    iterations (matching FlashSinkhorn / OTT-JAX settings), no stopping
+    check. Any other stop.mode: delegates to
+    reference_solvers.geomloss_online_native, which reimplements the same
+    sinkhorn_loop update math (verified bit-exact against it) with a real
+    early-stop hook added -- sinkhorn_loop itself has none. mode="marginal"
+    maps to geomloss_online_native's own "marginal" stop_mode; anything else
+    (including Spar-Sink's "scaling", which has no GeomLoss equivalent, same
+    fallback bench_flashsinkhorn already uses) maps to "potential",
+    FlashSinkhorn's/SinkSLOT's native potential-change rule -- the intended
+    default for early stopping here, matching SinkSLOT's own "potential"
+    stop mode once phi=f/eps is accounted for (verified in
+    reference_solvers.py's own module docstring).
 
     Cost convention: SqDist(X,Y) = ||x-y||² (full squared Euclidean, matches FlashSinkhorn).
     dataset: "gaussian" (default), "8gaussians", "half_moon", or "two_rings"; see sample_point_cloud().
@@ -1244,6 +1236,7 @@ def bench_geomloss_online(
 
     from geomloss._legacy.sinkhorn_divergence import log_weights, sinkhorn_cost, sinkhorn_loop
     from geomloss._legacy.sinkhorn_samples import lse_genred, softmin_online
+    from sinkslot.bench.reference_solvers import geomloss_online_native
 
     torch.manual_seed(seed)
     x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
@@ -1253,38 +1246,63 @@ def bench_geomloss_online(
     a = a / a.sum()
     b = b / b.sum()
 
-    eps_list = [eps] * n_iters
+    _stop = stop or StopCfg.fixed()
+    iters_run = n_iters
+    converged = None
+    hit_max_iters = None
 
-    a_log = log_weights(a)
-    b_log = log_weights(b)
-    # SqDist(X,Y) = ||x-y||² (full squared Euclidean, matches FlashSinkhorn)
-    my_lse = lse_genred("SqDist(X,Y)", d)
-    softmin = partial(softmin_online, log_conv=my_lse)
-    C_xy = (x, y.detach())
-    C_yx = (y, x.detach())
+    if _stop.mode == "fixed":
+        eps_list = [eps] * n_iters
 
-    try:
-        _, _, g_ab, f_ba = sinkhorn_loop(
-            softmin, a_log, b_log, None, None,
-            C_xy, C_yx, eps_list,
-            rho=None, debias=False, last_extrapolation=False,
-        )
-        torch.cuda.synchronize()
-    except Exception:
-        return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
+        a_log = log_weights(a)
+        b_log = log_weights(b)
+        # SqDist(X,Y) = ||x-y||² (full squared Euclidean, matches FlashSinkhorn)
+        my_lse = lse_genred("SqDist(X,Y)", d)
+        softmin = partial(softmin_online, log_conv=my_lse)
+        C_xy = (x, y.detach())
+        C_yx = (y, x.detach())
+
+        try:
+            _, _, g_ab, f_ba = sinkhorn_loop(
+                softmin, a_log, b_log, None, None,
+                C_xy, C_yx, eps_list,
+                rho=None, debias=False, last_extrapolation=False,
+            )
+            torch.cuda.synchronize()
+        except Exception:
+            return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
+        f_ba_flat, g_ab_flat = f_ba.squeeze(0), g_ab.squeeze(0)
+
+        def run():
+            sinkhorn_loop(
+                softmin, a_log, b_log, None, None,
+                C_xy, C_yx, eps_list,
+                rho=None, debias=False, last_extrapolation=False,
+            )
+    else:
+        gl_stop_mode = "marginal" if _stop.mode == "marginal" else "potential"
+        try:
+            f_ba_flat, g_ab_flat, iters_run, converged, _, _ = geomloss_online_native(
+                x, y, a, b, eps, _stop.max_iter, threshold=_stop.tol,
+                check_every=_stop.check_every, stop_mode=gl_stop_mode)
+            torch.cuda.synchronize()
+        except Exception:
+            return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
+        hit_max_iters = iters_run >= _stop.max_iter
+
+        def run():
+            geomloss_online_native(
+                x, y, a, b, eps, _stop.max_iter, threshold=_stop.tol,
+                check_every=_stop.check_every, stop_mode=gl_stop_mode)
 
     cost_gap_pct = None
     bary = None
     feas: dict = {}
     if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
-        # sinkhorn_loop already returned dual potentials (g_ab, f_ba) from the SAME solve
-        # used for timing -- no separate untimed call needed, unlike Flash. f_ba is the
-        # source-side potential (on a's points), g_ab the target-side (on b's) -- same
-        # GeomLoss convention bench_flashsinkhorn's "both report the dual" note refers to.
-        # Both come back with a leading batch dim (1, n)/(1, m) even for this non-batched
-        # call -- squeeze it before treating them as plain (n,)/(m,) potentials.
-        f_ba_flat = f_ba.squeeze(0)
-        g_ab_flat = g_ab.squeeze(0)
+        # f_ba_flat/g_ab_flat are from the SAME solve used for timing -- no separate
+        # untimed call needed, unlike Flash. f_ba is the source-side potential (on a's
+        # points), g_ab the target-side (on b's) -- same GeomLoss convention
+        # bench_flashsinkhorn's "both report the dual" note refers to.
         cost = torch.cdist(x, y, p=2) ** 2
         T = a.unsqueeze(1) * b.unsqueeze(0) * ((f_ba_flat.unsqueeze(1) + g_ab_flat.unsqueeze(0) - cost) / eps).exp()
         plan_cost = float((T * cost).sum())
@@ -1293,13 +1311,6 @@ def bench_geomloss_online(
         cost_gap_pct = cost_gap(plan_cost, ref)
         bary = barycentric_sym(Tx, Ty, ref, a, b)
         feas = plan_feasibility(r, c, a, b)
-
-    def run():
-        sinkhorn_loop(
-            softmin, a_log, b_log, None, None,
-            C_xy, C_yx, eps_list,
-            rho=None, debias=False, last_extrapolation=False,
-        )
 
     try:
         # Measure peak memory during benchmark
@@ -1316,11 +1327,104 @@ def bench_geomloss_online(
         return TimingResult(
             "geomloss_online", n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False,
             n_iters=n_iters, cost_gap_pct=cost_gap_pct, barycentric_sym=bary,
-            iters_run=n_iters, converged=None, hit_max_iters=None,  # always fixed-iteration, no stopping check
+            iters_run=iters_run, converged=converged, hit_max_iters=hit_max_iters,
             seed=seed, **feas,
         )
     except torch.cuda.OutOfMemoryError:
         return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
+                            n_iters=n_iters, seed=seed)
+
+
+def bench_geomloss_multiscale(
+    n: int, m: int, d: int, eps: float, n_iters: int,
+    device: torch.device, warmup: int, rep: int,
+    *,
+    nvtx: bool = False,
+    rmae_check: bool = True,
+    dataset: str = "gaussian",
+    stop: "StopCfg" = None,
+    seed: int = 0,
+) -> TimingResult:
+    """Benchmark GeomLoss multiscale (KeOps): coarse warm-start, one coarse-to-fine
+    jump, then fine-resolution updates, via reference_solvers.geomloss_multiscale_native
+    (GeomLoss's own clusterize/kernel_truncation/extrapolate_samples/softmin_multiscale
+    reused directly, not its high-level sinkhorn_multiscale, which anneals eps --
+    incompatible with this repo's fixed-eps convention; see that function's own
+    docstring for the coarse/fine split).
+
+    Unlike bench_geomloss_online, geomloss_multiscale_native has no "marginal" stop
+    mode at all (only the potential-change check, max(|df|,|dg|)) -- so any
+    non-"fixed" stop.mode here means potential-change stopping, matching
+    bench_flashsinkhorn's own convention. stop=None or mode="fixed": threshold=None,
+    runs exactly n_iters fine iterations (after the fixed coarse warmup), no
+    stopping check.
+
+    Cost convention: SqDist(X,Y) = ||x-y||² (full squared Euclidean, matches FlashSinkhorn).
+    dataset: "gaussian" (default), "8gaussians", "half_moon", or "two_rings"; see sample_point_cloud().
+    seed: data-generation seed only (x, y, a, b).
+    """
+    try:
+        from pykeops.torch import generic_logsumexp  # noqa: F401 - needed by keops_lse
+    except ImportError:
+        return TimingResult("geomloss_multiscale", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
+
+    from sinkslot.bench.reference_solvers import geomloss_multiscale_native
+
+    torch.manual_seed(seed)
+    x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
+    y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
+    a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
+    b = torch.rand(m, device=device, dtype=torch.float32) + 0.1
+    a = a / a.sum()
+    b = b / b.sum()
+
+    _stop = stop or StopCfg.fixed()
+    _max_iter = n_iters if _stop.mode == "fixed" else _stop.max_iter
+    _threshold = None if _stop.mode == "fixed" else _stop.tol
+
+    def run():
+        geomloss_multiscale_native(
+            x, y, a, b, eps, _max_iter, threshold=_threshold, check_every=_stop.check_every)
+
+    try:
+        f, g, iters_run, converged, _cost, _last_change = geomloss_multiscale_native(
+            x, y, a, b, eps, _max_iter, threshold=_threshold, check_every=_stop.check_every)
+        torch.cuda.synchronize()
+    except Exception:
+        return TimingResult("geomloss_multiscale", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
+                            n_iters=n_iters, seed=seed)
+    hit_max_iters = None if _stop.mode == "fixed" else iters_run >= _max_iter
+
+    cost_gap_pct = None
+    bary = None
+    feas: dict = {}
+    if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
+        cost = torch.cdist(x, y, p=2) ** 2
+        T = a.unsqueeze(1) * b.unsqueeze(0) * ((f.unsqueeze(1) + g.unsqueeze(0) - cost) / eps).exp()
+        plan_cost = float((T * cost).sum())
+        Tx, Ty, r, c = plan_barycentric_dense(T, x, y)
+        ref = _cached_exact_ot_reference(n, m, d, seed, x, y, a, b, dataset=dataset)
+        cost_gap_pct = cost_gap(plan_cost, ref)
+        bary = barycentric_sym(Tx, Ty, ref, a, b)
+        feas = plan_feasibility(r, c, a, b)
+
+    try:
+        mean, std, min_t, max_t, median = bench_with_stats(
+            run,
+            warmup,
+            rep,
+            nvtx=nvtx,
+            nvtx_label=f"geomloss_multiscale n={n} d={d} eps={eps} iters={n_iters}",
+        )
+        gpu_memory_mb = gpu_memory_used_mb(device)
+        return TimingResult(
+            "geomloss_multiscale", n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False,
+            n_iters=n_iters, cost_gap_pct=cost_gap_pct, barycentric_sym=bary,
+            iters_run=iters_run, converged=converged, hit_max_iters=hit_max_iters,
+            seed=seed, **feas,
+        )
+    except torch.cuda.OutOfMemoryError:
+        return TimingResult("geomloss_multiscale", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
                             n_iters=n_iters, seed=seed)
 
 
@@ -1675,11 +1779,11 @@ def _sparsink_sinkhorn(
             g = eps * (log_b - _col_lse(f))
         return f, g, empty, n_iters, None, None
 
-    if mode == "potential_linf":
+    if mode == "potential":
         # FlashSinkhorn's own rule, verbatim: max(|Δf|, |Δg|) < stop.tol since the
         # last check. f, g are already standard-scale here (f = eps*(...)), matching
         # Flash's unshifted potentials, so stop.tol needs no rescaling. Distinct from
-        # Spar-Sink's own "potential" mode below, which uses max change in the scaling
+        # Spar-Sink's own "scaling" mode below, which uses max change in the scaling
         # vectors u=exp(f/eps), checked every stop.check_every iterations like everyone else.
         #
         # Caveat (found while verifying this against a deep-converged reference):
@@ -1729,7 +1833,7 @@ def _sparsink_sinkhorn(
             # working "marg_viol" rule. Not gated on mass either, matching
             # SLOT exactly.
             viol = float(torch.maximum((row_marg - a).abs().max(), (col_marg - b).abs().max()))
-            if stop.mode == "potential":
+            if stop.mode == "scaling":
                 # Spar-Sink's rule: max(||du||_inf, ||dv||_inf) on the scaling
                 # vectors u=exp(f/eps). Also switched from sum to max: same
                 # n-invariance reasoning as marg_viol above -- SLOT doesn't
@@ -2002,23 +2106,18 @@ def bench_sinkslot(
                             seed=seed)
 
     _stop = stop or StopCfg.fixed()
-    # sinkslot's own _STOP_MODES dropped "potential" (it was byte-for-byte
-    # identical to "marginal") and renamed "potential_linf" -> "potential"
-    # (see torch-ext/sinkslot/sinkhorn_solvers.py, issue #47) -- this CLI's
-    # --stop-mode vocabulary is unchanged (still shared with srot/spar_sink/
-    # rand_sink, where the old distinction still matters), so translate here
-    # rather than propagate the old names into sinkslot's own solve loop.
-    _sinkslot_stop_mode = {"potential": "marginal", "potential_linf": "potential"}.get(
-        _stop.mode, _stop.mode)
-    _sinkslot_stop = StopCfg(mode=_sinkslot_stop_mode, max_iter=_stop.max_iter,
-                              tol=_stop.tol, potential_tol=_stop.potential_tol,
-                              check_every=_stop.check_every)
+    # sinkslot's own _STOP_MODES = ("fixed", "marginal", "potential") (see
+    # torch-ext/sinkslot/sinkhorn_solvers.py, issue #47) now matches this
+    # CLI's own vocabulary exactly, so _stop passes straight through --
+    # unlike srot/spar_sink/rand_sink, which also support "scaling"
+    # (Spar-Sink's own, different scaling-variable rule; sinkslot has no
+    # equivalent and would not handle it).
 
     def run():
-        sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
+        sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
 
     phi, psi, iters_run, converged, final_viol = sinkslot_alternating_triton(
-        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
+        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
     cost_gap_pct = None
     bary = None
     if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
@@ -2125,19 +2224,15 @@ def bench_sinkslotcuda(
                             seed=seed)
 
     _stop = stop or StopCfg.fixed()
-    # See bench_sinkslot's matching comment: translates this CLI's stop-mode
-    # vocabulary to sinkslot's own (now 3-value) _STOP_MODES.
-    _sinkslot_stop_mode = {"potential": "marginal", "potential_linf": "potential"}.get(
-        _stop.mode, _stop.mode)
-    _sinkslot_stop = StopCfg(mode=_sinkslot_stop_mode, max_iter=_stop.max_iter,
-                              tol=_stop.tol, potential_tol=_stop.potential_tol,
-                              check_every=_stop.check_every)
+    # See bench_sinkslot's matching comment: this CLI's vocabulary now
+    # matches sinkslot's own _STOP_MODES exactly, so _stop passes straight
+    # through.
 
     def run():
-        sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
+        sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
 
     phi, psi, iters_run, converged, final_viol = sinkslot_alternating_triton(
-        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
+        r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _stop, eps=eps)
     cost_gap_pct = None
     bary = None
     if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
@@ -2768,6 +2863,7 @@ def run_forward_benchmark(
     include_ott: bool = True,
     include_geomloss: bool = True,
     include_tensorized: bool = False,
+    include_multiscale: bool = False,
     max_dense_size: int = 8192,
     verbose: bool = True,
     nvtx: bool = False,
@@ -2870,7 +2966,7 @@ def run_forward_benchmark(
             if include_geomloss:
                 res = bench_geomloss_online(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, rmae_check=rmae_check,
-                    dataset=dataset, seed=seed,
+                    dataset=dataset, stop=stop, seed=seed,
                 )
                 res.dataset = dataset
                 res.tf32 = allow_tf32
@@ -2879,6 +2975,20 @@ def run_forward_benchmark(
                 if verbose:
                     status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
                     print(f"  GeomLoss KeOps:        {status}")
+
+            # GeomLoss multiscale (KeOps)
+            if include_geomloss and include_multiscale:
+                res = bench_geomloss_multiscale(
+                    n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, rmae_check=rmae_check,
+                    dataset=dataset, stop=stop, seed=seed,
+                )
+                res.dataset = dataset
+                res.tf32 = allow_tf32
+                res.seed = seed
+                results.append(res)
+                if verbose:
+                    status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
+                    print(f"  GeomLoss Multiscale:   {status}")
 
             # GeomLoss tensorized (dense, small sizes only)
             if include_geomloss and include_tensorized and n <= max_dense_size:
@@ -3484,6 +3594,8 @@ def run_forward_benchmark_subprocess(
             cmd.extend(["--dataset", args.dataset])
         if args.tensorized:
             cmd.extend(["--tensorized", "--max-dense-size", str(args.max_dense_size)])
+        if args.multiscale:
+            cmd.append("--multiscale")
         if args.only is not None:
             cmd.extend(["--only", args.only])
 
@@ -3558,12 +3670,13 @@ def main() -> None:
     )
     parser.add_argument("--no-srot", action="store_true", help="Skip SROT benchmarks.")
     parser.add_argument("--no-sinkslot", action="store_true", help="Skip SinkSLOT benchmarks.")
-    parser.add_argument("--stop-mode", choices=("fixed", "marginal", "potential", "potential_linf"),
+    parser.add_argument("--stop-mode", choices=("fixed", "marginal", "potential", "scaling"),
                         default="fixed",
-                        help="Early stopping: 'fixed' runs n_iters; 'marginal'/'potential' run to "
-                             "convergence; 'potential_linf' reproduces FlashSinkhorn's own native rule "
-                             "(max L_inf change in the dual potentials) for srot/sinkslot/sinkslotcuda/"
-                             "spar_sink/rand_sink too.")
+                        help="Early stopping: 'fixed' runs n_iters; 'marginal' runs to convergence on "
+                             "the max L_inf marginal violation; 'potential' reproduces FlashSinkhorn's "
+                             "own native rule (max L_inf change in the dual potentials) for every "
+                             "method here (the default for published results); 'scaling' is Spar-Sink's "
+                             "own, different scaling-variable rule (spar_sink/rand_sink only).")
     parser.add_argument("--max-iter", type=int, default=10000, help="Iteration cap in non-fixed stop modes.")
     parser.add_argument("--stop-tol", type=float, default=1e-4, help="Max (L-infinity) marginal-violation threshold.")
     parser.add_argument("--potential-tol", type=float, default=1e-6, help="Spar-Sink ||du||+||dv|| threshold.")
@@ -3607,6 +3720,8 @@ def main() -> None:
     parser.add_argument("--tensorized", action="store_true", help="Include tensorized/dense benchmarks.")
     parser.add_argument("--max-dense-size", type=int, default=20000,
                         help="Max size for tensorized/dense methods (to avoid OOM). Default: 20000.")
+    parser.add_argument("--multiscale", action="store_true",
+                        help="Include GeomLoss multiscale (coarse-to-fine, KeOps) alongside GeomLoss online.")
     parser.add_argument("--tf32", action="store_true", default=True,
                         help="Enable TF32 for ~2x speedup (default: enabled).")
     parser.add_argument("--no-tf32", dest="tf32", action="store_false",
@@ -3682,6 +3797,7 @@ def main() -> None:
         include_sinkslot = not args.no_sinkslot
         include_sinkslotcuda = not args.no_sinkslotcuda
         include_tensorized = bool(args.tensorized)
+        include_multiscale = bool(args.multiscale)
 
         if args.only is not None:
             include_flash_symmetric = args.only in ("flash_symmetric", "flash")
@@ -3692,7 +3808,10 @@ def main() -> None:
             include_sparsink = args.only in SPARSINK_METHODS
             include_sinkslot = args.only == "sinkslot"
             include_sinkslotcuda = args.only == "sinkslotcuda"
-            include_tensorized = False
+            if not (include_geomloss or include_ott):
+                include_tensorized = False
+            if not include_geomloss:
+                include_multiscale = False
 
         results = run_forward_benchmark(
             sizes=[args.single_size],
@@ -3707,6 +3826,7 @@ def main() -> None:
             include_ott=include_ott,
             include_geomloss=include_geomloss,
             include_tensorized=include_tensorized,
+            include_multiscale=include_multiscale,
             max_dense_size=args.max_dense_size,
             verbose=False,
             nvtx=False,
@@ -3802,6 +3922,7 @@ def main() -> None:
     include_sinkslot = not args.no_sinkslot
     include_sinkslotcuda = not args.no_sinkslotcuda
     include_tensorized = bool(args.tensorized)
+    include_multiscale = bool(args.multiscale)
 
     if args.only is not None:
         include_flash_symmetric = args.only in ("flash_symmetric", "flash")
@@ -3812,9 +3933,13 @@ def main() -> None:
         include_sparsink = args.only in SPARSINK_METHODS
         include_sinkslot = args.only == "sinkslot"
         include_sinkslotcuda = args.only == "sinkslotcuda"
-        if include_tensorized:
-            print("Warning: Ignoring --tensorized because --only is set.")
+        if include_tensorized and not (include_geomloss or include_ott):
+            print("Warning: Ignoring --tensorized -- --only selected a method with no "
+                  "tensorized/dense counterpart.")
             include_tensorized = False
+        if include_multiscale and not include_geomloss:
+            print("Warning: Ignoring --multiscale -- --only selected a method other than geomloss.")
+            include_multiscale = False
 
     mode_label = "Subprocess Mode" if args.subprocess else "In-Process (bucketed cache keys)"
     print(f"Forward Pass Benchmark ({mode_label})")
@@ -3833,6 +3958,7 @@ def main() -> None:
     print(f"  Seed: {args.seed} (data only)")
     print(f"  Stop: {args.stop_mode}" + ("" if args.stop_mode=="fixed" else f" (tol={args.stop_tol:g}, max_iter={args.max_iter}, every={args.check_every})"))
     print(f"  Include tensorized: {args.tensorized} (max size: {args.max_dense_size})")
+    print(f"  Include multiscale: {include_multiscale}")
     if args.only is not None:
         print(f"  Only: {args.only}")
     if not args.subprocess:
@@ -3859,6 +3985,7 @@ def main() -> None:
             include_ott=include_ott,
             include_geomloss=include_geomloss,
             include_tensorized=include_tensorized,
+            include_multiscale=include_multiscale,
             max_dense_size=args.max_dense_size,
             verbose=not args.quiet,
             nvtx=nvtx_enabled,

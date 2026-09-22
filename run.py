@@ -109,6 +109,8 @@ def build_command(
                 "--sparsink-replicates", str(cfg.sparsink_replicates)]
     if cfg.tensorized:
         cmd.append("--tensorized")
+    if cfg.multiscale:
+        cmd.append("--multiscale")
     if cfg.verify:
         cmd.append("--verify")
     if cfg.quiet:

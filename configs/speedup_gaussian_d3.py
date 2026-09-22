@@ -1,9 +1,15 @@
 """Speedup benchmark, part 2 of 3 -- Gaussian dataset at d=3, same grid/stop
-policy as configs/speedup.py (eps/L/S all 8-point, max_iter=10000, marginal,
-stop_tol=1e-6). See configs/speedup.py's docstring for how the 3 speedup files
+policy as configs/speedup.py (eps/L/S all 8-point, max_iter=10000,
+potential-change, stop_tol=1e-6). See configs/speedup.py's docstring for how the 3 speedup files
 relate -- this one exists only because a single BenchConfig can't mix dims
 across datasets (dims applies uniformly to every dataset in cfg.datasets), so
 this Gaussian-at-d=3 slice has to be its own config.
+
+7 methods: SinkSLOT-CUDA, SROT, FlashSinkhorn-symmetric, FlashSinkhorn-alternating,
+GeomLoss-online, GeomLoss-multiscale (coarse-to-fine), Spar-Sink. SinkSLOT-CUDA and
+SROT share the same L sweep (sinkslotcuda_slices/srot_slices below): a more
+natural human-readable grid (10, 25, 50, ..., 5000) instead of the powers-of-2
+grid configs/speedup.py still uses.
 
 Its commands are appended into the SAME per-method output directories as
 configs/speedup.py's 3 non-Gaussian datasets (both configs point --output-dir
@@ -27,6 +33,9 @@ _n = 10000
 _s0 = 1e-3 * _n * (math.log(_n) ** 4)
 _sparsink_s = [int(round(k * _s0)) for k in [5, 10, 15, 20]]
 
+# More natural/readable than a powers-of-2 grid; shared by SinkSLOT-CUDA and SROT.
+_L_SWEEP = [10, 25, 50, 100, 250, 500, 1000, 5000]
+
 CONFIG = BenchConfig(
 
     sizes=[10000],
@@ -38,7 +47,7 @@ CONFIG = BenchConfig(
     ],
     n_iters=20000,
 
-    stop_mode="marginal",
+    stop_mode="potential",  # see configs/speedup.py's comment
     max_iter=10000,
     stop_tol=1e-6,
     potential_tol=1e-6,
@@ -52,13 +61,13 @@ CONFIG = BenchConfig(
     datasets=["gaussian"],
 
     no_srot=False,
-    srot_slices=[32, 64, 128, 256, 512, 1024, 2048, 4096],
+    srot_slices=_L_SWEEP,
     srot_delta=1e-8,
 
     no_sinkslot=True,
 
     no_sinkslotcuda=False,
-    sinkslotcuda_slices=[32, 64, 128, 256, 512, 1024, 2048, 4096],
+    sinkslotcuda_slices=_L_SWEEP,
 
     no_sparsink=False,
     no_randsink=True,  # Rand-Sink dropped, no longer of interest
@@ -67,12 +76,13 @@ CONFIG = BenchConfig(
 
     no_ott=True,
     no_rmae_check=False,
-    no_geomloss=True,
-    no_flash_symmetric=True,
+    no_geomloss=False,
+    no_flash_symmetric=False,
     no_flash_alternating=False,
 
     isolate=True,
     tensorized=False,
+    multiscale=True,  # geomloss multiscale (coarse-to-fine), alongside geomloss online below
     max_dense_size=10000,
 
     output_dir="output/table1",

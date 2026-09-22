@@ -1,9 +1,18 @@
 """`stop_mode="marginal"` means the same thing in every implementation.
 
-SinkSLOT, SROT, Spar-Sink and FlashSinkhorn each carry their own Sinkhorn
-loop, and the paper's headline comparisons run all of them under
-`stop_mode="marginal"` at a shared tolerance. That is only a fair comparison
-if "marginal" denotes one rule everywhere:
+SinkSLOT, SROT and Spar-Sink each carry their own Sinkhorn loop, and
+"marginal" remains a supported stop mode for all three (though the paper's
+headline comparisons now run under potential-change instead -- see
+configs/speedup.py). That is only a fair comparison between them if
+"marginal" denotes one rule everywhere:
+
+FlashSinkhorn is not covered here any more: the benchmark harness now calls
+its low-level solvers directly (sinkslot.bench.reference_solvers.
+flashsinkhorn_native_run) instead of going through the cai4cai fork's
+SamplesLoss(stop_mode="marginal") patch, which this file used to pin down.
+Official upstream flash-sinkhorn has no "marginal" mode at all -- only
+potential-change -- so there is no Flash-side marginal rule left to test
+for parity against.
 
     viol = max(max|P1 - a|, max|P^T 1 - b|) <= tol
 
@@ -193,7 +202,7 @@ def test_marginal_rule_is_max_not_total_variation(name):
 
 
 def test_every_implementation_agrees_on_the_same_problem():
-    """All of them, one tolerance, one rule -- the comparison the paper makes."""
+    """All of them, one tolerance, one rule."""
     results = {name: _RUNNERS[name]() for name in sorted(_RUNNERS)}
     viols = {n: _viol(r[0], r[1], r[2], r[3]) for n, r in results.items()}
 
@@ -203,115 +212,3 @@ def test_every_implementation_agrees_on_the_same_problem():
     for name, viol in viols.items():
         assert viol <= TOL * SLACK, f"{name} at {viol:.3e}, tol {TOL:.0e}, all={viols}"
 
-
-# ---------------------------------------------------------------------------
-# FlashSinkhorn: same rule, but it needs the bench extra and a GPU
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("backend", ["alternating", "symmetric"])
-def test_flash_sinkhorn_marginal_mode_matches(backend):
-    """The fork's stop_mode="marginal" must mean what everyone else's does.
-
-    Skipped without CUDA/Triton: FlashSinkhorn is Triton-only with no
-    pure-torch fallback, so this leg cannot run in the CPU CI matrix. It is
-    the one implementation living outside this repo, which is exactly why it
-    is worth pinning down here rather than trusting the dependency.
-    """
-    pytest.importorskip("triton")
-    flash_sinkhorn = pytest.importorskip("flash_sinkhorn")
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
-
-    eps = 0.05
-    x, y, a, b = _problem(device="cuda")
-    # debias/normalize/last_extrapolation off, matching how bench_forward
-    # drives it: with debiasing on, SamplesLoss solves the Sinkhorn-divergence
-    # problem instead, and (f, g) are then not the potentials of the plan whose
-    # marginals this test is about to check.
-    loss_fn = flash_sinkhorn.SamplesLoss(
-        "sinkhorn", backend=backend, use_epsilon_scaling=False, eps=eps,
-        n_iters=MAX_ITER, debias=False, potentials=True, normalize=False,
-        last_extrapolation=False, return_n_iters=True,
-        threshold=TOL, inner_iterations=CHECK_EVERY, stop_mode="marginal",
-        # allow_tf32=False is load-bearing, not tidiness. TF32 carries ~1e-3
-        # relative precision, so with it on (the SamplesLoss default) the
-        # potentials cannot represent a 1e-4 marginal violation at all: the run
-        # still reports converged at the same iteration, but the plan it
-        # returns is off by ~2.4e-3. See
-        # test_flash_marginal_mode_cannot_beat_the_tf32_noise_floor, which pins
-        # that behaviour down deliberately. bench_forward drives every
-        # published comparison with --no-tf32 for the same reason.
-        allow_tf32=False,
-    )
-    f, g, iters = loss_fn(a, x, b, y)
-
-    assert iters < MAX_ITER, f"flash_{backend} never converged"
-
-    cost = _sqeuclid(x, y)
-    P = ((f[:, None] + g[None, :] - cost) / eps).double().exp()
-    P = P * a.double()[:, None] * b.double()[None, :]
-    viol = _viol(P.sum(1), P.sum(0), a, b)
-    assert viol <= TOL * SLACK, (
-        f"flash_{backend}: true max marginal violation {viol:.3e} > tol {TOL:.0e}"
-    )
-
-
-def test_flash_marginal_mode_cannot_beat_the_tf32_noise_floor():
-    """TF32 silently caps how tight `stop_mode="marginal"` can actually get.
-
-    Not a test of desired behaviour -- a record of a real trap. TF32 matmuls
-    carry roughly 1e-3 relative precision, which is coarser than the 1e-4
-    tolerance asked for here. The solver still reports convergence, at the very
-    same iteration it would have without TF32, because the proxy it checks is
-    computed in the same arithmetic that is losing the precision. The plan that
-    comes back misses the requested tolerance by well over an order of
-    magnitude.
-
-    Anything comparing methods on a shared marginal tolerance must therefore
-    disable TF32, which is what bench_forward's --no-tf32 does for every
-    published run. If a future FlashSinkhorn learns to reject or warn about
-    this combination, this test will fail -- and that would be an improvement,
-    so update it rather than restoring TF32.
-    """
-    pytest.importorskip("triton")
-    flash_sinkhorn = pytest.importorskip("flash_sinkhorn")
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
-
-    eps = 0.05
-    x, y, a, b = _problem(device="cuda")
-    cost = _sqeuclid(x, y)
-
-    def solve(allow_tf32):
-        fn = flash_sinkhorn.SamplesLoss(
-            "sinkhorn", backend="alternating", use_epsilon_scaling=False, eps=eps,
-            n_iters=MAX_ITER, debias=False, potentials=True, normalize=False,
-            last_extrapolation=False, return_n_iters=True, threshold=TOL,
-            inner_iterations=CHECK_EVERY, stop_mode="marginal",
-            allow_tf32=allow_tf32,
-        )
-        f, g, iters = fn(a, x, b, y)
-        P = ((f[:, None] + g[None, :] - cost) / eps).double().exp()
-        P = P * a.double()[:, None] * b.double()[None, :]
-        return iters, _viol(P.sum(1), P.sum(0), a, b)
-
-    iters_off, viol_off = solve(False)
-    iters_on, viol_on = solve(True)
-
-    assert viol_off <= TOL * SLACK, f"fp32 leg should hold tol, got {viol_off:.3e}"
-    assert viol_on > TOL * SLACK, (
-        f"TF32 run met the tolerance ({viol_on:.3e}); if FlashSinkhorn fixed "
-        f"this, delete this test and drop allow_tf32=False above"
-    )
-    # The trap is that the run looks normal: it stops after essentially the
-    # same amount of work (within a check interval or two), so nothing about
-    # the iteration count hints that the result is an order of magnitude worse.
-    assert abs(iters_on - iters_off) <= 3 * CHECK_EVERY, (
-        f"TF32 changed the iteration count materially ({iters_on} vs "
-        f"{iters_off}); the failure would then be visible rather than silent, "
-        f"so this test's premise needs revisiting"
-    )
-    assert viol_on > 10 * viol_off, (
-        f"TF32 leg only degraded from {viol_off:.3e} to {viol_on:.3e}"
-    )
