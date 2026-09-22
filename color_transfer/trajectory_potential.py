@@ -18,12 +18,11 @@ per-iteration hook at all).
 
     python -m color_transfer.trajectory_potential --output_dir DIR --method sinkslot
 
-Restart-based checkpointing, same limitation as trajectory.py: none of
-these support resuming from a previous call's potentials, so each
-checkpoint re-solves from scratch at an increasing max_iter budget,
-stopping once a checkpoint genuinely converges (the checkpoint loop does
-not continue past that point, since a larger budget would just re-converge
-to the same answer).
+Restart-based checkpointing: none of these support resuming from a previous
+call's potentials, so each checkpoint re-solves from scratch at an
+increasing max_iter budget, stopping once a checkpoint genuinely converges
+(the checkpoint loop does not continue past that point, since a larger
+budget would just re-converge to the same answer).
 """
 
 import argparse
@@ -36,7 +35,7 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "torch-ext"))
 
-from color_transfer.main_pixel import DEFAULT_PAINTINGS_DIR, list_images, pixels_and_weights
+from color_transfer.main import DEFAULT_PAINTINGS_DIR, list_images, pixels_and_weights
 from sinkslot.bench.reference_solvers import flashsinkhorn_native_run, geomloss_online_native
 
 
