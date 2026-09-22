@@ -253,8 +253,20 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
                 if change < stop.tol:
                     converged = True
                     break
-                torch.utils.swap_tensors(prev_phi, phi)
-                torch.utils.swap_tensors(prev_psi, psi)
+                # NOT swap_tensors: phi/psi are read by seg_lse_online on
+                # every iteration, including the very next one (psi feeds
+                # the phi update, phi feeds the psi update). Swapping in
+                # prev_phi/prev_psi's stale contents would feed that stale
+                # value straight back into the live iteration -- silently
+                # rewinding the actual Sinkhorn recursion, not just the
+                # diagnostic comparison, so the next check_every-iteration
+                # block re-derives the same result instead of progressing.
+                # copy_() updates prev_phi/prev_psi in place without
+                # touching phi/psi's own storage. Same fix already applied
+                # in sinkslot_symmetric_triton's own potential mode, for
+                # the identical reason.
+                prev_phi.copy_(phi)
+                prev_psi.copy_(psi)
         return phi, psi, it, converged, change
 
     # mode == "marginal" -- the only mode left after _resolve_stop_mode.
