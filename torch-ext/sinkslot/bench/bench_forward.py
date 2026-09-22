@@ -2872,7 +2872,7 @@ def run_forward_benchmark(
             if include_geomloss:
                 res = bench_geomloss_online(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, rmae_check=rmae_check,
-                    dataset=dataset, seed=seed,
+                    dataset=dataset, stop=stop, seed=seed,
                 )
                 res.dataset = dataset
                 res.tf32 = allow_tf32

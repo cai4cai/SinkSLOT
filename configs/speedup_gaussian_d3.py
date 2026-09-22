@@ -5,6 +5,10 @@ relate -- this one exists only because a single BenchConfig can't mix dims
 across datasets (dims applies uniformly to every dataset in cfg.datasets), so
 this Gaussian-at-d=3 slice has to be its own config.
 
+6 methods: SinkSLOT-CUDA, FlashSinkhorn-symmetric, FlashSinkhorn-alternating,
+GeomLoss-online, GeomLoss-tensorized (dense), Spar-Sink. SROT is intentionally
+excluded here (unlike configs/speedup.py); no_srot=True below.
+
 Its commands are appended into the SAME per-method output directories as
 configs/speedup.py's 3 non-Gaussian datasets (both configs point --output-dir
 at the same path per method), so each method's forward_all.csv ends up
@@ -51,9 +55,7 @@ CONFIG = BenchConfig(
     seeds=[0],
     datasets=["gaussian"],
 
-    no_srot=False,
-    srot_slices=[32, 64, 128, 256, 512, 1024, 2048, 4096],
-    srot_delta=1e-8,
+    no_srot=True,  # dropped: 6-method roster below doesn't include SROT
 
     no_sinkslot=True,
 
@@ -67,12 +69,12 @@ CONFIG = BenchConfig(
 
     no_ott=True,
     no_rmae_check=False,
-    no_geomloss=True,
-    no_flash_symmetric=True,
+    no_geomloss=False,
+    no_flash_symmetric=False,
     no_flash_alternating=False,
 
     isolate=True,
-    tensorized=False,
+    tensorized=True,  # geomloss tensorized (dense), alongside geomloss online below
     max_dense_size=10000,
 
     output_dir="output/table1",
