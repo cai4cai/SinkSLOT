@@ -22,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from configs.scalability import (  # noqa: E402
     CHECK_EVERY, D_EXP1, D_EXP2, D_SWEEP, EPS_EXP1, EPS_EXP2, EPS_EXP3,
     L_VALUES, MAX_DENSE_SIZE_DSCALE, MAX_DENSE_SIZE_NSCALE, MAX_ITER,
-    METHODS, N_EXP3, N_SWEEP, POTENTIAL_TOL, SEEDS, SROT_DELTA, STOP_MODE, STOP_TOL,
+    METHODS, N_EXP3, N_SWEEP, POTENTIAL_TOL, SEEDS, SPARSINK_REPLICATES,
+    SROT_DELTA, STOP_MODE, STOP_TOL, s_for,
 )
 
 
@@ -62,7 +63,10 @@ def build(d, eps, n, output_dir, *, method, seed, max_dense_size, slices=None,
     cmd += ["--stop-mode", STOP_MODE, "--max-iter", str(MAX_ITER),
             "--stop-tol", str(stop_tol_for(n)), "--potential-tol", str(POTENTIAL_TOL),
             "--check-every", str(CHECK_EVERY)]
-    cmd.append("--no-sparsink")
+    if method == "spar_sink":
+        cmd += ["--sparsink-s", str(slices), "--sparsink-replicates", str(SPARSINK_REPLICATES)]
+    else:
+        cmd.append("--no-sparsink")
     if extra_flags:
         cmd += extra_flags
     return cmd
@@ -84,6 +88,10 @@ def gen_units():
                         for L in L_VALUES:
                             cmds.append(build(d, eps, n, out, method=method, seed=seed,
                                                max_dense_size=MAX_DENSE_SIZE_NSCALE, slices=L))
+                    elif method == "spar_sink":
+                        for s in s_for(n):
+                            cmds.append(build(d, eps, n, out, method=method, seed=seed,
+                                               max_dense_size=MAX_DENSE_SIZE_NSCALE, slices=s))
                     else:
                         cmds.append(build(d, eps, n, out, method=method, seed=seed,
                                            max_dense_size=MAX_DENSE_SIZE_NSCALE))
@@ -99,6 +107,11 @@ def gen_units():
                     for L in L_VALUES:
                         cmds.append(build(d, EPS_EXP3, N_EXP3, out, method=method, seed=seed,
                                            max_dense_size=MAX_DENSE_SIZE_DSCALE, slices=L,
+                                           extra_flags=extra))
+                elif method == "spar_sink":
+                    for s in s_for(N_EXP3):
+                        cmds.append(build(d, EPS_EXP3, N_EXP3, out, method=method, seed=seed,
+                                           max_dense_size=MAX_DENSE_SIZE_DSCALE, slices=s,
                                            extra_flags=extra))
                 else:
                     cmds.append(build(d, EPS_EXP3, N_EXP3, out, method=method, seed=seed,
