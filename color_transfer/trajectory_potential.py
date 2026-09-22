@@ -60,6 +60,20 @@ def parse_args():
     return p.parse_args()
 
 
+def _checkpoint_grid(check_every, max_iter, native_check_every=5):
+    """Restart-checkpoint iteration counts to try: the regular check_every
+    grid, prepended with one extra, much earlier checkpoint at
+    native_check_every (5, matching the solvers' own internal check
+    granularity) when check_every is coarser than that -- gives every curve
+    a genuine, well-defined early data point close to the start, rather
+    than an arbitrary "iteration 0" (not meaningful: nothing to diff
+    against before any updates, since every method inits at f=g=0)."""
+    grid = list(range(check_every, max_iter + 1, check_every))
+    if native_check_every < check_every:
+        grid = [native_check_every] + grid
+    return grid
+
+
 def sinkslot_trajectory(sc, tc, sw, tw, eps, max_iter, check_every, tol, L, seed=0):
     from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
     from sinkslot.solver import sot_plan_coo, sparse_sqeuclidean_cost, to_csr
@@ -79,7 +93,7 @@ def sinkslot_trajectory(sc, tc, sw, tw, eps, max_iter, check_every, tol, L, seed
 
     log_a, log_b = sw.log(), tw.log()
     checkpoints = []
-    for n_try in range(check_every, max_iter + 1, check_every):
+    for n_try in _checkpoint_grid(check_every, max_iter):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         phi, psi, it, converged, change = sinkslot_alternating_triton(
@@ -96,7 +110,7 @@ def sinkslot_trajectory(sc, tc, sw, tw, eps, max_iter, check_every, tol, L, seed
 
 def flashsinkhorn_trajectory(sc, tc, sw, tw, eps, max_iter, check_every, tol, symmetric):
     checkpoints = []
-    for n_try in range(check_every, max_iter + 1, check_every):
+    for n_try in _checkpoint_grid(check_every, max_iter):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         f, g, it, converged, change = flashsinkhorn_native_run(
@@ -113,7 +127,7 @@ def flashsinkhorn_trajectory(sc, tc, sw, tw, eps, max_iter, check_every, tol, sy
 
 def geomloss_trajectory(sc, tc, sw, tw, eps, max_iter, check_every, tol):
     checkpoints = []
-    for n_try in range(check_every, max_iter + 1, check_every):
+    for n_try in _checkpoint_grid(check_every, max_iter):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         f, g, it, converged, change = geomloss_online_native(
