@@ -1,0 +1,34 @@
+{
+  "method": "flashsinkhorn",
+  "eps": 0.1,
+  "tol": 1e-06,
+  "max_iter": 2000,
+  "check_every": 50,
+  "pair": [
+    "banks-of-rivers-the-thames-hampton-court-first-week-of-october-1874.jpg",
+    "the-toques-at-saint-arnoult-1891.jpg"
+  ],
+  "n": 40711,
+  "m": 56488,
+  "setup_time": 0.0,
+  "checkpoints": [
+    {
+      "iters": 50,
+      "time": 2.7376230190275237,
+      "potential_change": 0.0014744400978088379,
+      "converged": false
+    },
+    {
+      "iters": 100,
+      "time": 5.552336506021675,
+      "potential_change": 8.791685104370117e-06,
+      "converged": false
+    },
+    {
+      "iters": 125,
+      "time": 6.963678786007222,
+      "potential_change": 8.195638656616211e-07,
+      "converged": true
+    }
+  ]
+}
