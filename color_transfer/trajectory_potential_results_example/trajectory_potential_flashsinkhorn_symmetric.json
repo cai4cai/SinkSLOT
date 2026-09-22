@@ -3,7 +3,7 @@
   "eps": 0.1,
   "tol": 1e-06,
   "max_iter": 2000,
-  "check_every": 50,
+  "check_every": 10,
   "pair": [
     "banks-of-rivers-the-thames-hampton-court-first-week-of-october-1874.jpg",
     "the-toques-at-saint-arnoult-1891.jpg"
@@ -13,56 +13,266 @@
   "setup_time": 0.0,
   "checkpoints": [
     {
+      "iters": 7,
+      "time": 0.38899567496264353,
+      "potential_change": 0.036394134163856506,
+      "converged": false
+    },
+    {
+      "iters": 12,
+      "time": 0.6666271790163592,
+      "potential_change": 0.029575854539871216,
+      "converged": false
+    },
+    {
+      "iters": 22,
+      "time": 1.2379066980211064,
+      "potential_change": 0.02177157998085022,
+      "converged": false
+    },
+    {
+      "iters": 32,
+      "time": 1.8090836660121568,
+      "potential_change": 0.016682565212249756,
+      "converged": false
+    },
+    {
+      "iters": 42,
+      "time": 2.381733104994055,
+      "potential_change": 0.012900084257125854,
+      "converged": false
+    },
+    {
       "iters": 52,
-      "time": 2.957417864992749,
+      "time": 2.951681306003593,
       "potential_change": 0.010006040334701538,
       "converged": false
     },
     {
+      "iters": 62,
+      "time": 3.5226454290095717,
+      "potential_change": 0.007771432399749756,
+      "converged": false
+    },
+    {
+      "iters": 72,
+      "time": 4.093814452004153,
+      "potential_change": 0.0060389041900634766,
+      "converged": false
+    },
+    {
+      "iters": 82,
+      "time": 4.664947126992047,
+      "potential_change": 0.004693120718002319,
+      "converged": false
+    },
+    {
+      "iters": 92,
+      "time": 5.235801364004146,
+      "potential_change": 0.0036469995975494385,
+      "converged": false
+    },
+    {
       "iters": 102,
-      "time": 5.804014427994844,
+      "time": 5.807514085026924,
       "potential_change": 0.002833455801010132,
       "converged": false
     },
     {
+      "iters": 112,
+      "time": 6.378249267989304,
+      "potential_change": 0.002200871706008911,
+      "converged": false
+    },
+    {
+      "iters": 122,
+      "time": 6.949323539971374,
+      "potential_change": 0.0017090439796447754,
+      "converged": false
+    },
+    {
+      "iters": 132,
+      "time": 7.520729203009978,
+      "potential_change": 0.0013270080089569092,
+      "converged": false
+    },
+    {
+      "iters": 142,
+      "time": 8.091183391050436,
+      "potential_change": 0.0010300874710083008,
+      "converged": false
+    },
+    {
       "iters": 152,
-      "time": 8.661287434981205,
+      "time": 8.661990665015765,
       "potential_change": 0.0007996559143066406,
       "converged": false
     },
     {
+      "iters": 162,
+      "time": 9.233309692004696,
+      "potential_change": 0.0006205141544342041,
+      "converged": false
+    },
+    {
+      "iters": 172,
+      "time": 9.804260502976831,
+      "potential_change": 0.0004814565181732178,
+      "converged": false
+    },
+    {
+      "iters": 182,
+      "time": 10.375064932974055,
+      "potential_change": 0.00037366151809692383,
+      "converged": false
+    },
+    {
+      "iters": 192,
+      "time": 10.946692758996505,
+      "potential_change": 0.0002898871898651123,
+      "converged": false
+    },
+    {
       "iters": 202,
-      "time": 11.512429668975528,
+      "time": 11.517637426964939,
       "potential_change": 0.00022497773170471191,
       "converged": false
     },
     {
+      "iters": 212,
+      "time": 12.088970292999875,
+      "potential_change": 0.00017461180686950684,
+      "converged": false
+    },
+    {
+      "iters": 222,
+      "time": 12.660980273038149,
+      "potential_change": 0.0001354217529296875,
+      "converged": false
+    },
+    {
+      "iters": 232,
+      "time": 13.233497969980817,
+      "potential_change": 0.00010505318641662598,
+      "converged": false
+    },
+    {
+      "iters": 242,
+      "time": 13.80284727999242,
+      "potential_change": 8.156895637512207e-05,
+      "converged": false
+    },
+    {
       "iters": 252,
-      "time": 14.366808732971549,
+      "time": 14.373896130011417,
       "potential_change": 6.327033042907715e-05,
       "converged": false
     },
     {
+      "iters": 262,
+      "time": 14.94506671599811,
+      "potential_change": 4.9054622650146484e-05,
+      "converged": false
+    },
+    {
+      "iters": 272,
+      "time": 15.515479210997,
+      "potential_change": 3.808736801147461e-05,
+      "converged": false
+    },
+    {
+      "iters": 282,
+      "time": 16.086975112964865,
+      "potential_change": 2.9593706130981445e-05,
+      "converged": false
+    },
+    {
+      "iters": 292,
+      "time": 16.65785949100973,
+      "potential_change": 2.300739288330078e-05,
+      "converged": false
+    },
+    {
       "iters": 302,
-      "time": 17.223557887016796,
+      "time": 17.227879484998994,
       "potential_change": 1.7881393432617188e-05,
       "converged": false
     },
     {
+      "iters": 312,
+      "time": 17.82561108499067,
+      "potential_change": 1.385807991027832e-05,
+      "converged": false
+    },
+    {
+      "iters": 322,
+      "time": 18.3712082739803,
+      "potential_change": 1.0788440704345703e-05,
+      "converged": false
+    },
+    {
+      "iters": 332,
+      "time": 18.9414251059643,
+      "potential_change": 8.404254913330078e-06,
+      "converged": false
+    },
+    {
+      "iters": 342,
+      "time": 19.51445646205684,
+      "potential_change": 6.496906280517578e-06,
+      "converged": false
+    },
+    {
       "iters": 352,
-      "time": 20.07914887199877,
+      "time": 20.123571425967384,
       "potential_change": 5.0961971282958984e-06,
       "converged": false
     },
     {
+      "iters": 362,
+      "time": 20.653080062998924,
+      "potential_change": 3.933906555175781e-06,
+      "converged": false
+    },
+    {
+      "iters": 372,
+      "time": 21.39362980698934,
+      "potential_change": 3.0994415283203125e-06,
+      "converged": false
+    },
+    {
+      "iters": 382,
+      "time": 21.795614457980264,
+      "potential_change": 2.4437904357910156e-06,
+      "converged": false
+    },
+    {
+      "iters": 392,
+      "time": 22.366164416016545,
+      "potential_change": 1.8775463104248047e-06,
+      "converged": false
+    },
+    {
       "iters": 402,
-      "time": 22.932890017982572,
+      "time": 22.938064021000173,
       "potential_change": 1.4603137969970703e-06,
       "converged": false
     },
     {
+      "iters": 412,
+      "time": 23.507462364039384,
+      "potential_change": 1.1920928955078125e-06,
+      "converged": false
+    },
+    {
+      "iters": 422,
+      "time": 24.07931979902787,
+      "potential_change": 9.238719940185547e-07,
+      "converged": false
+    },
+    {
       "iters": 427,
-      "time": 24.36135684896726,
+      "time": 24.365464912028983,
       "potential_change": 8.344650268554688e-07,
       "converged": true
     }

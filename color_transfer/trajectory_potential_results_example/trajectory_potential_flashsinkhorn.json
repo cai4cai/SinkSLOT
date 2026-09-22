@@ -3,7 +3,7 @@
   "eps": 0.1,
   "tol": 1e-06,
   "max_iter": 2000,
-  "check_every": 50,
+  "check_every": 10,
   "pair": [
     "banks-of-rivers-the-thames-hampton-court-first-week-of-october-1874.jpg",
     "the-toques-at-saint-arnoult-1891.jpg"
@@ -13,20 +13,86 @@
   "setup_time": 0.0,
   "checkpoints": [
     {
+      "iters": 5,
+      "time": 0.19858309300616384,
+      "potential_change": 0.2630174160003662,
+      "converged": false
+    },
+    {
+      "iters": 10,
+      "time": 0.47162407904397696,
+      "potential_change": 0.09010162949562073,
+      "converged": false
+    },
+    {
+      "iters": 20,
+      "time": 1.03677832899848,
+      "potential_change": 0.031890567392110825,
+      "converged": false
+    },
+    {
+      "iters": 30,
+      "time": 1.6015707850456238,
+      "potential_change": 0.011477507650852203,
+      "converged": false
+    },
+    {
+      "iters": 40,
+      "time": 2.166511157003697,
+      "potential_change": 0.004118666052818298,
+      "converged": false
+    },
+    {
       "iters": 50,
-      "time": 2.7376230190275237,
+      "time": 2.7313641090295278,
       "potential_change": 0.0014744400978088379,
       "converged": false
     },
     {
+      "iters": 60,
+      "time": 3.296276064007543,
+      "potential_change": 0.000527307391166687,
+      "converged": false
+    },
+    {
+      "iters": 70,
+      "time": 3.861606515944004,
+      "potential_change": 0.0001885145902633667,
+      "converged": false
+    },
+    {
+      "iters": 80,
+      "time": 4.42620118195191,
+      "potential_change": 6.751716136932373e-05,
+      "converged": false
+    },
+    {
+      "iters": 90,
+      "time": 4.990905070968438,
+      "potential_change": 2.4273991584777832e-05,
+      "converged": false
+    },
+    {
       "iters": 100,
-      "time": 5.552336506021675,
+      "time": 5.555851019977126,
       "potential_change": 8.791685104370117e-06,
       "converged": false
     },
     {
+      "iters": 110,
+      "time": 6.12094288202934,
+      "potential_change": 3.248453140258789e-06,
+      "converged": false
+    },
+    {
+      "iters": 120,
+      "time": 6.698239108023699,
+      "potential_change": 1.2516975402832031e-06,
+      "converged": false
+    },
+    {
       "iters": 125,
-      "time": 6.963678786007222,
+      "time": 6.967504791973624,
       "potential_change": 8.195638656616211e-07,
       "converged": true
     }
