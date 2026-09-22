@@ -5,9 +5,11 @@ relate -- this one exists only because a single BenchConfig can't mix dims
 across datasets (dims applies uniformly to every dataset in cfg.datasets), so
 this Gaussian-at-d=3 slice has to be its own config.
 
-6 methods: SinkSLOT-CUDA, FlashSinkhorn-symmetric, FlashSinkhorn-alternating,
-GeomLoss-online, GeomLoss-tensorized (dense), Spar-Sink. SROT is intentionally
-excluded here (unlike configs/speedup.py); no_srot=True below.
+7 methods: SinkSLOT-CUDA, SROT, FlashSinkhorn-symmetric, FlashSinkhorn-alternating,
+GeomLoss-online, GeomLoss-multiscale (coarse-to-fine), Spar-Sink. SinkSLOT-CUDA and
+SROT share the same L sweep (sinkslotcuda_slices/srot_slices below): a more
+natural human-readable grid (10, 25, 50, ..., 5000) instead of the powers-of-2
+grid configs/speedup.py still uses.
 
 Its commands are appended into the SAME per-method output directories as
 configs/speedup.py's 3 non-Gaussian datasets (both configs point --output-dir
@@ -30,6 +32,9 @@ from configs.base import BenchConfig
 _n = 10000
 _s0 = 1e-3 * _n * (math.log(_n) ** 4)
 _sparsink_s = [int(round(k * _s0)) for k in [5, 10, 15, 20]]
+
+# More natural/readable than a powers-of-2 grid; shared by SinkSLOT-CUDA and SROT.
+_L_SWEEP = [10, 25, 50, 100, 250, 500, 1000, 5000]
 
 CONFIG = BenchConfig(
 
@@ -55,12 +60,14 @@ CONFIG = BenchConfig(
     seeds=[0],
     datasets=["gaussian"],
 
-    no_srot=True,  # dropped: 6-method roster below doesn't include SROT
+    no_srot=False,
+    srot_slices=_L_SWEEP,
+    srot_delta=1e-8,
 
     no_sinkslot=True,
 
     no_sinkslotcuda=False,
-    sinkslotcuda_slices=[32, 64, 128, 256, 512, 1024, 2048, 4096],
+    sinkslotcuda_slices=_L_SWEEP,
 
     no_sparsink=False,
     no_randsink=True,  # Rand-Sink dropped, no longer of interest
@@ -74,7 +81,8 @@ CONFIG = BenchConfig(
     no_flash_alternating=False,
 
     isolate=True,
-    tensorized=True,  # geomloss tensorized (dense), alongside geomloss online below
+    tensorized=False,
+    multiscale=True,  # geomloss multiscale (coarse-to-fine), alongside geomloss online below
     max_dense_size=10000,
 
     output_dir="output/table1",

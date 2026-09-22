@@ -1335,6 +1335,99 @@ def bench_geomloss_online(
                             n_iters=n_iters, seed=seed)
 
 
+def bench_geomloss_multiscale(
+    n: int, m: int, d: int, eps: float, n_iters: int,
+    device: torch.device, warmup: int, rep: int,
+    *,
+    nvtx: bool = False,
+    rmae_check: bool = True,
+    dataset: str = "gaussian",
+    stop: "StopCfg" = None,
+    seed: int = 0,
+) -> TimingResult:
+    """Benchmark GeomLoss multiscale (KeOps): coarse warm-start, one coarse-to-fine
+    jump, then fine-resolution updates, via reference_solvers.geomloss_multiscale_native
+    (GeomLoss's own clusterize/kernel_truncation/extrapolate_samples/softmin_multiscale
+    reused directly, not its high-level sinkhorn_multiscale, which anneals eps --
+    incompatible with this repo's fixed-eps convention; see that function's own
+    docstring for the coarse/fine split).
+
+    Unlike bench_geomloss_online, geomloss_multiscale_native has no "marginal" stop
+    mode at all (only the potential-change check, max(|df|,|dg|)) -- so any
+    non-"fixed" stop.mode here means potential-change stopping, matching
+    bench_flashsinkhorn's own convention. stop=None or mode="fixed": threshold=None,
+    runs exactly n_iters fine iterations (after the fixed coarse warmup), no
+    stopping check.
+
+    Cost convention: SqDist(X,Y) = ||x-y||² (full squared Euclidean, matches FlashSinkhorn).
+    dataset: "gaussian" (default), "8gaussians", "half_moon", or "two_rings"; see sample_point_cloud().
+    seed: data-generation seed only (x, y, a, b).
+    """
+    try:
+        from pykeops.torch import generic_logsumexp  # noqa: F401 - needed by keops_lse
+    except ImportError:
+        return TimingResult("geomloss_multiscale", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
+
+    from sinkslot.bench.reference_solvers import geomloss_multiscale_native
+
+    torch.manual_seed(seed)
+    x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
+    y = sample_point_cloud(m, d, device, dataset=dataset, target=True)
+    a = torch.rand(n, device=device, dtype=torch.float32) + 0.1
+    b = torch.rand(m, device=device, dtype=torch.float32) + 0.1
+    a = a / a.sum()
+    b = b / b.sum()
+
+    _stop = stop or StopCfg.fixed()
+    _max_iter = n_iters if _stop.mode == "fixed" else _stop.max_iter
+    _threshold = None if _stop.mode == "fixed" else _stop.tol
+
+    def run():
+        geomloss_multiscale_native(
+            x, y, a, b, eps, _max_iter, threshold=_threshold, check_every=_stop.check_every)
+
+    try:
+        f, g, iters_run, converged, _cost, _last_change = geomloss_multiscale_native(
+            x, y, a, b, eps, _max_iter, threshold=_threshold, check_every=_stop.check_every)
+        torch.cuda.synchronize()
+    except Exception:
+        return TimingResult("geomloss_multiscale", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
+                            n_iters=n_iters, seed=seed)
+    hit_max_iters = None if _stop.mode == "fixed" else iters_run >= _max_iter
+
+    cost_gap_pct = None
+    bary = None
+    feas: dict = {}
+    if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
+        cost = torch.cdist(x, y, p=2) ** 2
+        T = a.unsqueeze(1) * b.unsqueeze(0) * ((f.unsqueeze(1) + g.unsqueeze(0) - cost) / eps).exp()
+        plan_cost = float((T * cost).sum())
+        Tx, Ty, r, c = plan_barycentric_dense(T, x, y)
+        ref = _cached_exact_ot_reference(n, m, d, seed, x, y, a, b, dataset=dataset)
+        cost_gap_pct = cost_gap(plan_cost, ref)
+        bary = barycentric_sym(Tx, Ty, ref, a, b)
+        feas = plan_feasibility(r, c, a, b)
+
+    try:
+        mean, std, min_t, max_t, median = bench_with_stats(
+            run,
+            warmup,
+            rep,
+            nvtx=nvtx,
+            nvtx_label=f"geomloss_multiscale n={n} d={d} eps={eps} iters={n_iters}",
+        )
+        gpu_memory_mb = gpu_memory_used_mb(device)
+        return TimingResult(
+            "geomloss_multiscale", n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False,
+            n_iters=n_iters, cost_gap_pct=cost_gap_pct, barycentric_sym=bary,
+            iters_run=iters_run, converged=converged, hit_max_iters=hit_max_iters,
+            seed=seed, **feas,
+        )
+    except torch.cuda.OutOfMemoryError:
+        return TimingResult("geomloss_multiscale", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
+                            n_iters=n_iters, seed=seed)
+
+
 def bench_geomloss_tensorized(
     n: int, m: int, d: int, eps: float, n_iters: int,
     device: torch.device, warmup: int, rep: int,
@@ -2770,6 +2863,7 @@ def run_forward_benchmark(
     include_ott: bool = True,
     include_geomloss: bool = True,
     include_tensorized: bool = False,
+    include_multiscale: bool = False,
     max_dense_size: int = 8192,
     verbose: bool = True,
     nvtx: bool = False,
@@ -2881,6 +2975,20 @@ def run_forward_benchmark(
                 if verbose:
                     status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
                     print(f"  GeomLoss KeOps:        {status}")
+
+            # GeomLoss multiscale (KeOps)
+            if include_geomloss and include_multiscale:
+                res = bench_geomloss_multiscale(
+                    n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, rmae_check=rmae_check,
+                    dataset=dataset, stop=stop, seed=seed,
+                )
+                res.dataset = dataset
+                res.tf32 = allow_tf32
+                res.seed = seed
+                results.append(res)
+                if verbose:
+                    status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
+                    print(f"  GeomLoss Multiscale:   {status}")
 
             # GeomLoss tensorized (dense, small sizes only)
             if include_geomloss and include_tensorized and n <= max_dense_size:
@@ -3486,6 +3594,8 @@ def run_forward_benchmark_subprocess(
             cmd.extend(["--dataset", args.dataset])
         if args.tensorized:
             cmd.extend(["--tensorized", "--max-dense-size", str(args.max_dense_size)])
+        if args.multiscale:
+            cmd.append("--multiscale")
         if args.only is not None:
             cmd.extend(["--only", args.only])
 
@@ -3610,6 +3720,8 @@ def main() -> None:
     parser.add_argument("--tensorized", action="store_true", help="Include tensorized/dense benchmarks.")
     parser.add_argument("--max-dense-size", type=int, default=20000,
                         help="Max size for tensorized/dense methods (to avoid OOM). Default: 20000.")
+    parser.add_argument("--multiscale", action="store_true",
+                        help="Include GeomLoss multiscale (coarse-to-fine, KeOps) alongside GeomLoss online.")
     parser.add_argument("--tf32", action="store_true", default=True,
                         help="Enable TF32 for ~2x speedup (default: enabled).")
     parser.add_argument("--no-tf32", dest="tf32", action="store_false",
@@ -3685,6 +3797,7 @@ def main() -> None:
         include_sinkslot = not args.no_sinkslot
         include_sinkslotcuda = not args.no_sinkslotcuda
         include_tensorized = bool(args.tensorized)
+        include_multiscale = bool(args.multiscale)
 
         if args.only is not None:
             include_flash_symmetric = args.only in ("flash_symmetric", "flash")
@@ -3697,6 +3810,8 @@ def main() -> None:
             include_sinkslotcuda = args.only == "sinkslotcuda"
             if not (include_geomloss or include_ott):
                 include_tensorized = False
+            if not include_geomloss:
+                include_multiscale = False
 
         results = run_forward_benchmark(
             sizes=[args.single_size],
@@ -3711,6 +3826,7 @@ def main() -> None:
             include_ott=include_ott,
             include_geomloss=include_geomloss,
             include_tensorized=include_tensorized,
+            include_multiscale=include_multiscale,
             max_dense_size=args.max_dense_size,
             verbose=False,
             nvtx=False,
@@ -3806,6 +3922,7 @@ def main() -> None:
     include_sinkslot = not args.no_sinkslot
     include_sinkslotcuda = not args.no_sinkslotcuda
     include_tensorized = bool(args.tensorized)
+    include_multiscale = bool(args.multiscale)
 
     if args.only is not None:
         include_flash_symmetric = args.only in ("flash_symmetric", "flash")
@@ -3820,6 +3937,9 @@ def main() -> None:
             print("Warning: Ignoring --tensorized -- --only selected a method with no "
                   "tensorized/dense counterpart.")
             include_tensorized = False
+        if include_multiscale and not include_geomloss:
+            print("Warning: Ignoring --multiscale -- --only selected a method other than geomloss.")
+            include_multiscale = False
 
     mode_label = "Subprocess Mode" if args.subprocess else "In-Process (bucketed cache keys)"
     print(f"Forward Pass Benchmark ({mode_label})")
@@ -3838,6 +3958,7 @@ def main() -> None:
     print(f"  Seed: {args.seed} (data only)")
     print(f"  Stop: {args.stop_mode}" + ("" if args.stop_mode=="fixed" else f" (tol={args.stop_tol:g}, max_iter={args.max_iter}, every={args.check_every})"))
     print(f"  Include tensorized: {args.tensorized} (max size: {args.max_dense_size})")
+    print(f"  Include multiscale: {include_multiscale}")
     if args.only is not None:
         print(f"  Only: {args.only}")
     if not args.subprocess:
@@ -3864,6 +3985,7 @@ def main() -> None:
             include_ott=include_ott,
             include_geomloss=include_geomloss,
             include_tensorized=include_tensorized,
+            include_multiscale=include_multiscale,
             max_dense_size=args.max_dense_size,
             verbose=not args.quiet,
             nvtx=nvtx_enabled,

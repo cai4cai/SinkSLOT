@@ -99,6 +99,8 @@ class BenchConfig:
             footprint. Costs ~5s of CUDA/JIT startup per row.
 
         tensorized: Include the dense O(n^2) GeomLoss baseline.
+        multiscale: Include GeomLoss multiscale (coarse-to-fine, KeOps) alongside
+            GeomLoss online.
         max_dense_size: Largest n for which dense methods run -- the tensorized
             baseline, SROT, and Spar-Sink/Rand-Sink's probability build.
 
@@ -173,6 +175,7 @@ class BenchConfig:
     isolate: bool = True
 
     tensorized: bool = False
+    multiscale: bool = False
     max_dense_size: int = 512
 
     verify: bool = False
