@@ -1091,8 +1091,18 @@ def bench_flashsinkhorn(
 
     Uses full squared Euclidean cost C(x,y) = ||x-y||² (half_cost=False default).
     Autotuning is enabled for best Triton kernel performance (~2-3s first call overhead).
+
+    Calls sinkhorn_flashstyle_symmetric/_alternating directly via
+    reference_solvers.flashsinkhorn_native_run, not SamplesLoss: upstream's
+    SamplesLoss(potentials=True, backend="alternating") never threads
+    threshold/check_every through to the low-level call, so early stopping
+    silently no-ops for that one combination -- calling the low-level
+    functions ourselves sidesteps it entirely and drops the need for the
+    cai4cai fork. This also means "marginal" stop mode is no longer
+    available for Flash (upstream's only native rule is potential-change);
+    any non-fixed stop.mode here means potential-change stopping.
     """
-    from flash_sinkhorn import SamplesLoss
+    from sinkslot.bench.reference_solvers import flashsinkhorn_native_run
 
     torch.manual_seed(seed)
     x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
@@ -1103,90 +1113,41 @@ def bench_flashsinkhorn(
     b = b / b.sum()
 
     _stop = stop or StopCfg.fixed()
-    if _stop.mode == "fixed":
-        _fs_kwargs = {}
-    else:
-        # FlashSinkhorn's own SamplesLoss only knows "potential_linf" (its native
-        # rule) and "marginal" (added to match SROT/SinkSLOT/Spar-Sink's proven
-        # convention). Spar-Sink's own "potential" mode (max change in the scaling
-        # variable, a different quantity) has no Flash equivalent -- fall back to
-        # potential_linf for it, preserving this function's pre-existing behavior
-        # for that mode (it never distinguished "potential" from "potential_linf").
-        _fs_stop_mode = "marginal" if _stop.mode == "marginal" else "potential_linf"
-        _fs_kwargs = {
-            "threshold": _stop.tol, "inner_iterations": _stop.check_every,
-            "stop_mode": _fs_stop_mode,
-        }
     _fs_iters = n_iters if _stop.mode == "fixed" else _stop.max_iter
-    loss_fn = SamplesLoss(
-        "sinkhorn",
-        backend=backend,
-        use_epsilon_scaling=False,
-        eps=eps,
-        n_iters=_fs_iters,
-        debias=False,
-        potentials=False,
-        normalize=False,
-        autotune=True,  # Enable Triton kernel tuning (~2-3s first call overhead)
-        last_extrapolation=False,  # Match GeomLoss benchmark setting
-        allow_tf32=allow_tf32,
-        **_fs_kwargs,
-    )
-
+    _threshold = None if _stop.mode == "fixed" else _stop.tol
+    symmetric = backend == "symmetric"
     method_name = f"flash_{backend}"
 
     def run():
-        _ = loss_fn(a, x, b, y)
+        flashsinkhorn_native_run(
+            x, y, a, b, eps, _fs_iters, threshold=_threshold,
+            check_every=_stop.check_every, symmetric=symmetric, allow_tf32=allow_tf32,
+        )
 
     try:
-        # Trigger Triton JIT compilation + autotuning here, outside the peak-memory
-        # window, so the one-time compile overhead doesn't get counted as steady-state
-        # memory (matches the GeomLoss/KeOps benchmark's pre-JIT warmup below).
-        loss_fn(a, x, b, y)
+        # This same call also triggers Triton JIT compilation + autotuning,
+        # outside the peak-memory window below, and doubles as the untimed
+        # potentials extraction (f, g, iters_run) needed regardless of
+        # rmae_check -- one call covers warmup, iteration tracking, and the
+        # cost_gap/barycentric_sym inputs, where SamplesLoss needed up to
+        # three separate calls for the same information.
+        f, g, iters_run, converged, _cost = flashsinkhorn_native_run(
+            x, y, a, b, eps, _fs_iters, threshold=_threshold,
+            check_every=_stop.check_every, symmetric=symmetric, allow_tf32=allow_tf32,
+        )
         torch.cuda.synchronize()
     except torch.cuda.OutOfMemoryError:
         return TimingResult(method_name, n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
 
+    hit_max_iters = None if _stop.mode == "fixed" else iters_run >= _fs_iters
+
     cost_gap_pct = None
     bary = None
     feas: dict = {}
-    iters_run = n_iters if _stop.mode == "fixed" else None
-    converged = None
-    hit_max_iters = None
-    f = g = None
-
-    # Iteration tracking is decoupled from the cost_gap machinery below: the
-    # timed run() above goes through _SinkhornCostFn.apply (an autograd.Function,
-    # tensors-only return), so return_n_iters has no side channel there -- but
-    # this untimed potentials call is O(n) (no dense n*m materialization), so
-    # it's safe to run even at N where the dense plan reconstruction below would
-    # OOM. Always get it when early stopping is in play, independent of rmae_check.
-    if _stop.mode != "fixed":
-        potentials_fn = SamplesLoss(
-            "sinkhorn", backend=backend, use_epsilon_scaling=False, eps=eps,
-            n_iters=_fs_iters, debias=False, potentials=True, normalize=False,
-            autotune=True, last_extrapolation=False, allow_tf32=allow_tf32,
-            return_n_iters=True,
-            **_fs_kwargs,
-        )
-        f, g, iters_run = potentials_fn(a, x, b, y)
-        converged = iters_run < _stop.max_iter
-        hit_max_iters = iters_run >= _stop.max_iter
-
     if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
         # Flash never materializes a plan (the point of its streaming kernels), so
-        # cost_gap/barycentric_sym need (f, g) from an UNTIMED potentials call, then
+        # cost_gap/barycentric_sym need (f, g) from the untimed call above, then
         # a dense O(n*m) plan materialized post-hoc, outside the timed region.
-        # Reuse the potentials already computed above if we have them (deterministic
-        # solve, so identical to a fresh call); only fixed mode needs one here.
-        if f is None:
-            potentials_fn = SamplesLoss(
-                "sinkhorn", backend=backend, use_epsilon_scaling=False, eps=eps,
-                n_iters=_fs_iters, debias=False, potentials=True, normalize=False,
-                autotune=True, last_extrapolation=False, allow_tf32=allow_tf32,
-                **_fs_kwargs,
-            )
-            f, g = potentials_fn(a, x, b, y)
         cost = torch.cdist(x, y, p=2) ** 2
         T = a.unsqueeze(1) * b.unsqueeze(0) * ((f.unsqueeze(1) + g.unsqueeze(0) - cost) / eps).exp()
         plan_cost = float((T * cost).sum())
