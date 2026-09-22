@@ -21,7 +21,7 @@ import torch
 
 from color_transfer.trajectory_potential import DEFAULT_PAINTINGS_DIR, StopCfg, list_images, pixels_and_weights
 from sinkslot.bench.reference_solvers import (
-    flashsinkhorn_native_run, geomloss_online_native, marginal_violation_dense,
+    flashsinkhorn_native_run, geomloss_multiscale_native, geomloss_online_native, marginal_violation_dense,
     sinkslot_marginal_violation,
 )
 
@@ -87,6 +87,18 @@ def geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
             "iterations": it, "converged": bool(converged), "marginal_violation": viol}
 
 
+def geomloss_multiscale_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
+    geomloss_multiscale_native(sc, tc, sw, tw, eps, 10)  # warmup
+
+    def solve():
+        return geomloss_multiscale_native(sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every)
+
+    (f, g, it, converged, cost, change), dt, peak = measure(solve)
+    viol = marginal_violation_dense(sc, tc, sw, tw, eps, f, g)
+    return {"method": "GeomLoss (multiscale)", "cost": cost, "time": dt, "peak_memory_bytes": peak,
+            "iterations": it, "converged": bool(converged), "marginal_violation": viol}
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--paintings_dir", type=str, default=str(DEFAULT_PAINTINGS_DIR))
@@ -121,6 +133,7 @@ def main():
         flashsinkhorn_row("FlashSinkhorn (symmetric)", sc, tc, sw, tw, args.eps, args.max_iter,
                            args.tol, args.check_every, symmetric=True),
         geomloss_row(sc, tc, sw, tw, args.eps, args.max_iter, args.tol, args.check_every),
+        geomloss_multiscale_row(sc, tc, sw, tw, args.eps, args.max_iter, args.tol, args.check_every),
     ]
 
     header = f"{'Method':<28} {'Cost':>10} {'Time (s)':>10} {'Peak mem (GB)':>14} {'Iterations':>11} {'Converged':>10} {'Marg. viol.':>12}"
