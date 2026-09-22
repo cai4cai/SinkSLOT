@@ -26,7 +26,12 @@ Restart-based checkpointing: none of these support resuming from a previous
 call's potentials, so each checkpoint re-solves from scratch at an
 increasing max_iter budget, stopping once a checkpoint genuinely converges
 (the checkpoint loop does not continue past that point, since a larger
-budget would just re-converge to the same answer).
+budget would just re-converge to the same answer). This is expensive
+(total work grows like the sum of the checkpoint grid, not linearly) and
+only worth it for the trajectory curve itself; for just the final numbers
+(cost, runtime, peak memory, iterations), use convergence_table.py instead,
+which calls each solver once with its own native threshold/check_every and
+never restarts.
 
 Point cloud: the UNIQUE RGB colors of an image, not raw pixels and not a
 palette/cluster reduction -- duplicate pixels collapse into one point, and
