@@ -8,13 +8,17 @@ docstring for the verification that SinkSLOT's eps*max(|dphi|,|dpsi|) and
 FlashSinkhorn's/GeomLoss's max(|df|,|dg|) are the mathematically IDENTICAL
 quantity once phi=f/eps is accounted for).
 
-Four methods, all checked under the SAME verified-equivalent criterion:
+Five methods, all checked under the SAME verified-equivalent criterion:
 SinkSLOT (native "potential" mode, now fixed), FlashSinkhorn alternating
 and symmetric (upstream's own native threshold/check_every, no fork
-needed), GeomLoss online (reference_solvers.geomloss_online_native, a
-from-scratch reimplementation of sinkhorn_loop's own update math with the
-same native-style check added, since GeomLoss's library code has no
-per-iteration hook at all).
+needed), GeomLoss online and multiscale (reference_solvers'
+geomloss_online_native / geomloss_multiscale_native, from-scratch
+reimplementations of GeomLoss's own update math with the same native-style
+check added, since GeomLoss's library code has no per-iteration hook at
+all). Each checkpoint also records the entropic transport cost recovered
+from the dual potentials (cheap: <a,f> + <b,g>) -- not expected to match
+bit-for-bit across methods (different reference measures/resolutions), but
+a useful sanity signal that every method converges to a comparable value.
 
     python -m color_transfer.trajectory_potential --output_dir DIR --method sinkslot
 
@@ -23,6 +27,12 @@ call's potentials, so each checkpoint re-solves from scratch at an
 increasing max_iter budget, stopping once a checkpoint genuinely converges
 (the checkpoint loop does not continue past that point, since a larger
 budget would just re-converge to the same answer).
+
+Point cloud: the UNIQUE RGB colors of an image, not raw pixels and not a
+palette/cluster reduction -- duplicate pixels collapse into one point, and
+their counts become that point's mass, via pixels_and_weights() below.
+color_transfer/paintings/ ships 12 Monet paintings (public domain; Monet
+died 1926) as the default dataset.
 """
 
 import argparse
@@ -30,13 +40,46 @@ import json
 import os
 import sys
 import time
+from dataclasses import dataclass
+from pathlib import Path
 
 import torch
+from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "torch-ext"))
 
-from color_transfer.main import DEFAULT_PAINTINGS_DIR, list_images, pixels_and_weights
-from sinkslot.bench.reference_solvers import flashsinkhorn_native_run, geomloss_online_native
+from sinkslot.bench.reference_solvers import (
+    flashsinkhorn_native_run, geomloss_multiscale_native, geomloss_online_native,
+)
+
+DEFAULT_PAINTINGS_DIR = Path(__file__).parent / "paintings"
+
+
+@dataclass
+class StopCfg:
+    """Duck-typed stop config accepted by sinkslot_alternating_triton's
+    `stop` argument (mode/max_iter/check_every/tol attributes only)."""
+    mode: str = "potential"
+    max_iter: int = 5000
+    check_every: int = 500
+    tol: float = 1e-6
+
+
+def list_images(root):
+    valid_ext = {".jpg", ".jpeg", ".png"}
+    return [os.path.join(root, n) for n in sorted(os.listdir(root))
+            if os.path.splitext(n)[1].lower() in valid_ext]
+
+
+def pixels_and_weights(path, device, dtype):
+    """Unique RGB pixel values with summed weights -- duplicate pixels combined."""
+    img = Image.open(path).convert("RGB")
+    raw = torch.frombuffer(bytearray(img.tobytes()), dtype=torch.uint8).view(-1, 3).to(device)
+    total = raw.shape[0]
+    uniq, counts = torch.unique(raw, dim=0, return_counts=True)
+    pixels = uniq.to(dtype) / 255.0
+    weights = counts.to(dtype) / total
+    return pixels, weights
 
 
 def parse_args():
@@ -44,7 +87,8 @@ def parse_args():
     p.add_argument("--paintings_dir", type=str, default=str(DEFAULT_PAINTINGS_DIR))
     p.add_argument("--output_dir", type=str, required=True)
     p.add_argument("--method", type=str, required=True,
-                    choices=["sinkslot", "flashsinkhorn", "flashsinkhorn_symmetric", "geomloss"])
+                    choices=["sinkslot", "flashsinkhorn", "flashsinkhorn_symmetric",
+                             "geomloss", "geomloss_multiscale"])
     p.add_argument("--eps", type=float, default=0.1)
     p.add_argument("--sinkslot_L", type=int, default=100)
     p.add_argument("--tol", type=float, default=1e-6)
@@ -76,15 +120,14 @@ def _checkpoint_grid(check_every, max_iter, native_check_every=5):
 def sinkslot_trajectory(sc, tc, sw, tw, eps, max_iter, check_every, tol, L, seed=0):
     from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
     from sinkslot.solver import sot_plan_coo, sparse_sqeuclidean_cost, to_csr
-    from color_transfer.main_pixel import StopCfg
 
     n, m = sc.shape[0], tc.shape[0]
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     rows, cols, S = sot_plan_coo(sc, tc, sw, tw, L=L, seed=seed)
-    cost = sparse_sqeuclidean_cost(sc, tc, rows, cols)
+    cost_mat = sparse_sqeuclidean_cost(sc, tc, rows, cols)
     log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
-    lam = log_S - cost / eps
+    lam = log_S - cost_mat / eps
     r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n)
     c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m)
     torch.cuda.synchronize()
@@ -100,8 +143,9 @@ def sinkslot_trajectory(sc, tc, sw, tw, eps, max_iter, check_every, tol, L, seed
             stop=StopCfg(mode="potential", max_iter=n_try, check_every=5, tol=tol), eps=eps)
         torch.cuda.synchronize()
         dt = setup_time + (time.perf_counter() - t0)
+        cost = float((sw * (eps * phi)).sum() + (tw * (eps * psi)).sum())
         checkpoints.append({"iters": it, "time": dt, "potential_change": float(change),
-                             "converged": bool(converged)})
+                             "cost": cost, "converged": bool(converged)})
         if converged:
             break
     return setup_time, checkpoints
@@ -112,13 +156,13 @@ def flashsinkhorn_trajectory(sc, tc, sw, tw, eps, max_iter, check_every, tol, sy
     for n_try in _checkpoint_grid(check_every, max_iter):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        f, g, it, converged, change = flashsinkhorn_native_run(
+        f, g, it, converged, cost, change = flashsinkhorn_native_run(
             sc, tc, sw, tw, eps, n_try, threshold=tol, check_every=5, symmetric=symmetric,
             report_change=True)
         torch.cuda.synchronize()
         dt = time.perf_counter() - t0
         checkpoints.append({"iters": it, "time": dt, "potential_change": float(change),
-                             "converged": bool(converged)})
+                             "cost": cost, "converged": bool(converged)})
         if converged:
             break
     return 0.0, checkpoints
@@ -129,12 +173,28 @@ def geomloss_trajectory(sc, tc, sw, tw, eps, max_iter, check_every, tol):
     for n_try in _checkpoint_grid(check_every, max_iter):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        f, g, it, converged, change = geomloss_online_native(
+        f, g, it, converged, cost, change = geomloss_online_native(
             sc, tc, sw, tw, eps, n_try, threshold=tol, check_every=5)
         torch.cuda.synchronize()
         dt = time.perf_counter() - t0
         checkpoints.append({"iters": it, "time": dt, "potential_change": float(change),
-                             "converged": bool(converged)})
+                             "cost": cost, "converged": bool(converged)})
+        if converged:
+            break
+    return 0.0, checkpoints
+
+
+def geomloss_multiscale_trajectory(sc, tc, sw, tw, eps, max_iter, check_every, tol):
+    checkpoints = []
+    for n_try in _checkpoint_grid(check_every, max_iter):
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        f, g, it, converged, cost, change = geomloss_multiscale_native(
+            sc, tc, sw, tw, eps, n_try, threshold=tol, check_every=5)
+        torch.cuda.synchronize()
+        dt = time.perf_counter() - t0
+        checkpoints.append({"iters": it, "time": dt, "potential_change": float(change),
+                             "cost": cost, "converged": bool(converged)})
         if converged:
             break
     return 0.0, checkpoints
@@ -177,17 +237,22 @@ def main():
         torch.cuda.synchronize()
         setup_time, checkpoints = flashsinkhorn_trajectory(
             sc, tc, sw, tw, args.eps, args.max_iter, args.check_every, args.tol, symmetric)
-    else:  # geomloss
+    elif args.method == "geomloss":
         geomloss_online_native(sc, tc, sw, tw, args.eps, args.warmup_iters)
         torch.cuda.synchronize()
         setup_time, checkpoints = geomloss_trajectory(
+            sc, tc, sw, tw, args.eps, args.max_iter, args.check_every, args.tol)
+    else:  # geomloss_multiscale
+        geomloss_multiscale_native(sc, tc, sw, tw, args.eps, args.warmup_iters)
+        torch.cuda.synchronize()
+        setup_time, checkpoints = geomloss_multiscale_trajectory(
             sc, tc, sw, tw, args.eps, args.max_iter, args.check_every, args.tol)
 
     for c in checkpoints:
         pot = c.get("potential_change")
         pot_str = f"{pot:.4e}" if pot is not None else "n/a"
         print(f"  iters={c['iters']:5d}  time={c['time']:.4f}s  "
-              f"potential_change={pot_str}  converged={c['converged']}")
+              f"potential_change={pot_str}  cost={c['cost']:.6f}  converged={c['converged']}")
 
     os.makedirs(args.output_dir, exist_ok=True)
     out_path = os.path.join(args.output_dir, f"trajectory_potential_{args.method}.json")

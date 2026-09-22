@@ -17,6 +17,7 @@ _TRACES = [
     ("flashsinkhorn", "FlashSinkhorn (alternating)", "#ff7f0e"),
     ("flashsinkhorn_symmetric", "FlashSinkhorn (symmetric)", "#d62728"),
     ("geomloss", "GeomLoss (online)", "#2ca02c"),
+    ("geomloss_multiscale", "GeomLoss (multiscale)", "#9467bd"),
 ]
 
 
@@ -35,14 +36,14 @@ def load(input_dir, stem):
         return json.load(f)
 
 
-def render(traces, x_key, x_label, output_path):
+def render(traces, x_key, x_label, y_key, y_label, output_path, y_log=True, show_tol=True):
     fig, ax = plt.subplots(figsize=(9, 5))
     for label, color, data in traces:
         checkpoints = data["checkpoints"]
         xs, ys = [], []
         for c in checkpoints:
-            v = c.get("potential_change")
-            if v is None or v == 0.0:
+            v = c.get(y_key)
+            if v is None or (y_log and v == 0.0):
                 continue
             xs.append(c[x_key])
             ys.append(v)
@@ -53,18 +54,19 @@ def render(traces, x_key, x_label, output_path):
                         markeredgecolor="black", markeredgewidth=0.5, zorder=5)
 
     tol = traces[0][2].get("tol")
-    if tol is not None:
+    if show_tol and tol is not None:
         ax.axhline(tol, color="grey", linestyle="--", linewidth=1, label=f"tol={tol:g}")
 
-    ax.set_yscale("log")
-    ax.set_ylabel("Potential change: max(|Δf|, |Δg|)")
+    if y_log:
+        ax.set_yscale("log")
+    ax.set_ylabel(y_label)
     ax.set_xlabel(x_label)
     ax.grid(True, which="both", alpha=0.25)
     ax.legend(fontsize=9, loc="upper right")
 
     pair = traces[0][2].get("pair")
     eps = traces[0][2].get("eps")
-    title = f"Potential-change convergence, eps={eps:g}, tol={tol:g}"
+    title = f"eps={eps:g}, tol={tol:g}"
     if pair:
         title += f"  ({pair[0]} -> {pair[1]})"
     ax.set_title(title, fontsize=11)
@@ -89,8 +91,12 @@ def main():
         raise SystemExit(f"no trajectory_potential_*.json files found in {args.input_dir}")
 
     stem, ext = os.path.splitext(args.output)
-    render(traces, "iters", "Iterations", f"{stem}_iterations{ext}")
-    render(traces, "time", "Runtime (s)", f"{stem}_runtime{ext}")
+    render(traces, "iters", "Iterations", "potential_change", "Potential change: max(|Δf|, |Δg|)",
+           f"{stem}_iterations{ext}")
+    render(traces, "time", "Runtime (s)", "potential_change", "Potential change: max(|Δf|, |Δg|)",
+           f"{stem}_runtime{ext}")
+    render(traces, "iters", "Iterations", "cost", "Entropic transport cost: <a,f> + <b,g>",
+           f"{stem}_cost{ext}", y_log=False, show_tol=False)
 
 
 if __name__ == "__main__":
