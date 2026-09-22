@@ -106,16 +106,24 @@ def geomloss_multiscale_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
             "iterations": it, "converged": bool(converged), "marginal_violation": viol}
 
 
-def run_pair(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L):
-    return [
-        sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L),
-        flashsinkhorn_row("FlashSinkhorn (alternating)", sc, tc, sw, tw, eps, max_iter,
-                           tol, check_every, symmetric=False),
-        flashsinkhorn_row("FlashSinkhorn (symmetric)", sc, tc, sw, tw, eps, max_iter,
-                           tol, check_every, symmetric=True),
-        geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every),
-        geomloss_multiscale_row(sc, tc, sw, tw, eps, max_iter, tol, check_every),
-    ]
+_METHOD_KEYS = ["sinkslot", "flashsinkhorn_alt", "flashsinkhorn_sym", "geomloss_online", "geomloss_multiscale"]
+
+
+def run_pair(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, methods=_METHOD_KEYS):
+    rows = []
+    if "sinkslot" in methods:
+        rows.append(sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L))
+    if "flashsinkhorn_alt" in methods:
+        rows.append(flashsinkhorn_row("FlashSinkhorn (alternating)", sc, tc, sw, tw, eps, max_iter,
+                                       tol, check_every, symmetric=False))
+    if "flashsinkhorn_sym" in methods:
+        rows.append(flashsinkhorn_row("FlashSinkhorn (symmetric)", sc, tc, sw, tw, eps, max_iter,
+                                       tol, check_every, symmetric=True))
+    if "geomloss_online" in methods:
+        rows.append(geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every))
+    if "geomloss_multiscale" in methods:
+        rows.append(geomloss_multiscale_row(sc, tc, sw, tw, eps, max_iter, tol, check_every))
+    return rows
 
 
 def print_table(rows, header_prefix=""):
@@ -182,12 +190,47 @@ def parse_args():
                     help="Run just this one ordered pair. Omit (or use --max_pairs) to sweep all pairs.")
     p.add_argument("--max_pairs", type=int, default=0,
                     help="0 = every ordered pair (n*(n-1) for n images); ignored if --pair_idx is given.")
+    p.add_argument("--methods", type=str, nargs="+", default=_METHOD_KEYS, choices=_METHOD_KEYS,
+                    help="Subset of methods to run in this invocation -- run several in parallel "
+                         "processes (one per method) for wall-clock speed, each writes its own "
+                         "output file, then combine with --combine.")
+    p.add_argument("--combine", type=str, nargs="+", default=None,
+                    help="Instead of running anything, merge these convergence_sweep*.json files "
+                         "(e.g. from separate --methods runs) and print/save the aggregate summary.")
     p.add_argument("--device", type=str, default="cuda")
     return p.parse_args()
 
 
+def combine_sweeps(paths_in, output_dir, eps, tol):
+    by_pair = {}
+    for p in paths_in:
+        with open(p) as f:
+            data = json.load(f)
+        for entry in data:
+            key = tuple(entry["pair_idx"])
+            merged = by_pair.setdefault(key, {"pair_idx": list(key), "pair": entry["pair"], "rows": []})
+            merged["rows"].extend(entry["rows"])
+    results = list(by_pair.values())
+    os.makedirs(output_dir, exist_ok=True)
+    out_path = os.path.join(output_dir, "convergence_sweep.json")
+    with open(out_path, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"Combined {len(paths_in)} files -> {len(results)} pairs. Saved: {out_path}\n")
+    summary = aggregate(results)
+    print_summary(summary)
+    summary_path = os.path.join(output_dir, "convergence_sweep_summary.json")
+    with open(summary_path, "w") as f:
+        json.dump({"eps": eps, "tol": tol, "n_pairs": len(results), "summary": summary}, f, indent=2)
+    print(f"Saved: {summary_path}")
+
+
 def main():
     args = parse_args()
+
+    if args.combine is not None:
+        combine_sweeps(args.combine, args.output_dir, args.eps, args.tol)
+        return
+
     if args.device != "cuda" or not torch.cuda.is_available():
         raise RuntimeError("This script requires a CUDA GPU.")
     device = torch.device(args.device)
@@ -201,7 +244,8 @@ def main():
         sc, sw = pixels_and_weights(paths[i], device, dtype)
         tc, tw = pixels_and_weights(paths[j], device, dtype)
         print(f"Pair: {os.path.basename(paths[i])} -> {os.path.basename(paths[j])}  eps={args.eps:g}")
-        rows = run_pair(sc, tc, sw, tw, args.eps, args.max_iter, args.tol, args.check_every, args.sinkslot_L)
+        rows = run_pair(sc, tc, sw, tw, args.eps, args.max_iter, args.tol, args.check_every, args.sinkslot_L,
+                          methods=args.methods)
         print_table(rows)
         out_path = os.path.join(args.output_dir, "convergence_table.json")
         with open(out_path, "w") as f:
@@ -215,7 +259,8 @@ def main():
     if args.max_pairs:
         all_pairs = all_pairs[:args.max_pairs]
 
-    out_path = os.path.join(args.output_dir, "convergence_sweep.json")
+    suffix = "" if list(args.methods) == _METHOD_KEYS else "_" + "_".join(args.methods)
+    out_path = os.path.join(args.output_dir, f"convergence_sweep{suffix}.json")
     results = []
     if os.path.exists(out_path):
         with open(out_path) as f:
@@ -228,7 +273,8 @@ def main():
             continue
         sc, sw = pixels_and_weights(paths[i], device, dtype)
         tc, tw = pixels_and_weights(paths[j], device, dtype)
-        rows = run_pair(sc, tc, sw, tw, args.eps, args.max_iter, args.tol, args.check_every, args.sinkslot_L)
+        rows = run_pair(sc, tc, sw, tw, args.eps, args.max_iter, args.tol, args.check_every, args.sinkslot_L,
+                          methods=args.methods)
         results.append({"pair_idx": [i, j],
                           "pair": [os.path.basename(paths[i]), os.path.basename(paths[j])], "rows": rows})
         with open(out_path, "w") as f:
