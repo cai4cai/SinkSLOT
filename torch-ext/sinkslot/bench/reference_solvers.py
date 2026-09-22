@@ -166,6 +166,7 @@ def sinkslot_marginal_violation(
 def geomloss_online_native(
     sc: torch.Tensor, tc: torch.Tensor, sw: torch.Tensor, tw: torch.Tensor,
     eps: float, max_iter: int, threshold: Optional[float] = None, check_every: int = 5,
+    stop_mode: str = "potential_linf",
 ) -> Tuple[torch.Tensor, torch.Tensor, int, Optional[bool], float, float]:
     """GeomLoss online (KeOps): reimplements sinkhorn_loop's own update math
     at a fixed eps (single-scale, debias=False), since sinkhorn_loop has no
@@ -173,6 +174,18 @@ def geomloss_online_native(
     itself at threshold=None. Always symmetric (damped-Jacobi) updates --
     same scheme as flashsinkhorn_native_run(symmetric=True); GeomLoss has no
     alternating/Gauss-Seidel option at any level.
+
+    stop_mode="potential_linf" (default): max(|df|, |dg|) < threshold, same
+    rule as flashsinkhorn_native_run's own default and SinkSLOT's "potential"
+    mode. stop_mode="marginal": max row/col violation of the dense a(x)b
+    plan, |P_i. - a_i| / |P_.j - b_j| <= threshold, matching FlashSinkhorn's/
+    SinkSLOT's own "marginal" stop mode. Derived for free from ft_ba/gt_ab
+    (already computed every iteration for the update itself), no extra
+    softmin call: P_i. = a_i*exp((f_ba_i - ft_ba_i)/eps) since ft_ba is
+    exactly the fresh row target -eps*logsumexp_j[...] that f_ba would equal
+    at a marginal-exact fixed point, same "no extra LSE call" trick
+    sinkslot_alternating_triton's and sinkhorn_flashstyle_alternating's own
+    marginal checks use.
 
     Returns (f, g, n_iters_used, converged, cost, last_change).
     """
@@ -196,18 +209,22 @@ def geomloss_online_native(
     for i in range(max_iter):
         ft_ba = softmin(eps, C_xy, b_log + g_ab / eps)
         gt_ab = softmin(eps, C_yx, a_log + f_ba / eps)
-        f_new, g_new = 0.5 * (f_ba + ft_ba), 0.5 * (g_ab + gt_ab)
 
         if threshold is not None and (i + 1) % check_every == 0:
-            change = max((f_new - f_ba).abs().max().item(), (g_new - g_ab).abs().max().item())
+            if stop_mode == "marginal":
+                row_marg = sw * ((f_ba - ft_ba).squeeze(0) / eps).exp()
+                col_marg = tw * ((g_ab - gt_ab).squeeze(0) / eps).exp()
+                change = max((row_marg - sw).abs().max().item(), (col_marg - tw).abs().max().item())
+            else:
+                change = max((ft_ba - f_ba).abs().max().item(), (gt_ab - g_ab).abs().max().item())
             last_change = change
-            f_ba, g_ab = f_new, g_new
+            f_ba, g_ab = 0.5 * (f_ba + ft_ba), 0.5 * (g_ab + gt_ab)
             if change < threshold:
                 n_iters_used = i + 1
                 converged = True
                 break
         else:
-            f_ba, g_ab = f_new, g_new
+            f_ba, g_ab = 0.5 * (f_ba + ft_ba), 0.5 * (g_ab + gt_ab)
 
     f_ba, g_ab = f_ba.squeeze(0), g_ab.squeeze(0)
     cost = float((sw * f_ba).sum() + (tw * g_ab).sum())

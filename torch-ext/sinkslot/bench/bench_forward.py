@@ -502,6 +502,8 @@ def _cached_exact_ot_reference(
     Cached as .npz (unlike the scalar entropic reference's JSON cache) since this
     also needs to persist the bary_x/bary_y arrays, not just a float.
     """
+    import zipfile
+
     import numpy as np
 
     key = f"{dataset}_n{n}_m{m}_d{d}_seed{seed}_v{_EXACT_REF_CACHE_VERSION}"
@@ -515,8 +517,8 @@ def _cached_exact_ot_reference(
             ref = ExactRef(cost=float(blob["cost"]), bary_x=blob["bary_x"], bary_y=blob["bary_y"])
             _exact_ref_cache[key] = ref
             return ref
-        except (OSError, ValueError, KeyError):
-            pass  # corrupt/partial cache file -- recompute below
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile):
+            pass  # corrupt/partial cache file (e.g. truncated by a killed writer) -- recompute below
 
     ref = compute_exact_ot_reference(x, y, a, b)
     _exact_ref_cache[key] = ref
@@ -1226,12 +1228,25 @@ def bench_geomloss_online(
     nvtx: bool = False,
     rmae_check: bool = True,
     dataset: str = "gaussian",
+    stop: "StopCfg" = None,
     seed: int = 0,
 ) -> TimingResult:
-    """Benchmark GeomLoss online (KeOps) with fixed iterations.
+    """Benchmark GeomLoss online (KeOps).
 
-    Uses low-level `sinkhorn_loop` with `eps_list=[eps]*n_iters` to force exactly
-    `n_iters` iterations (matching FlashSinkhorn / OTT-JAX settings).
+    stop=None or mode="fixed" (the original behavior): uses low-level
+    `sinkhorn_loop` with `eps_list=[eps]*n_iters` to force exactly `n_iters`
+    iterations (matching FlashSinkhorn / OTT-JAX settings), no stopping
+    check. Any other stop.mode: delegates to
+    reference_solvers.geomloss_online_native, which reimplements the same
+    sinkhorn_loop update math (verified bit-exact against it) with a real
+    early-stop hook added -- sinkhorn_loop itself has none. mode="marginal"
+    maps to geomloss_online_native's own "marginal" stop_mode; anything else
+    (including Spar-Sink's "potential", which has no GeomLoss equivalent,
+    same fallback bench_flashsinkhorn already uses) maps to "potential_linf",
+    FlashSinkhorn's/SinkSLOT's native potential-change rule -- the intended
+    default for early stopping here, matching SinkSLOT's own "potential"
+    stop mode once phi=f/eps is accounted for (verified in
+    reference_solvers.py's own module docstring).
 
     Cost convention: SqDist(X,Y) = ||x-y||² (full squared Euclidean, matches FlashSinkhorn).
     dataset: "gaussian" (default), "8gaussians", "half_moon", or "two_rings"; see sample_point_cloud().
@@ -1244,6 +1259,7 @@ def bench_geomloss_online(
 
     from geomloss._legacy.sinkhorn_divergence import log_weights, sinkhorn_cost, sinkhorn_loop
     from geomloss._legacy.sinkhorn_samples import lse_genred, softmin_online
+    from sinkslot.bench.reference_solvers import geomloss_online_native
 
     torch.manual_seed(seed)
     x = sample_point_cloud(n, d, device, dataset=dataset, target=False)
@@ -1253,38 +1269,63 @@ def bench_geomloss_online(
     a = a / a.sum()
     b = b / b.sum()
 
-    eps_list = [eps] * n_iters
+    _stop = stop or StopCfg.fixed()
+    iters_run = n_iters
+    converged = None
+    hit_max_iters = None
 
-    a_log = log_weights(a)
-    b_log = log_weights(b)
-    # SqDist(X,Y) = ||x-y||² (full squared Euclidean, matches FlashSinkhorn)
-    my_lse = lse_genred("SqDist(X,Y)", d)
-    softmin = partial(softmin_online, log_conv=my_lse)
-    C_xy = (x, y.detach())
-    C_yx = (y, x.detach())
+    if _stop.mode == "fixed":
+        eps_list = [eps] * n_iters
 
-    try:
-        _, _, g_ab, f_ba = sinkhorn_loop(
-            softmin, a_log, b_log, None, None,
-            C_xy, C_yx, eps_list,
-            rho=None, debias=False, last_extrapolation=False,
-        )
-        torch.cuda.synchronize()
-    except Exception:
-        return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
+        a_log = log_weights(a)
+        b_log = log_weights(b)
+        # SqDist(X,Y) = ||x-y||² (full squared Euclidean, matches FlashSinkhorn)
+        my_lse = lse_genred("SqDist(X,Y)", d)
+        softmin = partial(softmin_online, log_conv=my_lse)
+        C_xy = (x, y.detach())
+        C_yx = (y, x.detach())
+
+        try:
+            _, _, g_ab, f_ba = sinkhorn_loop(
+                softmin, a_log, b_log, None, None,
+                C_xy, C_yx, eps_list,
+                rho=None, debias=False, last_extrapolation=False,
+            )
+            torch.cuda.synchronize()
+        except Exception:
+            return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
+        f_ba_flat, g_ab_flat = f_ba.squeeze(0), g_ab.squeeze(0)
+
+        def run():
+            sinkhorn_loop(
+                softmin, a_log, b_log, None, None,
+                C_xy, C_yx, eps_list,
+                rho=None, debias=False, last_extrapolation=False,
+            )
+    else:
+        gl_stop_mode = "marginal" if _stop.mode == "marginal" else "potential_linf"
+        try:
+            f_ba_flat, g_ab_flat, iters_run, converged, _, _ = geomloss_online_native(
+                x, y, a, b, eps, _stop.max_iter, threshold=_stop.tol,
+                check_every=_stop.check_every, stop_mode=gl_stop_mode)
+            torch.cuda.synchronize()
+        except Exception:
+            return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
+        hit_max_iters = iters_run >= _stop.max_iter
+
+        def run():
+            geomloss_online_native(
+                x, y, a, b, eps, _stop.max_iter, threshold=_stop.tol,
+                check_every=_stop.check_every, stop_mode=gl_stop_mode)
 
     cost_gap_pct = None
     bary = None
     feas: dict = {}
     if rmae_check and n <= _EXACT_OT_MAX_N:  # kept as the enable/disable flag name; now gates cost_gap/barycentric_sym
-        # sinkhorn_loop already returned dual potentials (g_ab, f_ba) from the SAME solve
-        # used for timing -- no separate untimed call needed, unlike Flash. f_ba is the
-        # source-side potential (on a's points), g_ab the target-side (on b's) -- same
-        # GeomLoss convention bench_flashsinkhorn's "both report the dual" note refers to.
-        # Both come back with a leading batch dim (1, n)/(1, m) even for this non-batched
-        # call -- squeeze it before treating them as plain (n,)/(m,) potentials.
-        f_ba_flat = f_ba.squeeze(0)
-        g_ab_flat = g_ab.squeeze(0)
+        # f_ba_flat/g_ab_flat are from the SAME solve used for timing -- no separate
+        # untimed call needed, unlike Flash. f_ba is the source-side potential (on a's
+        # points), g_ab the target-side (on b's) -- same GeomLoss convention
+        # bench_flashsinkhorn's "both report the dual" note refers to.
         cost = torch.cdist(x, y, p=2) ** 2
         T = a.unsqueeze(1) * b.unsqueeze(0) * ((f_ba_flat.unsqueeze(1) + g_ab_flat.unsqueeze(0) - cost) / eps).exp()
         plan_cost = float((T * cost).sum())
@@ -1293,13 +1334,6 @@ def bench_geomloss_online(
         cost_gap_pct = cost_gap(plan_cost, ref)
         bary = barycentric_sym(Tx, Ty, ref, a, b)
         feas = plan_feasibility(r, c, a, b)
-
-    def run():
-        sinkhorn_loop(
-            softmin, a_log, b_log, None, None,
-            C_xy, C_yx, eps_list,
-            rho=None, debias=False, last_extrapolation=False,
-        )
 
     try:
         # Measure peak memory during benchmark
@@ -1316,7 +1350,7 @@ def bench_geomloss_online(
         return TimingResult(
             "geomloss_online", n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False,
             n_iters=n_iters, cost_gap_pct=cost_gap_pct, barycentric_sym=bary,
-            iters_run=n_iters, converged=None, hit_max_iters=None,  # always fixed-iteration, no stopping check
+            iters_run=iters_run, converged=converged, hit_max_iters=hit_max_iters,
             seed=seed, **feas,
         )
     except torch.cuda.OutOfMemoryError:
