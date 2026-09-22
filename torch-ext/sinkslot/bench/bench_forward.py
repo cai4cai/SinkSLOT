@@ -3695,7 +3695,8 @@ def main() -> None:
             include_sparsink = args.only in SPARSINK_METHODS
             include_sinkslot = args.only == "sinkslot"
             include_sinkslotcuda = args.only == "sinkslotcuda"
-            include_tensorized = False
+            if not (include_geomloss or include_ott):
+                include_tensorized = False
 
         results = run_forward_benchmark(
             sizes=[args.single_size],
@@ -3815,8 +3816,9 @@ def main() -> None:
         include_sparsink = args.only in SPARSINK_METHODS
         include_sinkslot = args.only == "sinkslot"
         include_sinkslotcuda = args.only == "sinkslotcuda"
-        if include_tensorized:
-            print("Warning: Ignoring --tensorized because --only is set.")
+        if include_tensorized and not (include_geomloss or include_ott):
+            print("Warning: Ignoring --tensorized -- --only selected a method with no "
+                  "tensorized/dense counterpart.")
             include_tensorized = False
 
     mode_label = "Subprocess Mode" if args.subprocess else "In-Process (bucketed cache keys)"
