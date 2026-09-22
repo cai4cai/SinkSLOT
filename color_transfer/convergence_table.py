@@ -1,9 +1,15 @@
 """Final convergence numbers (cost, runtime, peak memory, iterations,
-marginal violation) for SinkSLOT and FlashSinkhorn, one native call per
-method -- no restart-based re-solving, no per-checkpoint trajectory (see
-trajectory_potential.py for that instead).
+marginal violation) for SinkSLOT, FlashSinkhorn and GeomLoss, one native
+call per method per pair -- no restart-based re-solving, no per-checkpoint
+trajectory (see trajectory_potential.py for that instead).
 
-    python -m color_transfer.convergence_table --output_dir DIR
+    python -m color_transfer.convergence_table --output_dir DIR --pair_idx 2 9
+    python -m color_transfer.convergence_table --output_dir DIR --max_pairs 0
+
+--max_pairs 0 (or omitted with --sweep) runs every ordered pair (132 for
+the 12 bundled paintings), saving incrementally after each pair (so an
+interrupted run keeps its progress and a re-run skips pairs already done),
+then reports mean +/- standard error of the mean per method across pairs.
 
 Marginal violation is a post-hoc sanity check computed directly from each
 method's converged potentials (reference_solvers.marginal_violation_dense /
@@ -14,6 +20,7 @@ well-satisfied marginals.
 
 import argparse
 import json
+import math
 import os
 import time
 
@@ -99,6 +106,69 @@ def geomloss_multiscale_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
             "iterations": it, "converged": bool(converged), "marginal_violation": viol}
 
 
+def run_pair(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L):
+    return [
+        sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L),
+        flashsinkhorn_row("FlashSinkhorn (alternating)", sc, tc, sw, tw, eps, max_iter,
+                           tol, check_every, symmetric=False),
+        flashsinkhorn_row("FlashSinkhorn (symmetric)", sc, tc, sw, tw, eps, max_iter,
+                           tol, check_every, symmetric=True),
+        geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every),
+        geomloss_multiscale_row(sc, tc, sw, tw, eps, max_iter, tol, check_every),
+    ]
+
+
+def print_table(rows, header_prefix=""):
+    header = f"{header_prefix}{'Method':<28} {'Cost':>10} {'Time (s)':>10} {'Peak mem (GB)':>14} {'Iterations':>11} {'Converged':>10} {'Marg. viol.':>12}"
+    print(header)
+    for r in rows:
+        print(f"{header_prefix}{r['method']:<28} {r['cost']:>10.6f} {r['time']:>10.4f} "
+              f"{r['peak_memory_bytes']/1e9:>14.4f} {r['iterations']:>11d} "
+              f"{str(r['converged']):>10} {r['marginal_violation']:>12.3e}")
+
+
+def mean_se(xs):
+    n = len(xs)
+    if n == 0:
+        return float("nan"), float("nan")
+    mean = sum(xs) / n
+    if n < 2:
+        return mean, float("nan")
+    var = sum((x - mean) ** 2 for x in xs) / (n - 1)
+    return mean, math.sqrt(var / n)
+
+
+def aggregate(pair_results):
+    by_method = {}
+    for entry in pair_results:
+        for r in entry["rows"]:
+            by_method.setdefault(r["method"], []).append(r)
+    summary = []
+    for method, rs in by_method.items():
+        converged = [r for r in rs if r["converged"]]
+        row = {"method": method, "n_pairs": len(rs), "n_converged": len(converged)}
+        for key in ("cost", "time", "iterations", "marginal_violation"):
+            mean, se = mean_se([r[key] for r in converged])
+            row[f"{key}_mean"], row[f"{key}_se"] = mean, se
+        mean, se = mean_se([r["peak_memory_bytes"] / 1e9 for r in converged])
+        row["peak_memory_gb_mean"], row["peak_memory_gb_se"] = mean, se
+        summary.append(row)
+    return summary
+
+
+def print_summary(summary):
+    header = (f"{'Method':<28} {'Pairs':>7} {'Cost':>18} {'Time (s)':>16} "
+              f"{'Peak mem (GB)':>16} {'Iterations':>14} {'Marg. viol.':>14}")
+    print(header)
+    for r in summary:
+        print(f"{r['method']:<28} {r['n_converged']:>3d}/{r['n_pairs']:<3d} "
+              f"{r['cost_mean']:>8.5f}+/-{r['cost_se']:<8.5f} "
+              f"{r['time_mean']:>6.3f}+/-{r['time_se']:<7.3f} "
+              f"{r['peak_memory_gb_mean']:>6.3f}+/-{r['peak_memory_gb_se']:<7.3f} "
+              f"{r['iterations_mean']:>6.1f}+/-{r['iterations_se']:<6.1f} "
+              f"{r['marginal_violation_mean']:>6.2e}+/-{r['marginal_violation_se']:<6.2e}")
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--paintings_dir", type=str, default=str(DEFAULT_PAINTINGS_DIR))
@@ -108,7 +178,10 @@ def parse_args():
     p.add_argument("--tol", type=float, default=1e-6)
     p.add_argument("--max_iter", type=int, default=2000)
     p.add_argument("--check_every", type=int, default=5)
-    p.add_argument("--pair_idx", type=int, nargs=2, default=[2, 9])
+    p.add_argument("--pair_idx", type=int, nargs=2, default=None,
+                    help="Run just this one ordered pair. Omit (or use --max_pairs) to sweep all pairs.")
+    p.add_argument("--max_pairs", type=int, default=0,
+                    help="0 = every ordered pair (n*(n-1) for n images); ignored if --pair_idx is given.")
     p.add_argument("--device", type=str, default="cuda")
     return p.parse_args()
 
@@ -119,37 +192,57 @@ def main():
         raise RuntimeError("This script requires a CUDA GPU.")
     device = torch.device(args.device)
     dtype = torch.float32
+    os.makedirs(args.output_dir, exist_ok=True)
 
     paths = list_images(args.paintings_dir)
-    i, j = args.pair_idx
-    sc, sw = pixels_and_weights(paths[i], device, dtype)
-    tc, tw = pixels_and_weights(paths[j], device, dtype)
-    print(f"Pair: {os.path.basename(paths[i])} -> {os.path.basename(paths[j])}  eps={args.eps:g}")
 
-    rows = [
-        sinkslot_row(sc, tc, sw, tw, args.eps, args.max_iter, args.tol, args.check_every, args.sinkslot_L),
-        flashsinkhorn_row("FlashSinkhorn (alternating)", sc, tc, sw, tw, args.eps, args.max_iter,
-                           args.tol, args.check_every, symmetric=False),
-        flashsinkhorn_row("FlashSinkhorn (symmetric)", sc, tc, sw, tw, args.eps, args.max_iter,
-                           args.tol, args.check_every, symmetric=True),
-        geomloss_row(sc, tc, sw, tw, args.eps, args.max_iter, args.tol, args.check_every),
-        geomloss_multiscale_row(sc, tc, sw, tw, args.eps, args.max_iter, args.tol, args.check_every),
-    ]
+    if args.pair_idx is not None:
+        i, j = args.pair_idx
+        sc, sw = pixels_and_weights(paths[i], device, dtype)
+        tc, tw = pixels_and_weights(paths[j], device, dtype)
+        print(f"Pair: {os.path.basename(paths[i])} -> {os.path.basename(paths[j])}  eps={args.eps:g}")
+        rows = run_pair(sc, tc, sw, tw, args.eps, args.max_iter, args.tol, args.check_every, args.sinkslot_L)
+        print_table(rows)
+        out_path = os.path.join(args.output_dir, "convergence_table.json")
+        with open(out_path, "w") as f:
+            json.dump({"eps": args.eps, "tol": args.tol,
+                        "pair": [os.path.basename(paths[i]), os.path.basename(paths[j])],
+                        "rows": rows}, f, indent=2)
+        print(f"\nSaved: {out_path}")
+        return
 
-    header = f"{'Method':<28} {'Cost':>10} {'Time (s)':>10} {'Peak mem (GB)':>14} {'Iterations':>11} {'Converged':>10} {'Marg. viol.':>12}"
-    print(header)
-    for r in rows:
-        print(f"{r['method']:<28} {r['cost']:>10.6f} {r['time']:>10.4f} "
-              f"{r['peak_memory_bytes']/1e9:>14.4f} {r['iterations']:>11d} "
-              f"{str(r['converged']):>10} {r['marginal_violation']:>12.3e}")
+    all_pairs = [(i, j) for i in range(len(paths)) for j in range(len(paths)) if i != j]
+    if args.max_pairs:
+        all_pairs = all_pairs[:args.max_pairs]
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    out_path = os.path.join(args.output_dir, "convergence_table.json")
-    with open(out_path, "w") as f:
-        json.dump({"eps": args.eps, "tol": args.tol,
-                    "pair": [os.path.basename(paths[i]), os.path.basename(paths[j])],
-                    "rows": rows}, f, indent=2)
-    print(f"\nSaved: {out_path}")
+    out_path = os.path.join(args.output_dir, "convergence_sweep.json")
+    results = []
+    if os.path.exists(out_path):
+        with open(out_path) as f:
+            results = json.load(f)
+        print(f"Resuming: {len(results)}/{len(all_pairs)} pairs already done.")
+    done = {tuple(r["pair_idx"]) for r in results}
+
+    for n, (i, j) in enumerate(all_pairs, 1):
+        if (i, j) in done:
+            continue
+        sc, sw = pixels_and_weights(paths[i], device, dtype)
+        tc, tw = pixels_and_weights(paths[j], device, dtype)
+        rows = run_pair(sc, tc, sw, tw, args.eps, args.max_iter, args.tol, args.check_every, args.sinkslot_L)
+        results.append({"pair_idx": [i, j],
+                          "pair": [os.path.basename(paths[i]), os.path.basename(paths[j])], "rows": rows})
+        with open(out_path, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"[{n}/{len(all_pairs)}] {os.path.basename(paths[i])} -> {os.path.basename(paths[j])} done")
+        print_table(rows, header_prefix="  ")
+
+    print(f"\nSaved: {out_path}\n")
+    summary = aggregate(results)
+    print_summary(summary)
+    summary_path = os.path.join(args.output_dir, "convergence_sweep_summary.json")
+    with open(summary_path, "w") as f:
+        json.dump({"eps": args.eps, "tol": args.tol, "n_pairs": len(results), "summary": summary}, f, indent=2)
+    print(f"Saved: {summary_path}")
 
 
 if __name__ == "__main__":
