@@ -135,7 +135,18 @@ def parse_args():
                     help=f"Defaults to the 12 bundled Monet paintings ({DEFAULT_PAINTINGS_DIR}); "
                          "point elsewhere for your own same-sized RGB images.")
     p.add_argument("--output_dir", type=str, required=True)
-    p.add_argument("--method", type=str, required=True, choices=["sinkslot", "flashsinkhorn", "geomloss"])
+    p.add_argument("--method", type=str, required=True,
+                    choices=["sinkslot", "flashsinkhorn", "flashsinkhorn_symmetric",
+                             "flashsinkhorn_fast", "flashsinkhorn_symmetric_fast", "geomloss"],
+                    help="flashsinkhorn: alternating/Gauss-Seidel updates, fairness settings "
+                         "(allow_tf32=False). flashsinkhorn_symmetric: damped-Jacobi updates "
+                         "instead (see trajectory.py for why these converge at very different "
+                         "iteration counts), same fairness settings. flashsinkhorn_fast / "
+                         "flashsinkhorn_symmetric_fast: same two update schemes with "
+                         "FlashSinkhorn's own speedups enabled instead (allow_tf32=True, and for "
+                         "symmetric also fused=True, use_epsilon_scaling=True) -- not an "
+                         "apples-to-apples comparison with the rest of this sweep, shows "
+                         "FlashSinkhorn's own best achievable performance instead.")
     p.add_argument("--eps_list", type=float, nargs="+", default=[0.01])
     p.add_argument("--sinkslot_L", type=int, default=100)
     p.add_argument("--geomloss_backend", type=str, default="online", choices=["online", "multiscale"],
@@ -409,25 +420,76 @@ def geomloss_run(sc, tc, sw, tw, eps, max_iter, tol, check_every, mode, backend=
     return cost_val, iters, metric <= tol, metric, n * m
 
 
-def flashsinkhorn_run(sc, tc, sw, tw, eps, n_iters, stop, block_n=2048):
-    """One sinkhorn_flashstyle_alternating call plus chunked cost computation
-    (never materializes a dense (n,m) tensor). Returns
+def flashsinkhorn_run(sc, tc, sw, tw, eps, n_iters, stop, symmetric=False, fast=False, block_n=2048):
+    """One sinkhorn_flashstyle_alternating/symmetric call plus chunked cost
+    computation (never materializes a dense (n,m) tensor). Returns
     (cost, iters, converged, internal_viol, support_size).
 
-    sinkhorn_flashstyle_alternating exposes no converged flag or final
-    violation/potential-change value of its own (only n_iters_used), so
-    converged := n_iters_used < n_iters is used as the internal signal and
-    internal_viol is always None here -- no independent post-hoc marginal
-    check is computed."""
-    from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_alternating
+    symmetric=True uses sinkhorn_flashstyle_symmetric (damped-Jacobi
+    updates) instead of the default sinkhorn_flashstyle_alternating
+    (Gauss-Seidel) -- see trajectory.py's own module docstring for why
+    these converge at very different iteration counts on this dataset (a
+    genuine algorithmic difference, not a bug).
 
+    fast=True enables FlashSinkhorn's own speedups this script otherwise
+    disables for fairness against SinkSLOT/GeomLoss: allow_tf32=True (a
+    real ~2x per-iteration speedup, confirmed by direct measurement --
+    see trajectory.py), and for symmetric specifically, fused=True
+    (single kernel launch per iteration instead of two) and
+    use_epsilon_scaling=True (an annealed eps schedule, the standard
+    classical Sinkhorn acceleration). alternating has no fused/
+    epsilon-scaling option at all, so fast only changes allow_tf32 there.
+    Under use_epsilon_scaling=True, FlashSinkhorn derives its own
+    iteration count from the annealing schedule rather than respecting
+    n_iters (n_iters is accepted here for a uniform call signature but
+    silently unused in that specific combination), and there is no clean
+    way to compare the resulting n_iters_used against a caller-supplied
+    budget, so converged is reported as None rather than guessed in that
+    one case. "Fast" numbers are therefore not an apples-to-apples
+    comparison with the rest of this sweep's fairness-constrained
+    methods -- they show FlashSinkhorn's own best achievable performance
+    on this problem instead, not a controlled ablation.
+
+    Neither sinkhorn_flashstyle_alternating nor
+    sinkhorn_flashstyle_symmetric exposes a converged flag or final
+    violation/potential-change value of its own beyond n_iters_used, so
+    converged := n_iters_used < n_iters is used as the internal signal
+    otherwise, and internal_viol is always None here -- no independent
+    post-hoc marginal check is computed."""
     n, m = sc.shape[0], tc.shape[0]
     flash_mode = _FLASH_STOP_MODE.get(stop.mode, stop.mode)
-    f, g, n_iters_used = sinkhorn_flashstyle_alternating(
-        sc, tc, sw, tw, eps=eps, n_iters=n_iters,
-        stop_mode=flash_mode, threshold=stop.tol, check_every=stop.check_every,
-        allow_tf32=False, return_n_iters=True,
-    )
+    if symmetric:
+        from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_symmetric
+        if fast:
+            # use_epsilon_scaling=True ignores `eps` entirely (confirmed by
+            # reading the source: eps_list = epsilon_schedule(diameter, blur,
+            # scaling, p=2.0), ignoring the eps argument, which is used only
+            # in the use_epsilon_scaling=False branch) -- the annealing
+            # schedule's target is `blur**2` instead, defaulting to
+            # 0.05**2=0.0025. blur=eps**0.5 is required to actually target
+            # this experiment's eps.
+            f, g, n_iters_used = sinkhorn_flashstyle_symmetric(
+                sc, tc, sw, tw, use_epsilon_scaling=True, blur=eps ** 0.5,
+                stop_mode=flash_mode, threshold=stop.tol, check_every=stop.check_every,
+                allow_tf32=True, fused=True, return_n_iters=True,
+            )
+            converged = None
+        else:
+            f, g, n_iters_used = sinkhorn_flashstyle_symmetric(
+                sc, tc, sw, tw, use_epsilon_scaling=False, eps=eps, n_iters=n_iters,
+                stop_mode=flash_mode, threshold=stop.tol, check_every=stop.check_every,
+                allow_tf32=False, return_n_iters=True,
+            )
+            converged = n_iters_used < n_iters
+    else:
+        from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_alternating
+        f, g, n_iters_used = sinkhorn_flashstyle_alternating(
+            sc, tc, sw, tw, eps=eps, n_iters=n_iters,
+            stop_mode=flash_mode, threshold=stop.tol, check_every=stop.check_every,
+            allow_tf32=fast, return_n_iters=True,
+        )
+        converged = n_iters_used < n_iters
+
     cost_val = 0.0
     for start in range(0, n, block_n):
         end = min(start + block_n, n)
@@ -436,7 +498,6 @@ def flashsinkhorn_run(sc, tc, sw, tw, eps, n_iters, stop, block_n=2048):
             (f[start:end, None] + g[None, :] - C_blk) / eps)
         cost_val += float((P_blk * C_blk).sum())
         del C_blk, P_blk
-    converged = n_iters_used < n_iters
     return cost_val, int(n_iters_used), converged, None, int(n) * int(m)
 
 
@@ -707,19 +768,27 @@ def main():
                     real = lambda: sinkslot_run_primal_dual(
                         sc, tc, sw, tw, eps, args.sinkslot_L, 0,
                         args.max_iter, args.tol, args.check_every)
-                else:
+                elif args.method == "flashsinkhorn":
                     from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_alternating
                     warmup = lambda: sinkhorn_flashstyle_alternating(
                         sc, tc, sw, tw, eps=eps, n_iters=args.warmup_iters,
                         threshold=None, allow_tf32=False)
                     real = lambda: flashsinkhorn_run_primal_dual(
                         sc, tc, sw, tw, eps, args.max_iter, args.tol, args.check_every)
+                else:
+                    raise ValueError(f"--stop_mode primal_dual is only implemented for "
+                                      f"--method sinkslot/flashsinkhorn, not {args.method!r}.")
             elif args.method == "sinkslot":
                 warmup = lambda: sinkslot_run(sc, tc, sw, tw, eps, args.sinkslot_L, 0, args.warmup_iters, warmup_stop)
                 real = lambda: sinkslot_run(sc, tc, sw, tw, eps, args.sinkslot_L, 0, args.max_iter, stop)
             else:
-                warmup = lambda: flashsinkhorn_run(sc, tc, sw, tw, eps, args.warmup_iters, warmup_stop)
-                real = lambda: flashsinkhorn_run(sc, tc, sw, tw, eps, args.max_iter, stop)
+                # any flashsinkhorn variant: alternating/symmetric x fair/fast.
+                _symmetric = args.method in ("flashsinkhorn_symmetric", "flashsinkhorn_symmetric_fast")
+                _fast = args.method in ("flashsinkhorn_fast", "flashsinkhorn_symmetric_fast")
+                warmup = lambda: flashsinkhorn_run(sc, tc, sw, tw, eps, args.warmup_iters, warmup_stop,
+                                                    symmetric=_symmetric, fast=_fast)
+                real = lambda: flashsinkhorn_run(sc, tc, sw, tw, eps, args.max_iter, stop,
+                                                  symmetric=_symmetric, fast=_fast)
             try:
                 warmup()
             except torch.cuda.OutOfMemoryError:
