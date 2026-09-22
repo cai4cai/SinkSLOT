@@ -53,8 +53,12 @@ N_EXP3 = 10000
 
 METHODS = ["sinkslotcuda", "flash_alternating", "srot"]
 
-# shared solver policy, same as configs/speedup.py
-STOP_MODE = "marginal"
+# shared solver policy. Use "potential_linf" (not "potential"!) for genuine
+# potential-change stopping: the CLI string "potential" is translated to
+# sinkslotcuda's marginal-equivalent mode and to SROT's own, different
+# scaling-variable check -- see bench_forward.py's translation comment near
+# sinkslot_alternating_triton's call site.
+STOP_MODE = "potential_linf"
 MAX_ITER = 20000
 STOP_TOL = 1e-6
 POTENTIAL_TOL = 1e-6
