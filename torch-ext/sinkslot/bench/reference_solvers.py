@@ -120,22 +120,30 @@ def flashsinkhorn_samplesloss_run(
     return cost, dt, peak_mem, int(n_iters_used)
 
 
-def marginal_violation_dense(
+def plan_diagnostics_dense(
     sc: torch.Tensor, tc: torch.Tensor, sw: torch.Tensor, tw: torch.Tensor,
     eps: float, f: torch.Tensor, g: torch.Tensor, block_n: int = 4096,
-) -> float:
-    """Post-hoc row/col marginal violation for the dense a(x)b reference
-    measure (FlashSinkhorn, GeomLoss), P = a*b*exp((f+g-C)/eps), computed
-    directly from the converged potentials in row blocks so the full N x M
-    plan is never materialized. Ground truth, not a solver's own internal
-    shortcut -- meant as an independent sanity check that a potential-change
-    stop also implies well-satisfied marginals. Returns the max (L-infinity)
-    violation over both marginals, matching this repo's other marginal
-    checks (max, not a total-variation sum).
+) -> Tuple[float, float]:
+    """Post-hoc marginal violation AND true transport cost <C,P> for the
+    dense a(x)b reference measure (FlashSinkhorn, GeomLoss), P = a*b*exp(
+    (f+g-C)/eps), computed directly from the converged potentials in row
+    blocks so the full N x M plan is never materialized. Ground truth, not
+    a solver's own internal shortcut.
+
+    <C,P> (unlike the dual value <a,f>+<b,g> = <C,P> + eps*KL(P|a(x)b)) is
+    directly comparable across methods regardless of reference measure,
+    since it only depends on the achieved plan and the true cost matrix --
+    the dual value conflates transport quality with each method's own
+    entropy term against its own reference, which is not the same
+    quantity when the reference itself differs (e.g. SinkSLOT's sparse
+    P^SOT vs this dense a(x)b).
+
+    Returns (max L-infinity marginal violation, <C,P>).
     """
     n = sc.shape[0]
     row_sum = torch.empty_like(sw)
     col_sum = torch.zeros_like(tw)
+    transport_cost = 0.0
     for start in range(0, n, block_n):
         end = min(start + block_n, n)
         cost_block = ((sc[start:end, None, :] - tc[None, :, :]) ** 2).sum(-1)
@@ -144,28 +152,37 @@ def marginal_violation_dense(
         ).exp()
         row_sum[start:end] = p_block.sum(dim=1)
         col_sum += p_block.sum(dim=0)
-    return float(torch.maximum((row_sum - sw).abs().max(), (col_sum - tw).abs().max()))
+        transport_cost += float((cost_block * p_block).sum())
+    viol = float(torch.maximum((row_sum - sw).abs().max(), (col_sum - tw).abs().max()))
+    return viol, transport_cost
 
 
-def sinkslot_marginal_violation(
+def sinkslot_plan_diagnostics(
     phi: torch.Tensor, psi: torch.Tensor, rows: torch.Tensor, cols: torch.Tensor,
     S: torch.Tensor, cost: torch.Tensor, eps: float, sw: torch.Tensor, tw: torch.Tensor,
-) -> float:
-    """Post-hoc row/col marginal violation for SinkSLOT's sparse P^SOT
-    support, P_ij = S_ij*exp(phi_i+psi_j-C_ij/eps) on (rows,cols) only (zero
-    elsewhere by construction). Ground truth from the converged potentials,
-    not the solver's own internal shortcut check.
+) -> Tuple[float, float]:
+    """Post-hoc marginal violation AND true transport cost <C,P> for
+    SinkSLOT's sparse P^SOT support, P_ij = S_ij*exp(phi_i+psi_j-C_ij/eps)
+    on (rows,cols) only (zero elsewhere by construction). Ground truth from
+    the converged potentials, not the solver's own internal shortcut check.
+    See plan_diagnostics_dense's docstring for why <C,P> (not the dual
+    value) is the quantity comparable against the other methods.
+
+    Returns (max L-infinity marginal violation, <C,P>).
     """
     log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
     p = (phi[rows] + psi[cols] + log_S - cost / eps).exp()
     row_sum = torch.zeros_like(sw).index_add_(0, rows, p)
     col_sum = torch.zeros_like(tw).index_add_(0, cols, p)
-    return float(torch.maximum((row_sum - sw).abs().max(), (col_sum - tw).abs().max()))
+    viol = float(torch.maximum((row_sum - sw).abs().max(), (col_sum - tw).abs().max()))
+    transport_cost = float((cost * p).sum())
+    return viol, transport_cost
 
 
 def geomloss_online_native(
     sc: torch.Tensor, tc: torch.Tensor, sw: torch.Tensor, tw: torch.Tensor,
     eps: float, max_iter: int, threshold: Optional[float] = None, check_every: int = 5,
+    stop_mode: str = "potential_linf",
 ) -> Tuple[torch.Tensor, torch.Tensor, int, Optional[bool], float, float]:
     """GeomLoss online (KeOps): reimplements sinkhorn_loop's own update math
     at a fixed eps (single-scale, debias=False), since sinkhorn_loop has no
@@ -173,6 +190,18 @@ def geomloss_online_native(
     itself at threshold=None. Always symmetric (damped-Jacobi) updates --
     same scheme as flashsinkhorn_native_run(symmetric=True); GeomLoss has no
     alternating/Gauss-Seidel option at any level.
+
+    stop_mode="potential_linf" (default): max(|df|, |dg|) < threshold, same
+    rule as flashsinkhorn_native_run's own default and SinkSLOT's "potential"
+    mode. stop_mode="marginal": max row/col violation of the dense a(x)b
+    plan, |P_i. - a_i| / |P_.j - b_j| <= threshold, matching FlashSinkhorn's/
+    SinkSLOT's own "marginal" stop mode. Derived for free from ft_ba/gt_ab
+    (already computed every iteration for the update itself), no extra
+    softmin call: P_i. = a_i*exp((f_ba_i - ft_ba_i)/eps) since ft_ba is
+    exactly the fresh row target -eps*logsumexp_j[...] that f_ba would equal
+    at a marginal-exact fixed point, same "no extra LSE call" trick
+    sinkslot_alternating_triton's and sinkhorn_flashstyle_alternating's own
+    marginal checks use.
 
     Returns (f, g, n_iters_used, converged, cost, last_change).
     """
@@ -196,18 +225,22 @@ def geomloss_online_native(
     for i in range(max_iter):
         ft_ba = softmin(eps, C_xy, b_log + g_ab / eps)
         gt_ab = softmin(eps, C_yx, a_log + f_ba / eps)
-        f_new, g_new = 0.5 * (f_ba + ft_ba), 0.5 * (g_ab + gt_ab)
 
         if threshold is not None and (i + 1) % check_every == 0:
-            change = max((f_new - f_ba).abs().max().item(), (g_new - g_ab).abs().max().item())
+            if stop_mode == "marginal":
+                row_marg = sw * ((f_ba - ft_ba).squeeze(0) / eps).exp()
+                col_marg = tw * ((g_ab - gt_ab).squeeze(0) / eps).exp()
+                change = max((row_marg - sw).abs().max().item(), (col_marg - tw).abs().max().item())
+            else:
+                change = max((ft_ba - f_ba).abs().max().item(), (gt_ab - g_ab).abs().max().item())
             last_change = change
-            f_ba, g_ab = f_new, g_new
+            f_ba, g_ab = 0.5 * (f_ba + ft_ba), 0.5 * (g_ab + gt_ab)
             if change < threshold:
                 n_iters_used = i + 1
                 converged = True
                 break
         else:
-            f_ba, g_ab = f_new, g_new
+            f_ba, g_ab = 0.5 * (f_ba + ft_ba), 0.5 * (g_ab + gt_ab)
 
     f_ba, g_ab = f_ba.squeeze(0), g_ab.squeeze(0)
     cost = float((sw * f_ba).sum() + (tw * g_ab).sum())

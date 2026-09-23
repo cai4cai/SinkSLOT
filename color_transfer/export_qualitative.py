@@ -23,7 +23,9 @@ import torch
 from PIL import Image
 
 from color_transfer.trajectory_potential import DEFAULT_PAINTINGS_DIR, StopCfg, list_images
-from sinkslot.bench.reference_solvers import flashsinkhorn_native_run
+from sinkslot.bench.reference_solvers import (
+    flashsinkhorn_native_run, geomloss_multiscale_native, geomloss_online_native,
+)
 
 
 def load_pixels_weights_inverse(path, device, dtype):
@@ -80,6 +82,18 @@ def solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, s
         print(f"    sinkslot: iters={it} converged={converged} change={change:.3e}")
         return _barycentric_sparse(phi, psi, rows, cols, S, cost, tc, eps, n)
 
+    if method == "geomloss_online":
+        f, g, it, converged, cost_val, _ = geomloss_online_native(
+            sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every)
+        print(f"    geomloss_online: iters={it} converged={converged} cost={cost_val:.6f}")
+        return _barycentric_dense_chunked(f, g, sc, tc, sw, tw, eps)
+
+    if method == "geomloss_multiscale":
+        f, g, it, converged, cost_val, _ = geomloss_multiscale_native(
+            sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every)
+        print(f"    geomloss_multiscale: iters={it} converged={converged} cost={cost_val:.6f}")
+        return _barycentric_dense_chunked(f, g, sc, tc, sw, tw, eps)
+
     symmetric = method == "flashsinkhorn_symmetric"
     f, g, it, converged, cost_val = flashsinkhorn_native_run(
         sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every, symmetric=symmetric)
@@ -113,6 +127,8 @@ _METHODS = [
     ("sinkslot", "sinkslot"),
     ("flashsinkhorn", "flashsinkhorn"),
     ("flashsinkhorn_symmetric", "flashsinkhorn_symmetric"),
+    ("geomloss_online", "geomloss_online"),
+    ("geomloss_multiscale", "geomloss_multiscale"),
 ]
 
 
@@ -121,11 +137,14 @@ def parse_args():
     p.add_argument("--paintings_dir", type=str, default=str(DEFAULT_PAINTINGS_DIR))
     p.add_argument("--output_dir", type=str, required=True)
     p.add_argument("--eps", type=float, default=0.1)
-    p.add_argument("--max_iter", type=int, default=2000)
+    p.add_argument("--max_iter", type=int, default=8000)
     p.add_argument("--tol", type=float, default=1e-6)
     p.add_argument("--check_every", type=int, default=5)
     p.add_argument("--sinkslot_L", type=int, default=100)
-    p.add_argument("--pair_idx", type=int, nargs=2, default=[2, 9])
+    p.add_argument("--pair_idx", type=int, nargs="+", default=[2, 9],
+                    help="One or more ordered pairs, flattened: 'i1 j1 i2 j2 ...' "
+                         "(e.g. --pair_idx 2 9 5 7 for two pairs). Each pair gets its own "
+                         "set of output images, named by its own source/target stem.")
     p.add_argument("--device", type=str, default="cuda")
     return p.parse_args()
 
@@ -134,28 +153,32 @@ def main():
     args = parse_args()
     if args.device != "cuda" or not torch.cuda.is_available():
         raise RuntimeError("This script requires a CUDA GPU.")
+    if len(args.pair_idx) % 2 != 0:
+        raise ValueError(f"--pair_idx must have an even number of ints, got {args.pair_idx}")
     device = torch.device(args.device)
     dtype = torch.float32
 
     os.makedirs(args.output_dir, exist_ok=True)
     paths = list_images(args.paintings_dir)
-    i, j = args.pair_idx
-    source_path, target_path = paths[i], paths[j]
-    src_name, tgt_name = os.path.basename(source_path), os.path.basename(target_path)
-    pair_stem = f"{os.path.splitext(src_name)[0]}__{os.path.splitext(tgt_name)[0]}"
-    print(f"Pair: {src_name} -> {tgt_name}")
+    pairs = list(zip(args.pair_idx[0::2], args.pair_idx[1::2]))
 
-    save_image(load_as_tensor(source_path), os.path.join(args.output_dir, f"{pair_stem}_source.png"))
-    save_image(load_as_tensor(target_path), os.path.join(args.output_dir, f"{pair_stem}_target.png"))
+    for i, j in pairs:
+        source_path, target_path = paths[i], paths[j]
+        src_name, tgt_name = os.path.basename(source_path), os.path.basename(target_path)
+        pair_stem = f"{os.path.splitext(src_name)[0]}__{os.path.splitext(tgt_name)[0]}"
+        print(f"Pair: {src_name} -> {tgt_name}")
 
-    for stem, method in _METHODS:
-        print(f"  {stem} ...")
-        img_tensor = transfer_image(
-            source_path, target_path, method, args.eps, args.max_iter, args.tol,
-            args.check_every, device, dtype, sinkslot_L=args.sinkslot_L)
-        out_path = os.path.join(args.output_dir, f"{pair_stem}_{stem}.png")
-        save_image(img_tensor, out_path)
-        print(f"    Saved: {out_path}")
+        save_image(load_as_tensor(source_path), os.path.join(args.output_dir, f"{pair_stem}_source.png"))
+        save_image(load_as_tensor(target_path), os.path.join(args.output_dir, f"{pair_stem}_target.png"))
+
+        for stem, method in _METHODS:
+            print(f"  {stem} ...")
+            img_tensor = transfer_image(
+                source_path, target_path, method, args.eps, args.max_iter, args.tol,
+                args.check_every, device, dtype, sinkslot_L=args.sinkslot_L)
+            out_path = os.path.join(args.output_dir, f"{pair_stem}_{stem}.png")
+            save_image(img_tensor, out_path)
+            print(f"    Saved: {out_path}")
 
 
 if __name__ == "__main__":

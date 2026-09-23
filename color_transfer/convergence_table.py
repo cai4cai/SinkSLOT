@@ -11,10 +11,14 @@ the 12 bundled paintings), saving incrementally after each pair (so an
 interrupted run keeps its progress and a re-run skips pairs already done),
 then reports mean +/- standard error of the mean per method across pairs.
 
-Marginal violation is a post-hoc sanity check computed directly from each
-method's converged potentials (reference_solvers.marginal_violation_dense /
-sinkslot_marginal_violation), independent of each solver's own internal
-shortcut check -- confirms potential-change convergence also implies
+Two cost fields, both post-hoc from the converged potentials, not each
+solver's own shortcut: "cost" is the true transport cost <C,P>, comparable
+across methods regardless of reference measure; "dual_cost" is the Sinkhorn
+dual value <a,f>+<b,g> = <C,P> + eps*KL(P|reference), NOT comparable across
+methods whose reference measure differs (SinkSLOT's sparse P^SOT vs the
+other four's dense a(x)b), since the KL term is then relative to a
+different baseline for each. Marginal violation is the same kind of
+post-hoc check, confirming potential-change convergence also implies
 well-satisfied marginals.
 """
 
@@ -28,8 +32,8 @@ import torch
 
 from color_transfer.trajectory_potential import DEFAULT_PAINTINGS_DIR, StopCfg, list_images, pixels_and_weights
 from sinkslot.bench.reference_solvers import (
-    flashsinkhorn_native_run, geomloss_multiscale_native, geomloss_online_native, marginal_violation_dense,
-    sinkslot_marginal_violation,
+    flashsinkhorn_native_run, geomloss_multiscale_native, geomloss_online_native, plan_diagnostics_dense,
+    sinkslot_plan_diagnostics,
 )
 
 
@@ -59,14 +63,15 @@ def sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L):
         phi, psi, it, converged, change = sinkslot_alternating_triton(
             r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, sw.log(), tw.log(), n, m, max_iter,
             stop=StopCfg(mode="potential", max_iter=max_iter, check_every=check_every, tol=tol), eps=eps)
-        cost = float((sw * (eps * phi)).sum() + (tw * (eps * psi)).sum())
-        return phi, psi, it, converged, cost, rows, cols, S, cost_mat
+        dual_cost = float((sw * (eps * phi)).sum() + (tw * (eps * psi)).sum())
+        return phi, psi, it, converged, dual_cost, rows, cols, S, cost_mat
 
     solve()  # warmup
-    (phi, psi, it, converged, cost, rows, cols, S, cost_mat), dt, peak = measure(solve)
-    viol = sinkslot_marginal_violation(phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
-    return {"method": "SinkSLOT", "cost": cost, "time": dt, "peak_memory_bytes": peak,
-            "iterations": it, "converged": bool(converged), "marginal_violation": viol}
+    (phi, psi, it, converged, dual_cost, rows, cols, S, cost_mat), dt, peak = measure(solve)
+    viol, cost = sinkslot_plan_diagnostics(phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
+    return {"method": "SinkSLOT", "cost": cost, "dual_cost": dual_cost, "time": dt,
+            "peak_memory_bytes": peak, "iterations": it, "converged": bool(converged),
+            "marginal_violation": viol}
 
 
 def flashsinkhorn_row(name, sc, tc, sw, tw, eps, max_iter, tol, check_every, symmetric):
@@ -76,10 +81,11 @@ def flashsinkhorn_row(name, sc, tc, sw, tw, eps, max_iter, tol, check_every, sym
         return flashsinkhorn_native_run(
             sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every, symmetric=symmetric)
 
-    (f, g, it, converged, cost), dt, peak = measure(solve)
-    viol = marginal_violation_dense(sc, tc, sw, tw, eps, f, g)
-    return {"method": name, "cost": cost, "time": dt, "peak_memory_bytes": peak,
-            "iterations": it, "converged": bool(converged), "marginal_violation": viol}
+    (f, g, it, converged, dual_cost), dt, peak = measure(solve)
+    viol, cost = plan_diagnostics_dense(sc, tc, sw, tw, eps, f, g)
+    return {"method": name, "cost": cost, "dual_cost": dual_cost, "time": dt,
+            "peak_memory_bytes": peak, "iterations": it, "converged": bool(converged),
+            "marginal_violation": viol}
 
 
 def geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
@@ -88,10 +94,11 @@ def geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
     def solve():
         return geomloss_online_native(sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every)
 
-    (f, g, it, converged, cost, change), dt, peak = measure(solve)
-    viol = marginal_violation_dense(sc, tc, sw, tw, eps, f, g)
-    return {"method": "GeomLoss (online)", "cost": cost, "time": dt, "peak_memory_bytes": peak,
-            "iterations": it, "converged": bool(converged), "marginal_violation": viol}
+    (f, g, it, converged, dual_cost, change), dt, peak = measure(solve)
+    viol, cost = plan_diagnostics_dense(sc, tc, sw, tw, eps, f, g)
+    return {"method": "GeomLoss (online)", "cost": cost, "dual_cost": dual_cost, "time": dt,
+            "peak_memory_bytes": peak, "iterations": it, "converged": bool(converged),
+            "marginal_violation": viol}
 
 
 def geomloss_multiscale_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
@@ -100,10 +107,11 @@ def geomloss_multiscale_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
     def solve():
         return geomloss_multiscale_native(sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every)
 
-    (f, g, it, converged, cost, change), dt, peak = measure(solve)
-    viol = marginal_violation_dense(sc, tc, sw, tw, eps, f, g)
-    return {"method": "GeomLoss (multiscale)", "cost": cost, "time": dt, "peak_memory_bytes": peak,
-            "iterations": it, "converged": bool(converged), "marginal_violation": viol}
+    (f, g, it, converged, dual_cost, change), dt, peak = measure(solve)
+    viol, cost = plan_diagnostics_dense(sc, tc, sw, tw, eps, f, g)
+    return {"method": "GeomLoss (multiscale)", "cost": cost, "dual_cost": dual_cost, "time": dt,
+            "peak_memory_bytes": peak, "iterations": it, "converged": bool(converged),
+            "marginal_violation": viol}
 
 
 _METHOD_KEYS = ["sinkslot", "flashsinkhorn_alt", "flashsinkhorn_sym", "geomloss_online", "geomloss_multiscale"]
@@ -155,7 +163,7 @@ def aggregate(pair_results):
     for method, rs in by_method.items():
         converged = [r for r in rs if r["converged"]]
         row = {"method": method, "n_pairs": len(rs), "n_converged": len(converged)}
-        for key in ("cost", "time", "iterations", "marginal_violation"):
+        for key in ("cost", "dual_cost", "time", "iterations", "marginal_violation"):
             mean, se = mean_se([r[key] for r in converged])
             row[f"{key}_mean"], row[f"{key}_se"] = mean, se
         mean, se = mean_se([r["peak_memory_bytes"] / 1e9 for r in converged])
@@ -184,7 +192,7 @@ def parse_args():
     p.add_argument("--eps", type=float, default=0.1)
     p.add_argument("--sinkslot_L", type=int, default=100)
     p.add_argument("--tol", type=float, default=1e-6)
-    p.add_argument("--max_iter", type=int, default=2000)
+    p.add_argument("--max_iter", type=int, default=8000)
     p.add_argument("--check_every", type=int, default=5)
     p.add_argument("--pair_idx", type=int, nargs=2, default=None,
                     help="Run just this one ordered pair. Omit (or use --max_pairs) to sweep all pairs.")
