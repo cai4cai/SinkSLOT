@@ -146,6 +146,9 @@ def parse_args():
                          "(e.g. --pair_idx 2 9 5 7 for two pairs). Each pair gets its own "
                          "set of output images, named by its own source/target stem.")
     p.add_argument("--device", type=str, default="cuda")
+    p.add_argument("--methods", type=str, nargs="+", default=None,
+                    choices=[stem for stem, _ in _METHODS],
+                    help="Subset of methods to run (default: all).")
     return p.parse_args()
 
 
@@ -171,7 +174,9 @@ def main():
         save_image(load_as_tensor(source_path), os.path.join(args.output_dir, f"{pair_stem}_source.png"))
         save_image(load_as_tensor(target_path), os.path.join(args.output_dir, f"{pair_stem}_target.png"))
 
-        for stem, method in _METHODS:
+        methods = _METHODS if args.methods is None else [
+            (s, m) for s, m in _METHODS if s in args.methods]
+        for stem, method in methods:
             print(f"  {stem} ...")
             img_tensor = transfer_image(
                 source_path, target_path, method, args.eps, args.max_iter, args.tol,
