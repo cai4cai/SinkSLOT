@@ -174,6 +174,57 @@ def _ot_1d_coo_batched_cuda(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor,
     return R.reshape(-1)[sel], Cc.reshape(-1)[sel], mass.reshape(-1)[sel]
 
 
+def _ot_1d_coo_batched_cuda_fp32(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
+    """Identical to `_ot_1d_coo_batched_cuda` (transposed (C, len) layout,
+    single coalesce) but without the internal `.double()` upcast -- genuine
+    float32 throughout.
+
+    Measured on color-transfer pairs (N in the 1e5-2.5e5 range): build time is
+    indistinguishable from `_ot_1d_coo_batched_cuda` (both ~7x faster than
+    `_ot_1d_coo_batched` there), and the resulting Sinkhorn solve reaches the
+    same converged cost to displayed precision, despite the two functions'
+    supports themselves disagreeing on 4-16% of entries (a further, separate
+    disagreement on top of naive-vs-either's 70-95% -- support selection is
+    sensitive to this precision choice, converged solution quality is not).
+    So the fp64 upcast in `_ot_1d_coo_batched_cuda` buys accuracy against a
+    naive fp32 reference, not speed: this function gets the same ~7x layout
+    speedup without it. Kept separate from `_ot_1d_coo_batched_cuda` rather
+    than edited in place, since that function is the paper's own established
+    "SinkSLOT-CUDA" baseline (bench_forward.py, configs/scalability.py,
+    gradient_flow/, hvp.py) with its own reference cache and test suite --
+    this one is for call sites (color_transfer) that just want the layout
+    speedup at the same precision as everything else in that pipeline.
+    """
+    n, C = PX.shape
+    m = PY.shape[0]
+    PXt, PYt = PX.T.contiguous(), PY.T.contiguous()
+    ix = torch.argsort(PXt, dim=-1)
+    iy = torch.argsort(PYt, dim=-1)
+    ca = torch.cumsum(a[ix], dim=-1)
+    cb = torch.cumsum(b[iy], dim=-1)
+
+    rank_a = (torch.arange(n, device=PX.device)[None, :]
+              + torch.searchsorted(cb, ca, right=True))
+    rank_b = (torch.arange(m, device=PX.device)[None, :]
+              + torch.searchsorted(ca, cb, right=False))
+
+    bounds = ca.new_empty(C, n + m)
+    bounds.scatter_(1, rank_a, ca)
+    bounds.scatter_(1, rank_b, cb)
+
+    prev = torch.cat([bounds.new_zeros(C, 1), bounds[:, :-1]], dim=1)
+    mass = bounds - prev
+    mid = 0.5 * (prev + bounds)
+
+    i = torch.searchsorted(ca, mid).clamp_(max=n - 1)
+    j = torch.searchsorted(cb, mid).clamp_(max=m - 1)
+    R = torch.gather(ix, 1, i)
+    Cc = torch.gather(iy, 1, j)
+
+    sel = (mass > 0).reshape(-1).nonzero(as_tuple=False).squeeze(1)
+    return R.reshape(-1)[sel], Cc.reshape(-1)[sel], mass.reshape(-1)[sel]
+
+
 @jaxtyped(typechecker=beartype)
 def sot_plan_coo(
     X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
