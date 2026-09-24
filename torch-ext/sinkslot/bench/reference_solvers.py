@@ -3,12 +3,9 @@ under the same potential-change rule as SinkSLOT's "potential" mode
 (verified identical once phi=f/eps is accounted for; see
 color_transfer/main.py). Not color-transfer-specific.
 
-flashsinkhorn_native_run calls sinkhorn_flashstyle_alternating/_symmetric's
-own threshold/check_every directly, with defaults mirroring SamplesLoss's
-own wherever the low-level function accepts them. GeomLoss's sinkhorn_loop
-has no such hook at all, so geomloss_online_native reimplements its update
-math (verified bit-exact against sinkhorn_loop's own output) with the
-check added in.
+GeomLoss's sinkhorn_loop has no early-stop hook of its own, so
+geomloss_online_native reimplements its update math (verified bit-exact
+against sinkhorn_loop's own output) with the check added in.
 
 Every function also returns cost = <a,f> + <b,g> at each checkpoint, free
 from the dual potentials already in hand. Not expected to match bit-for-bit
@@ -22,97 +19,26 @@ from typing import Optional, Tuple
 import torch
 
 
-def flashsinkhorn_native_run(
-    sc: torch.Tensor, tc: torch.Tensor, sw: torch.Tensor, tw: torch.Tensor,
-    eps: float, max_iter: int, threshold: Optional[float] = None, check_every: int = 10,
-    symmetric: bool = True, use_epsilon_scaling: bool = False,
-    allow_tf32: bool = True, report_change: bool = False,
-) -> Tuple[torch.Tensor, torch.Tensor, int, Optional[bool], float]:
-    """Defaults mirror SamplesLoss's own (backend="symmetric",
-    inner_iterations=10, allow_tf32=True), except use_epsilon_scaling: the
-    library's own annealing schedule has a fixed natural length set by
-    diameter/blur/scaling, independent of max_iter, and can complete (fall
-    through the loop normally) without ever passing a threshold check --
-    n_iters_used < max_iter then falsely looks like early convergence.
-    Confirmed: a run reporting converged=True this way had
-    potential_change=0.88, nowhere near threshold. So threshold-based early
-    stopping needs use_epsilon_scaling=False (fixed eps, no natural early
-    exit) to mean what it says; pass True explicitly only when you just want
-    FlashSinkhorn's fastest solve and don't need to trust converged/
-    last_change. Only applies when symmetric=True (alternating has no such
-    option); when True, eps maps to blur=eps**0.5, since the library ignores
-    a plain eps= once scaling is on. last_extrapolation=False (symmetric
-    only): the library's default appends one extra, unblended alpha=1.0 step
-    after the loop completes normally (not on early threshold break) --
-    dropped to match geomloss_online_native's own convention, which has no
-    such step; this is what a persistent ~2e-3 potential gap between the two
-    at fixed eps traced back to.
-
-    Returns (f, g, n_iters_used, converged, cost[, last_change]); converged
-    is None if threshold is None. report_change=True adds two extra
-    threshold=None calls to reconstruct the last change value, since neither
-    solver exposes it directly (only n_iters_used).
-    """
-    if symmetric:
-        from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_symmetric
-        eps_kwargs = {"blur": eps ** 0.5} if use_epsilon_scaling else {"eps": eps}
-        f, g, n_iters_used = sinkhorn_flashstyle_symmetric(
-            sc, tc, sw, tw, use_epsilon_scaling=use_epsilon_scaling, n_iters=max_iter,
-            threshold=threshold, check_every=check_every, allow_tf32=allow_tf32,
-            last_extrapolation=False, return_n_iters=True, **eps_kwargs,
-        )
-        solve = lambda n: sinkhorn_flashstyle_symmetric(
-            sc, tc, sw, tw, use_epsilon_scaling=use_epsilon_scaling, n_iters=n,
-            threshold=None, allow_tf32=allow_tf32, last_extrapolation=False, **eps_kwargs)
-    else:
-        from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_alternating
-        f, g, n_iters_used = sinkhorn_flashstyle_alternating(
-            sc, tc, sw, tw, eps=eps, n_iters=max_iter,
-            threshold=threshold, check_every=check_every, allow_tf32=allow_tf32,
-            return_n_iters=True,
-        )
-        solve = lambda n: sinkhorn_flashstyle_alternating(
-            sc, tc, sw, tw, eps=eps, n_iters=n, threshold=None, allow_tf32=allow_tf32)
-    converged = None if threshold is None else n_iters_used < max_iter
-    cost = float((sw * f).sum() + (tw * g).sum())
-
-    if not report_change:
-        return f, g, n_iters_used, converged, cost
-
-    if n_iters_used >= check_every:
-        f_prev, g_prev = solve(n_iters_used - check_every)
-        f_last, g_last = solve(n_iters_used)
-        last_change = max((f_last - f_prev).abs().max().item(), (g_last - g_prev).abs().max().item())
-    else:
-        last_change = float("inf")
-    return f, g, n_iters_used, converged, cost, last_change
-
-
 def flashsinkhorn_samplesloss_run(
     sc: torch.Tensor, tc: torch.Tensor, sw: torch.Tensor, tw: torch.Tensor,
     eps: float, max_iter: int, threshold: Optional[float] = None, check_every: int = 10,
     symmetric: bool = True, allow_tf32: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor, int, Optional[bool], float]:
     """One-shot convergence run via FlashSinkhorn's own SamplesLoss(potentials=
-    True), drop-in alternative to flashsinkhorn_native_run (same call
-    signature and return shape) that goes through the library's own
-    SamplesLoss wrapper instead of calling sinkhorn_flashstyle_alternating/
-    _symmetric directly. Fixed eps (use_epsilon_scaling=False), for the same
-    reason as flashsinkhorn_native_run's own default. debias=False (we want
-    the raw entropic OT plan/potentials for barycentric projection, not a
-    symmetrized divergence, which would need two extra Sinkhorn solves).
+    True). Fixed eps (use_epsilon_scaling=False): the library's own
+    annealing schedule has a fixed natural length set by diameter/blur/
+    scaling, independent of max_iter, and can complete (fall through the
+    loop normally) without ever passing a threshold check -- n_iters_used <
+    max_iter then falsely looks like early convergence. debias=False (we
+    want the raw entropic OT plan/potentials for barycentric projection, not
+    a symmetrized divergence, which would need two extra Sinkhorn solves).
     normalize=False (our eps is calibrated in true RGB-space squared-
     Euclidean units; any internal rescaling would silently change what eps
     means, breaking the controlled comparison across methods).
-    last_extrapolation=False, for the same reason as flashsinkhorn_native_run's
-    own default (only applies to backend="symmetric"; SamplesLoss accepts
-    the kwarg regardless of backend and ignores it for "alternating").
-
-    Verified empirically to match flashsinkhorn_native_run bit-for-bit
-    (same cost, same n_iters_used) on both backends, on the currently
-    installed flash_sinkhorn==0.4.0 (PyPI) -- the earlier concern that
-    SamplesLoss's backend="alternating" never threaded early-stopping
-    through was fixed upstream in this version.
+    last_extrapolation=False (backend="symmetric" only): the library's
+    default appends one extra, unblended alpha=1.0 step after the loop
+    completes normally, dropped to match geomloss_online_native's own
+    convention, which has no such step.
 
     Returns (f, g, n_iters_used, converged, cost).
     """
@@ -273,13 +199,13 @@ def geomloss_online_native(
     at a fixed eps (single-scale, debias=False), since sinkhorn_loop has no
     early-stop hook of its own. Verified bit-exact against sinkhorn_loop
     itself at threshold=None. Always symmetric (damped-Jacobi) updates --
-    same scheme as flashsinkhorn_native_run(symmetric=True); GeomLoss has no
-    alternating/Gauss-Seidel option at any level.
+    same scheme as flashsinkhorn_samplesloss_run(symmetric=True); GeomLoss
+    has no alternating/Gauss-Seidel option at any level.
 
     stop_mode="potential_linf" (default): max(|df|, |dg|) < threshold, same
-    rule as flashsinkhorn_native_run's own default and SinkSLOT's "potential"
-    mode. stop_mode="marginal": max row/col violation of the dense a(x)b
-    plan, |P_i. - a_i| / |P_.j - b_j| <= threshold, matching FlashSinkhorn's/
+    rule as flashsinkhorn_samplesloss_run's own default and SinkSLOT's
+    "potential" mode. stop_mode="marginal": max row/col violation of the
+    dense a(x)b plan, |P_i. - a_i| / |P_.j - b_j| <= threshold, matching FlashSinkhorn's/
     SinkSLOT's own "marginal" stop mode. Derived for free from ft_ba/gt_ab
     (already computed every iteration for the update itself), no extra
     softmin call: P_i. = a_i*exp((f_ba_i - ft_ba_i)/eps) since ft_ba is
