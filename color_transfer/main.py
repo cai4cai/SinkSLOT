@@ -156,6 +156,25 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
                 break
         return checkpoints
 
+    if method_key == "geomloss_online":
+        geomloss_online(sc, tc, sw, tw, eps, 10)  # warmup, not timed
+
+        for n_iter in TRAJECTORY_CHECKPOINTS:
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            f, g, total_iters, converged, _, _ = geomloss_online(
+                sc, tc, sw, tw, eps, n_iter, threshold=tol, check_every=check_every)
+            torch.cuda.synchronize()
+            solve_dt = time.perf_counter() - t0
+            viol_lmax, row_l1, col_l1, mass_l1, _ = plan_diagnostics_dense(sc, tc, sw, tw, eps, f, g)
+            _, _, cost = plan_diagnostics_dense_rounded(sc, tc, sw, tw, eps, f, g)
+            checkpoints.append({"iters": total_iters, "solve_time": solve_dt, "cost": cost,
+                                 "marginal_violation": viol_lmax, "marginal_violation_l1": row_l1 + col_l1,
+                                 "mass_l1": mass_l1})
+            if converged:
+                break
+        return checkpoints
+
     # flashsinkhorn_alt / flashsinkhorn_sym (+ their _fp32 variants)
     from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_alternating, sinkhorn_flashstyle_symmetric
     symmetric = "sym" in method_key
