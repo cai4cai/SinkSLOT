@@ -99,13 +99,12 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
     first checkpoint isn't paying one-time Triton compile/autotune cost -- this
     function doesn't piggyback on run_pair's own warmup for the same pair.
 
-    FlashSinkhorn symmetric warm-starts between checkpoints (f_init/g_init,
-    genuine single continuous run, supported by the low-level function even
-    though SamplesLoss doesn't expose it). FlashSinkhorn alternating and
-    SinkSLOT have no warm-start hook, so those restart from scratch at each
-    checkpoint's iteration count -- acceptable here since this only runs for
-    3 of 132 pairs, not the full sweep, and the early break above keeps the
-    restarts from running past convergence.
+    Every method restarts from scratch at each checkpoint's iteration count.
+    FlashSinkhorn symmetric is not warm-started via f_init/g_init: each call
+    begins with an undamped alpha=1 step, so chained calls are not one
+    continuous run. Acceptable cost here since this only runs for 3 of 132
+    pairs, and the early break above keeps restarts from running past
+    convergence. Damped methods (GeomLoss, FlashSinkhorn symmetric) use tol/2.
     """
     checkpoints = []
 
@@ -157,13 +156,13 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
         return checkpoints
 
     if method_key == "geomloss_online":
-        geomloss_online(sc, tc, sw, tw, eps, 10)  # warmup, not timed
+        geomloss_online(sc, tc, sw, tw, eps, 10, threshold=tol / 2, check_every=check_every)  # warmup
 
         for n_iter in TRAJECTORY_CHECKPOINTS:
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             f, g, total_iters, converged, _, _ = geomloss_online(
-                sc, tc, sw, tw, eps, n_iter, threshold=tol, check_every=check_every)
+                sc, tc, sw, tw, eps, n_iter, threshold=tol / 2, check_every=check_every)
             torch.cuda.synchronize()
             solve_dt = time.perf_counter() - t0
             viol_lmax, row_l1, col_l1, mass_l1, _ = plan_diagnostics_dense(sc, tc, sw, tw, eps, f, g)
@@ -187,24 +186,21 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
     else:
         sinkhorn_flashstyle_alternating(sc, tc, sw, tw, eps=eps, n_iters=10, allow_tf32=allow_tf32)
 
-    f, g = None, None
-    prev = 0
     for n_iter in TRAJECTORY_CHECKPOINTS:
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         if symmetric:
-            f, g, chunk_iters = sinkhorn_flashstyle_symmetric(
-                sc, tc, sw, tw, eps=eps, n_iters=n_iter - prev, use_epsilon_scaling=False,
-                last_extrapolation=False, allow_tf32=allow_tf32, f_init=f, g_init=g,
+            f, g, n_used = sinkhorn_flashstyle_symmetric(
+                sc, tc, sw, tw, eps=eps, n_iters=n_iter, use_epsilon_scaling=False,
+                last_extrapolation=False, allow_tf32=allow_tf32,
                 threshold=solve_tol, check_every=check_every, return_n_iters=True)
-            total_iters = prev + int(chunk_iters)
-            converged = chunk_iters < (n_iter - prev)
+            total_iters = int(n_used) - 1  # n_used counts the initial alpha=1 step
         else:
-            f, g, total_iters = sinkhorn_flashstyle_alternating(
+            f, g, n_used = sinkhorn_flashstyle_alternating(
                 sc, tc, sw, tw, eps=eps, n_iters=n_iter, allow_tf32=allow_tf32,
                 threshold=solve_tol, check_every=check_every, return_n_iters=True)
-            total_iters = int(total_iters)
-            converged = total_iters < n_iter
+            total_iters = int(n_used)
+        converged = total_iters < n_iter
         torch.cuda.synchronize()
         solve_dt = time.perf_counter() - t0
         viol_lmax, row_l1, col_l1, mass_l1, _ = plan_diagnostics_dense(sc, tc, sw, tw, eps, f, g)
@@ -214,7 +210,6 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
                              "mass_l1": mass_l1})
         if converged:
             break
-        prev = n_iter
     return checkpoints
 
 
@@ -302,6 +297,7 @@ def flashsinkhorn_row(name, sc, tc, sw, tw, eps, max_iter, tol, check_every, sym
                 threshold=threshold, check_every=check_every, allow_tf32=allow_tf32,
                 last_extrapolation=False, return_n_iters=True,
             )
+            n_iters_used = n_iters_used - 1  # n_iters_used counts the initial alpha=1 step
         else:
             f, g, n_iters_used = sinkhorn_flashstyle_alternating(
                 sc, tc, sw, tw, eps=eps, n_iters=n_iters, threshold=threshold,
@@ -316,10 +312,11 @@ def flashsinkhorn_row(name, sc, tc, sw, tw, eps, max_iter, tol, check_every, sym
 
 
 def geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
+    # tol/2 for GeomLoss's alpha=0.5 damped updates, same as the symmetric backends.
     def solve():
-        return geomloss_online(sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every)
+        return geomloss_online(sc, tc, sw, tw, eps, max_iter, threshold=tol / 2, check_every=check_every)
 
-    geomloss_online(sc, tc, sw, tw, eps, 10, threshold=tol, check_every=check_every)  # warmup
+    geomloss_online(sc, tc, sw, tw, eps, 10, threshold=tol / 2, check_every=check_every)  # warmup
     (f, g, it, converged, dual_cost, change), dt, peak = measure(solve)
     return _dense_result("GeomLoss (online)", f, g, dt, peak, it, converged, dual_cost, sc, tc, sw, tw, eps)
 
