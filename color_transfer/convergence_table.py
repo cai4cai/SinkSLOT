@@ -32,7 +32,7 @@ import torch
 
 from color_transfer.trajectory_potential import DEFAULT_PAINTINGS_DIR, StopCfg, list_images, pixels_and_weights
 from sinkslot.bench.reference_solvers import (
-    flashsinkhorn_samplesloss_run, geomloss_multiscale_native, geomloss_online_native, plan_diagnostics_dense,
+    flashsinkhorn_samplesloss_run, geomloss_online_native, plan_diagnostics_dense,
     plan_diagnostics_dense_l1, plan_diagnostics_dense_rounded, sinkslot_plan_diagnostics, sinkslot_plan_diagnostics_l1,
     sinkslot_plan_diagnostics_rounded,
 )
@@ -167,6 +167,52 @@ def sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L):
             "unrounded_cost": unrounded_cost, "unrounded_marginal_violation": unrounded_viol}
 
 
+def sinkslot_sym_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L):
+    """Same construction as sinkslot_row, but the alpha=0.5 Jacobi
+    (sinkslot_symmetric_triton) solver instead of Gauss-Seidel. Its
+    "potential" stop check is structurally identical to
+    sinkslot_alternating_triton's / FlashSinkhorn-alternating's (checkpoint-
+    to-checkpoint delta of the CURRENT state, every check_every iterations)
+    -- but here that state is itself alpha-damped
+    (phi_new = (1-alpha)*phi + alpha*phi_cand), so the observed checkpoint
+    delta is ~alpha=0.5 times the raw (undamped) step for the same
+    underlying progress, exactly the same asymmetry FlashSinkhorn-symmetric
+    has relative to alternating/GeomLoss. tol/2 restores parity: see
+    chat -- observed_step = alpha*raw_step, so observed_step < alpha*tol
+    <=> raw_step < tol, matching alternating's own precision.
+    """
+    from sinkslot.sinkhorn_solvers import sinkslot_symmetric_triton
+    from sinkslot.solver import (
+        _ot_1d_coo_batched, _ot_1d_coo_batched_cuda_fp32, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
+    )
+
+    ot1d = _ot_1d_coo_batched_cuda_fp32 if sc.is_cuda else _ot_1d_coo_batched
+    sym_tol = tol / 2
+
+    def solve():
+        n, m = sc.shape[0], tc.shape[0]
+        rows, cols, S = sot_plan_coo(sc, tc, sw, tw, L=sinkslot_L, seed=0, ot1d=ot1d)
+        cost_mat = sparse_sqeuclidean_cost(sc, tc, rows, cols)
+        log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
+        lam = log_S - cost_mat / eps
+        r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n)
+        c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m)
+        phi, psi, it, converged, change = sinkslot_symmetric_triton(
+            r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, sw.log(), tw.log(), n, m, max_iter,
+            stop=StopCfg(mode="potential", max_iter=max_iter, check_every=check_every, tol=sym_tol), eps=eps)
+        dual_cost = float((sw * (eps * phi)).sum() + (tw * (eps * psi)).sum())
+        return phi, psi, it, converged, dual_cost, rows, cols, S, cost_mat
+
+    solve()  # warmup
+    (phi, psi, it, converged, dual_cost, rows, cols, S, cost_mat), dt, peak = measure(solve)
+    unrounded_viol, unrounded_cost = sinkslot_plan_diagnostics(phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
+    viol, cost = sinkslot_plan_diagnostics_rounded(sc, tc, phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
+    return {"method": "SinkSLOT (symmetric)", "cost": cost, "dual_cost": dual_cost, "time": dt,
+            "peak_memory_bytes": peak, "iterations": it, "converged": bool(converged),
+            "marginal_violation": viol,
+            "unrounded_cost": unrounded_cost, "unrounded_marginal_violation": unrounded_viol}
+
+
 def flashsinkhorn_row(name, sc, tc, sw, tw, eps, max_iter, tol, check_every, symmetric, allow_tf32=True):
     flashsinkhorn_samplesloss_run(sc, tc, sw, tw, eps, 10, symmetric=symmetric, allow_tf32=allow_tf32)  # warmup
 
@@ -199,20 +245,7 @@ def geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
             "unrounded_cost": unrounded_cost, "unrounded_marginal_violation": unrounded_viol}
 
 
-def geomloss_multiscale_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
-    geomloss_multiscale_native(sc, tc, sw, tw, eps, 10)  # warmup
-
-    def solve():
-        return geomloss_multiscale_native(sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every)
-
-    (f, g, it, converged, dual_cost, change), dt, peak = measure(solve)
-    viol, cost = plan_diagnostics_dense(sc, tc, sw, tw, eps, f, g)
-    return {"method": "GeomLoss (multiscale)", "cost": cost, "dual_cost": dual_cost, "time": dt,
-            "peak_memory_bytes": peak, "iterations": it, "converged": bool(converged),
-            "marginal_violation": viol}
-
-
-_METHOD_KEYS = ["sinkslot", "flashsinkhorn_alt", "flashsinkhorn_sym", "geomloss_online", "geomloss_multiscale",
+_METHOD_KEYS = ["sinkslot", "sinkslot_sym", "flashsinkhorn_alt", "flashsinkhorn_sym", "geomloss_online",
                 "flashsinkhorn_alt_fp32", "flashsinkhorn_sym_fp32"]
 
 
@@ -220,6 +253,8 @@ def run_pair(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, method
     rows = []
     if "sinkslot" in methods:
         rows.append(sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L))
+    if "sinkslot_sym" in methods:
+        rows.append(sinkslot_sym_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L))
     if "flashsinkhorn_alt" in methods:
         rows.append(flashsinkhorn_row("FlashSinkhorn (alternating)", sc, tc, sw, tw, eps, max_iter,
                                        tol, check_every, symmetric=False))
@@ -234,8 +269,6 @@ def run_pair(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, method
                                        tol, check_every, symmetric=True, allow_tf32=False))
     if "geomloss_online" in methods:
         rows.append(geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every))
-    if "geomloss_multiscale" in methods:
-        rows.append(geomloss_multiscale_row(sc, tc, sw, tw, eps, max_iter, tol, check_every))
     return rows
 
 
@@ -311,6 +344,12 @@ def parse_args():
                     help="Instead of running anything, merge these convergence_sweep*.json files "
                          "(e.g. from separate --methods runs) and print/save the aggregate summary.")
     p.add_argument("--device", type=str, default="cuda")
+    p.add_argument("--num_shards", type=int, default=1,
+                    help="Split all_pairs round-robin across this many shards, for further "
+                         "parallelizing a single slow --methods entry (e.g. flashsinkhorn_sym_fp32) "
+                         "across several concurrent jobs. Each shard writes its own output file.")
+    p.add_argument("--shard_idx", type=int, default=0,
+                    help="Which shard (0-indexed, < --num_shards) this invocation computes.")
     return p.parse_args()
 
 
@@ -371,8 +410,14 @@ def main():
     all_pairs = [(i, j) for i in range(len(paths)) for j in range(len(paths)) if i != j]
     if args.max_pairs:
         all_pairs = all_pairs[:args.max_pairs]
+    if args.num_shards > 1:
+        if not (0 <= args.shard_idx < args.num_shards):
+            raise ValueError(f"--shard_idx must be in [0, {args.num_shards}), got {args.shard_idx}")
+        all_pairs = all_pairs[args.shard_idx::args.num_shards]
 
     suffix = "" if list(args.methods) == _METHOD_KEYS else "_" + "_".join(args.methods)
+    if args.num_shards > 1:
+        suffix += f"_shard{args.shard_idx}of{args.num_shards}"
     out_path = os.path.join(args.output_dir, f"convergence_sweep{suffix}.json")
     results = []
     if os.path.exists(out_path):
