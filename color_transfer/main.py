@@ -36,10 +36,11 @@ import torch
 from flash_sinkhorn.samples_loss import SamplesLoss
 from PIL import Image
 
-from sinkslot.bench.reference_solvers import (
-    geomloss_online_native, plan_diagnostics_dense, plan_diagnostics_dense_l1, plan_diagnostics_dense_rounded,
+from sinkslot.bench.plan_diagnostics import (
+    plan_diagnostics_dense, plan_diagnostics_dense_l1, plan_diagnostics_dense_rounded,
     sinkslot_plan_diagnostics, sinkslot_plan_diagnostics_l1, sinkslot_plan_diagnostics_rounded,
 )
+from sinkslot.bench.reference_solvers import geomloss_online_native
 
 DEFAULT_PAINTINGS_DIR = Path(__file__).parent / "paintings"
 
