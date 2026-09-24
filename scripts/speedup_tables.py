@@ -82,11 +82,57 @@ def best(configs, dataset, d, method, tf32, threshold):
     return fastest, leanest
 
 
+def _fmt_ms(t: float) -> str:
+    if t >= 1000:
+        return f"{t:,.0f}".replace(",", "{,}")
+    return f"{t:.1f}" if t < 100 else f"{t:.0f}"
+
+
+def _flags_tex(flags: str) -> str:
+    marks = ("\\dagger" if "M" in flags else "") + ("\\ddagger" if "V" in flags else "")
+    return f"$^{{{marks}}}$" if marks else ""
+
+
+def latex_speedup_rows(configs, thresholds=(1.0, 10.0), wrap=lambda cell: cell) -> str:
+    """Rows of Tables/speedup_potential.tex: runtime (ms) with SinkSLOT (alternating)'s
+    speedup over each method; dagger/ddagger mark max_iter hits / marginal violation > 1e-6."""
+    lines = []
+    for i, (method, tf32, label) in enumerate(METHODS):
+        ours = method.startswith("sinkslotcuda")
+        name = f"\\textbf{{{label}}}" if ours else label
+        cells = []
+        for dataset, d in SLICES:
+            for T in thresholds:
+                ref, _ = best(configs, dataset, d, *REFERENCE, T)
+                fastest, _ = best(configs, dataset, d, method, tf32, T)
+                if fastest is None:
+                    cells.append("---")
+                    continue
+                c = fastest[1]
+                cell = _fmt_ms(c["total_ms"]) + _flags_tex(c["flags"])
+                if (method, tf32) == REFERENCE:
+                    cell = f"\\textbf{{{cell}}}"
+                elif ref is not None:
+                    cell += f"\\spd{{{c['total_ms'] / ref[1]['total_ms']:.1f}}}"
+                cells.append(wrap(cell))
+        row = ("\\rowcolor{LightGray}\n" if i % 2 else "") + name
+        for j in range(0, len(cells), len(thresholds)):
+            row += "\n & " + " & ".join(cells[j:j + len(thresholds)])
+        lines.append(row + " \\\\")
+    return "\n".join(lines)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("csv")
+    ap.add_argument("--latex", action="store_true", help="Print the rows of Tables/speedup_potential.tex.")
+    ap.add_argument("--red", action="store_true", help="With --latex: wrap every cell in \\textcolor{red}.")
     args = ap.parse_args()
     configs = load_configs(args.csv)
+    if args.latex:
+        wrap = (lambda cell: f"\\textcolor{{red}}{{{cell}}}") if args.red else (lambda cell: cell)
+        print(latex_speedup_rows(configs, wrap=wrap))
+        return
     for T in THRESHOLDS:
         print(f"\n=== cost gap <= {T:g}% ===")
         for dataset, d in SLICES:
