@@ -41,6 +41,9 @@ for p in "$ENV_SITE"/scipy "$ENV_SITE"/scipy.libs "$ENV_SITE"/scipy-*.dist-info;
     [ -e "$p" ] && ln -sfn "$p" "$ROOT/pyshim/$(basename "$p")"
 done
 export PYTHONPATH=$ROOT/pyshim:$ROOT/torch-ext:$PYTHONPATH
+# POT only needs its NumPy/torch backends; importing its JAX and TensorFlow
+# backends together aborts (duplicate absl initialisation).
+export POT_BACKEND_DISABLE_JAX=1 POT_BACKEND_DISABLE_TENSORFLOW=1 POT_BACKEND_DISABLE_CUPY=1
 export TRITON_CACHE_DIR=$ROOT/.triton_cache
 export KEOPS_CACHE_FOLDER=$ROOT/.keops_cache
 mkdir -p "$TRITON_CACHE_DIR" "$KEOPS_CACHE_FOLDER"
