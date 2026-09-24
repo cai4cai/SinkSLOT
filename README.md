@@ -235,9 +235,7 @@ result = sinkslot_solve(
 
 | Result | Config | Grid |
 |---|---|---|
-| Table 1, half-moons / 8-Gaussians / two-rings | `configs/speedup.py` | N=M=10,000, d=2, 8-point log grid for ε in [0.001, 0.1], L 32 to 4096 |
-| Table 1, Gaussian d=3 | `configs/speedup_gaussian_d3.py` | same policy, d=3 |
-| Table 1, Gaussian d=64 | `configs/speedup_gaussian_d64.py` | same policy, d=64, ε in [0.1, 1], L 64 to 8192 |
+| Table 1 (speedup) | `configs/speedup.py` | N=M=10,000; half-moons, 8-Gaussians, two-rings at d=2, Gaussian at d=3 and d=64; 10-point ε grid median(C) × [1e-3, 0.5] per slice; potential-change stop, tol 1e-6; L 25 to 5000; 5 seeds. Prepare with `scripts/speedup_prepare.py`, run as a job array with `scripts/slurm/speedup_potential.slurm` |
 | Figure 2, scalability | `configs/scalability.py` via `scripts/scalability.py` | N in {5k,10k,20k,30k,50k} at d in {3,64}; d in {4..1024} at N=10,000; 5 seeds |
 | Figure 3, gradient flow | `gradient_flow/config.py` via `gradient_flow/run.py` | N=1000, ε=0.01, L=100, 50 steps; SOT/EOT/SROT/SinkSLOT |
 | Appendix, gradient term split | `gradient_flow/term_norms.py` | same problem; splits the complete gradient into the envelope term and the residual |
@@ -245,7 +243,9 @@ result = sinkslot_solve(
 | Gradient accuracy under early stopping | `gradient_flow/appendix_checks/stopping.py` | same problem, inner iterations 1 to 1000 against a 5000-iteration reference |
 
 ```bash
-python run.py --config speedup --execute   # a published sweep
+python run.py --config speedup --dry-run   # list the speedup sweep's commands
+python run.py --config speedup --execute --num-shards 210 --shard-idx 0   # one shard of it
+python run.py --config speedup --merge     # merge shard CSVs into forward_all.csv
 python -m gradient_flow.run                # the gradient-flow figure
 python scripts/scalability.py              # print every scalability command
 python scripts/scalability.py --execute    # run them

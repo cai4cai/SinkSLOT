@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from configs.scalability import (  # noqa: E402
     CHECK_EVERY, D_EXP1, D_EXP2, D_SWEEP, EPS_EXP1, EPS_EXP2, EPS_EXP3,
     L_VALUES, MAX_DENSE_SIZE_DSCALE, MAX_DENSE_SIZE_NSCALE, MAX_ITER,
-    METHODS, N_EXP3, N_SWEEP, POTENTIAL_TOL, SEEDS, SROT_DELTA, STOP_MODE, STOP_TOL,
+    METHODS, N_EXP3, N_SWEEP, SCALING_TOL, SEEDS, SROT_DELTA, STOP_MODE, STOP_TOL,
 )
 
 
@@ -46,7 +46,7 @@ def build(d, eps, n, output_dir, *, method, seed, max_dense_size, slices=None,
     else:
         cmd.append("--no-sinkslotcuda")
     cmd += ["--stop-mode", STOP_MODE, "--max-iter", str(MAX_ITER),
-            "--stop-tol", str(STOP_TOL), "--potential-tol", str(POTENTIAL_TOL),
+            "--stop-tol", str(STOP_TOL), "--scaling-tol", str(SCALING_TOL),
             "--check-every", str(CHECK_EVERY)]
     cmd.append("--no-sparsink")
     if extra_flags:

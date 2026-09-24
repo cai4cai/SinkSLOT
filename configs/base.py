@@ -5,7 +5,7 @@ Edit ``CONFIG`` below to change what ``run.py`` executes, then
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 @dataclass
@@ -13,7 +13,8 @@ class BenchConfig:
     """Settings for one benchmark sweep.
 
     The sweep is the cross product of ``datasets`` x ``eps_values`` x methods x
-    ``sizes`` x ``dims``. Two baselines carry a swept parameter of their own -- SROT's
+    ``sizes`` x ``dims`` (or, when ``problems`` is set, of those explicit
+    (dataset, d, eps list) triples x methods x ``sizes``). Two baselines carry a swept parameter of their own -- SROT's
     number of projections and Spar-Sink/Rand-Sink's subsample size -- which expands only
     their own rows, since no other method has such a knob. With ``isolate`` on, each
     combination is a separate subprocess; the defaults here are a deliberately minimal
@@ -31,16 +32,23 @@ class BenchConfig:
             O(nd)-vs-O(n^2) claim needs n in the tens of thousands together with
             ``tensorized=True`` for a dense baseline. See analysis.md.
         dims: Feature dimensions d to benchmark.
+        problems: Optional explicit list of (dataset, d, eps_values) triples. When
+            set it replaces the ``datasets`` x ``dims`` x ``eps_values`` product, so
+            one config can mix dimensions and give each (dataset, d) its own eps grid.
 
         eps_values: Entropic regularization strengths. One run per value; every
             method is measured at each.
         n_iters: Sinkhorn iterations. Fixed for every method, with early stopping
             disabled throughout, so the timing column compares equal work.
-        warmup: Untimed iterations before measurement.
+        warmup: Untimed warmup calls before measurement.
+        warmup_iters: Iteration cap for each warmup call.
         rep: Timed repetitions; the reported figure is their mean.
-        tf32: Allow TF32 matmuls (10-bit mantissa) rather than strict FP32. Tracked
-            per row, so a TF32 run and an FP32 run of the same configuration are
-            distinct rows rather than one overwriting the other.
+        tf32: Allow TF32 matmuls (10-bit mantissa) rather than strict FP32, for every
+            method except FlashSinkhorn (see ``flash_tf32``). Tracked per row, so a
+            TF32 run and an FP32 run of the same configuration are distinct rows
+            rather than one overwriting the other.
+        flash_tf32: TF32 settings to run FlashSinkhorn at. Each Flash unit is
+            repeated once per value.
         seeds: Data-generation seeds (x, y, a, b only). The full grid is repeated
             once per seed. Method-internal randomness (slice projections, sparse-
             kernel sampling) is not affected -- it stays at its own independent
@@ -61,25 +69,25 @@ class BenchConfig:
         sinkslot_slices: L values to sweep for SinkSLOT -- number of 1-D projections.
             Sparse O(L(N+M)), so unlike SROT it is not gated by max_dense_size.
 
-        no_sinkslotcuda: Skip SinkSLOT-CUDA -- the same method and solve kernels as
-            SinkSLOT with a CUDA-optimised setup path (fused Triton cost, fp64 (C,n)
-            cumsum, int32 CSC key), 2.1-3.1x faster end to end. The fp64 scan yields a
-            strictly more accurate sliced support, so it keeps its own RMAE reference.
-        sinkslotcuda_slices: L values to sweep for SinkSLOT-CUDA. Kept separate from
-            sinkslot_slices so the two can be compared at matched L or swept apart.
+        no_sinkslotcuda: Skip SinkSLOT-CUDA: the same method and solve kernels as
+            SinkSLOT with a CUDA-optimised setup path (fused Triton cost, CUDA 1-D OT
+            scan in fp32, int32 CSC key). It keeps its own RMAE reference.
+        sinkslotcuda_slices: L values to sweep for SinkSLOT-CUDA and
+            SinkSLOT-CUDA-symmetric. Kept separate from sinkslot_slices so the two
+            can be compared at matched L or swept apart.
+        no_sinkslotcuda_symmetric: Skip SinkSLOT-CUDA with symmetric (damped)
+            updates. Skipped by default.
 
         no_sparsink: Skip the Spar-Sink and Rand-Sink baselines.
         no_randsink: Skip just Rand-Sink (the uniform-sampling variant), while
             still running Spar-Sink (importance sampling). Independent of
             no_sparsink, which skips both.
-        sparsink_s: Expected kernel subsample sizes s to sweep. Their paper uses
-            s = {5,10,15,20} * s0(n) with s0(n) = 1e-3 * n * log^4(n), i.e. s0(256) ~ 242
-            and s0(512) ~ 775. Small s can leave a row or column unsampled, which makes
-            the problem infeasible for that row; such draws are dropped and counted in
-            the ``empty_lines`` column.
-        sparsink_replicates: Independent kernel draws averaged per row. Sampling is
-            stochastic, so a single draw would report sampling noise as method quality;
-            their paper averages 100.
+        sparsink_s: Expected kernel subsample sizes s to sweep, in units of
+            s0(n) = 1e-3 * n * ln(n)^4 (the authors' simu_ot.py uses s = {2,4,8,16} * s0
+            with 50 replications). Small s can leave a row or column unsampled; as in
+            the authors' code, those lines are dropped and the rest solved, and the
+            count is reported in the ``empty_lines`` column.
+        sparsink_replicates: Independent kernel draws averaged per row.
 
         no_ott: Skip OTT-JAX (JAX/OTT is often not installed locally).
         no_rmae_check: Skip the accuracy metric. The reference is a converged Sinkhorn
@@ -90,7 +98,8 @@ class BenchConfig:
         no_flash_alternating: Skip FlashSinkhorn's alternating backend.
         only: Restrict the sweep to a single method: ``"flash_symmetric"``,
             ``"flash_alternating"``, ``"flash"`` (both backends), ``"geomloss"``,
-            ``"ott"``, ``"srot"``, ``"spar_sink"`` or ``"rand_sink"``.
+            ``"ott"``, ``"srot"``, ``"spar_sink"``, ``"rand_sink"``, ``"sinkslot"``,
+            ``"sinkslotcuda"`` or ``"sinkslotcuda_symmetric"``.
 
         isolate: Give every measurement its own subprocess. Required for
             ``gpu_memory_mb`` to be attributable to a method: the figure is
@@ -105,7 +114,8 @@ class BenchConfig:
         verify: Run correctness checks instead of benchmarking.
         quiet: Suppress per-measurement output.
 
-        output_dir: Where the CSVs are written. Cleared at the start of each sweep.
+        output_dir: Where the CSVs are written. Cleared at the start of each
+            non-sharded sweep; sharded runs resume instead (see run.py).
         dry_run: Print the constructed commands instead of running them.
     """
 
@@ -115,28 +125,23 @@ class BenchConfig:
     eps_values: List[float] = field(default_factory=lambda: [0.1, 0.01, 0.001])
     n_iters: int = 50
 
-    # Early stopping. stop_mode "fixed" (default) runs exactly n_iters -- the
-    # FlashSinkhorn protocol, which isolates per-iteration cost for a fair throughput
-    # comparison. "marginal" runs up to max_iter, stopping when the max
-    # (L-infinity) marginal violation max(max|P1-a|, max|P^T1-b|) <= stop_tol.
-    # It is a max rule, not a total-variation sum, and it is not gated on total
-    # mass: a TV sum over n terms against a fixed absolute tolerance is
-    # unreachable at n=10,000 however converged the solve actually is, which is
-    # what made marginal stopping look broken before it was measured
-    # correctly. The max rule is the n-invariant one. "potential"
-    # reproduces Spar-Sink's rule, ||du||_1+||dv||_1 <= potential_tol. "potential_linf"
-    # reproduces FlashSinkhorn's own native rule, max(|df|,|dg|) <= stop_tol since the
-    # last check -- implemented (in addition to marginal) for srot/sinkslot/
-    # sinkslotcuda/spar_sink/rand_sink, and flash already uses it natively under any
-    # non-"fixed" mode; geomloss has no early-stopping hook and stays fixed regardless.
-    stop_mode: str = "fixed"     # "fixed" | "marginal" | "potential" | "potential_linf"
+    # Early stopping. stop_mode "fixed" (default) runs exactly n_iters, the
+    # FlashSinkhorn protocol for per-iteration throughput. The other modes run up
+    # to max_iter and check every check_every iterations:
+    #   "marginal":  max(max|P1-a|, max|P^T1-b|) <= stop_tol.
+    #   "potential": max(|df|, |dg|) <= stop_tol between consecutive checkpoints.
+    #   "scaling":   Spar-Sink's own rule on its u/v scalings, <= scaling_tol
+    #                (spar_sink/rand_sink only).
+    stop_mode: str = "fixed"     # "fixed" | "marginal" | "potential" | "scaling"
     max_iter: int = 10000        # cap in non-fixed modes (n_iters is the count in "fixed")
-    stop_tol: float = 1e-4       # marginal/potential_linf threshold, n-independent
-    potential_tol: float = 1e-6  # Spar-Sink's ||du||+||dv|| threshold ("potential" mode)
+    stop_tol: float = 1e-4       # marginal/potential threshold
+    scaling_tol: float = 1e-6    # Spar-Sink u/v threshold ("scaling" mode)
     check_every: int = 10        # iterations between convergence checks
     warmup: int = 5
+    warmup_iters: int = 10
     rep: int = 15
     tf32: bool = True
+    flash_tf32: List[bool] = field(default_factory=lambda: [False])
 
     # Data-generation seeds only (x, y, a, b) -- method-internal randomness (slice
     # projections, sparse-kernel sampling) stays independently seeded regardless.
@@ -144,6 +149,7 @@ class BenchConfig:
     seeds: List[int] = field(default_factory=lambda: [0])
 
     datasets: List[str] = field(default_factory=lambda: ["gaussian", "8gaussians"])
+    problems: Optional[List[Tuple[str, int, List[float]]]] = None
 
     no_srot: bool = False
     srot_slices: List[int] = field(default_factory=lambda: [10])
@@ -154,6 +160,7 @@ class BenchConfig:
 
     no_sinkslotcuda: bool = False
     sinkslotcuda_slices: List[int] = field(default_factory=lambda: [10])
+    no_sinkslotcuda_symmetric: bool = True
 
     no_sparsink: bool = False
     no_randsink: bool = False
@@ -178,6 +185,14 @@ class BenchConfig:
     output_dir: str = "output/paper_benchmarks"
     dry_run: bool = True
 
+    # Deprecated alias for scaling_tol, kept so older configs still load.
+    potential_tol: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.potential_tol is not None:
+            self.scaling_tol = self.potential_tol
+            self.potential_tol = None
+
 
 # Quick-iteration sweep. Structurally identical ("ditto") to the published
 # sweeps in this package (speedup*.py, scalability.py) -- same fields, same
@@ -193,18 +208,19 @@ CONFIG = BenchConfig(
     n_iters=50,
 
     # Convergence / early stopping (see the class docstring). The published
-    # protocol is stop_mode="marginal" (time-to-accuracy, stop_tol=1e-6); see
+    # protocol is stop_mode="potential" (time-to-accuracy, stop_tol=1e-6); see
     # configs/speedup.py. "fixed" here runs exactly n_iters for every method, for
     # a quick per-iteration throughput check while wiring is being changed.
     stop_mode="fixed",
     max_iter=10000,
     stop_tol=1e-4,
-    potential_tol=1e-6,
+    scaling_tol=1e-6,
     check_every=10,
 
     warmup=5,
     rep=10,
     tf32=True,
+    flash_tf32=[True],
 
     datasets=["gaussian"],
 

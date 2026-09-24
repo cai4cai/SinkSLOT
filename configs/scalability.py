@@ -1,6 +1,6 @@
 """Scalability: 3 N-scaling/d-scaling experiments, 5 seeds each, SinkSLOT-CUDA
-vs SROT vs FlashSinkhorn-alternating. Same marginal stopping policy as
-configs/speedup.py: stop_tol=1e-6, max_iter=20000.
+vs SROT vs FlashSinkhorn-alternating. Same potential-change stopping policy
+as configs/speedup.py: stop_tol=1e-6, check_every=5, max_iter=20000.
 
 Spar-Sink data was also collected for this experiment (same s = k*s0(n)
 recipe as configs/speedup.py, run over 5 seeds) but is not part of the final
@@ -54,11 +54,11 @@ N_EXP3 = 10000
 METHODS = ["sinkslotcuda", "flash_alternating", "srot"]
 
 # shared solver policy, same as configs/speedup.py
-STOP_MODE = "marginal"
+STOP_MODE = "potential"
 MAX_ITER = 20000
 STOP_TOL = 1e-6
-POTENTIAL_TOL = 1e-6
-CHECK_EVERY = 10
+SCALING_TOL = 1e-6
+CHECK_EVERY = 5
 SROT_DELTA = 1e-8
 
 # Both SROT and Spar-Sink build a dense N x M intermediate (SROT's own pi_SOT
