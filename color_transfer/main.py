@@ -71,31 +71,41 @@ def pixels_and_weights(path, device, dtype):
     return pixels, weights
 
 
-# Two representative pairs (lowest/highest SinkSLOT transport cost at eps=0.01,
-# per the paper's own qualitative-figure selection) get an embedded marginal-
-# violation trajectory recorded alongside their normal (unaffected) row --
-# piggybacked on whichever sweep job is already solving that pair for that
-# method, rather than a separate restart-heavy script re-solving from scratch.
-TRAJECTORY_PAIRS = {(6, 7), (4, 2)}
-TRAJECTORY_CHECKPOINTS = [10, 25, 50, 100, 200, 400, 800, 1600, 3200, 6400]
+# The three pairs shown in the qualitative figure (fig:color_transfer,
+# color_transfer_3pairs_new_v5.pdf) get an embedded marginal-violation/cost
+# trajectory recorded alongside their normal (unaffected) row -- piggybacked
+# on whichever sweep job is already solving that pair for that method,
+# rather than a separate restart-heavy script re-solving from scratch.
+TRAJECTORY_PAIRS = {(11, 5), (3, 4), (0, 1)}
+TRAJECTORY_CHECKPOINTS = [10, 25, 50, 100, 200, 400, 800, 1600, 3200]
 
 
 def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslot_L, allow_tf32=True):
-    """Checkpoint the true L1 marginal violation (row, col, mass) over the
-    course of solving, for one of the two TRAJECTORY_PAIRS.
+    """Checkpoint the unrounded marginal violation (L-infinity and L1) and
+    the rounded true transport cost <C,P> over the course of solving, for
+    one of the three TRAJECTORY_PAIRS.
 
-    Diagnostic computation time (plan_diagnostics_*_l1, an O(N*M/block) or
+    Each checkpoint call uses the same threshold-based stop as the main
+    sweep, so once a method actually converges the loop breaks -- no
+    checkpoint is run past the point where the curve would just be flat.
+
+    Diagnostic computation time (plan_diagnostics_*, an O(N*M/block) or
     O(nnz) reconstruction pass) is deliberately NOT included in the recorded
-    'time' field -- only the solver's own time to reach that checkpoint is
-    measured, so this never contaminates a speed comparison the way it would
-    if left in.
+    'time' field. For SinkSLOT, 'solve_time' is plan-construction time (sot_plan_coo
+    + cost + CSR, timed once) plus that checkpoint's own Sinkhorn time -- the same
+    two pieces sinkslot_row's measure() call times together, so this stays
+    comparable to the main sweep's own "Time (s)" metric. A warmup pass (full
+    pipeline for SinkSLOT, a short solve for FlashSinkhorn) runs first so the
+    first checkpoint isn't paying one-time Triton compile/autotune cost -- this
+    function doesn't piggyback on run_pair's own warmup for the same pair.
 
     FlashSinkhorn symmetric warm-starts between checkpoints (f_init/g_init,
     genuine single continuous run, supported by the low-level function even
     though SamplesLoss doesn't expose it). FlashSinkhorn alternating and
     SinkSLOT have no warm-start hook, so those restart from scratch at each
     checkpoint's iteration count -- acceptable here since this only runs for
-    2 of 132 pairs, not the full sweep.
+    3 of 132 pairs, not the full sweep, and the early break above keeps the
+    restarts from running past convergence.
     """
     checkpoints = []
 
@@ -106,44 +116,85 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
         )
         ot1d = _ot_1d_coo_batched_cuda if sc.is_cuda else _ot_1d_coo_batched
         n, m = sc.shape[0], tc.shape[0]
-        rows, cols, S = sot_plan_coo(sc, tc, sw, tw, L=sinkslot_L, seed=0, ot1d=ot1d)
-        cost_mat = sparse_sqeuclidean_cost(sc, tc, rows, cols)
-        log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
-        lam = log_S - cost_mat / eps
-        r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n)
-        c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m)
         log_a, log_b = sw.log(), tw.log()
+
+        def build_plan():
+            rows, cols, S = sot_plan_coo(sc, tc, sw, tw, L=sinkslot_L, seed=0, ot1d=ot1d)
+            cost_mat = sparse_sqeuclidean_cost(sc, tc, rows, cols)
+            log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
+            lam = log_S - cost_mat / eps
+            r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n)
+            c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m)
+            return rows, cols, S, cost_mat, r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam
+
+        # Warmup: full pipeline once (plan build + a short solve), not timed.
+        _rows, _cols, _S, _cost_mat, _r_ptr, _r_idx, _r_lam, _c_ptr, _c_idx, _c_lam = build_plan()
+        sinkslot_alternating_triton(
+            _r_ptr, _r_idx, _r_lam, _c_ptr, _c_idx, _c_lam, log_a, log_b, n, m, 10, stop=None, eps=eps)
+
+        torch.cuda.synchronize()
+        t_plan0 = time.perf_counter()
+        rows, cols, S, cost_mat, r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam = build_plan()
+        torch.cuda.synchronize()
+        plan_dt = time.perf_counter() - t_plan0
+
         for n_iter in TRAJECTORY_CHECKPOINTS:
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             phi, psi, it, converged, change = sinkslot_alternating_triton(
-                r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iter, stop=None, eps=eps)
+                r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iter,
+                stop=StopCfg(mode="potential", max_iter=n_iter, check_every=check_every, tol=tol), eps=eps)
             torch.cuda.synchronize()
-            solve_dt = time.perf_counter() - t0
-            _, row_l1, col_l1, mass_l1, _ = sinkslot_plan_diagnostics(phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
-            checkpoints.append({"iters": n_iter, "solve_time": solve_dt,
-                                 "row_l1": row_l1, "col_l1": col_l1, "mass_l1": mass_l1})
+            solve_dt = plan_dt + (time.perf_counter() - t0)
+            viol_lmax, row_l1, col_l1, mass_l1, _ = sinkslot_plan_diagnostics(
+                phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
+            _, _, cost = sinkslot_plan_diagnostics_rounded(sc, tc, phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
+            checkpoints.append({"iters": it, "solve_time": solve_dt, "cost": cost,
+                                 "marginal_violation": viol_lmax, "marginal_violation_l1": row_l1 + col_l1,
+                                 "mass_l1": mass_l1})
+            if converged:
+                break
         return checkpoints
 
     # flashsinkhorn_alt / flashsinkhorn_sym (+ their _fp32 variants)
     from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_alternating, sinkhorn_flashstyle_symmetric
     symmetric = "sym" in method_key
+    solve_tol = tol / 2 if symmetric else tol
+
+    # Warmup: not timed, avoids one-time Triton compile cost landing on checkpoint 1.
+    if symmetric:
+        sinkhorn_flashstyle_symmetric(sc, tc, sw, tw, eps=eps, n_iters=10, use_epsilon_scaling=False,
+                                       last_extrapolation=False, allow_tf32=allow_tf32)
+    else:
+        sinkhorn_flashstyle_alternating(sc, tc, sw, tw, eps=eps, n_iters=10, allow_tf32=allow_tf32)
+
     f, g = None, None
     prev = 0
     for n_iter in TRAJECTORY_CHECKPOINTS:
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         if symmetric:
-            f, g = sinkhorn_flashstyle_symmetric(
+            f, g, chunk_iters = sinkhorn_flashstyle_symmetric(
                 sc, tc, sw, tw, eps=eps, n_iters=n_iter - prev, use_epsilon_scaling=False,
-                last_extrapolation=False, allow_tf32=allow_tf32, f_init=f, g_init=g)
+                last_extrapolation=False, allow_tf32=allow_tf32, f_init=f, g_init=g,
+                threshold=solve_tol, check_every=check_every, return_n_iters=True)
+            total_iters = prev + int(chunk_iters)
+            converged = chunk_iters < (n_iter - prev)
         else:
-            f, g = sinkhorn_flashstyle_alternating(sc, tc, sw, tw, eps=eps, n_iters=n_iter, allow_tf32=allow_tf32)
+            f, g, total_iters = sinkhorn_flashstyle_alternating(
+                sc, tc, sw, tw, eps=eps, n_iters=n_iter, allow_tf32=allow_tf32,
+                threshold=solve_tol, check_every=check_every, return_n_iters=True)
+            total_iters = int(total_iters)
+            converged = total_iters < n_iter
         torch.cuda.synchronize()
         solve_dt = time.perf_counter() - t0
-        _, row_l1, col_l1, mass_l1, _ = plan_diagnostics_dense(sc, tc, sw, tw, eps, f, g)
-        checkpoints.append({"iters": n_iter, "solve_time": solve_dt,
-                             "row_l1": row_l1, "col_l1": col_l1, "mass_l1": mass_l1})
+        viol_lmax, row_l1, col_l1, mass_l1, _ = plan_diagnostics_dense(sc, tc, sw, tw, eps, f, g)
+        _, _, cost = plan_diagnostics_dense_rounded(sc, tc, sw, tw, eps, f, g)
+        checkpoints.append({"iters": total_iters, "solve_time": solve_dt, "cost": cost,
+                             "marginal_violation": viol_lmax, "marginal_violation_l1": row_l1 + col_l1,
+                             "mass_l1": mass_l1})
+        if converged:
+            break
         prev = n_iter
     return checkpoints
 
@@ -239,18 +290,17 @@ def flashsinkhorn_row(name, sc, tc, sw, tw, eps, max_iter, tol, check_every, sym
             )
         return f, g, int(n_iters_used)
 
-    solve(10, None)  # warmup
+    solve(10, solve_tol)  # warmup: real threshold so the check-every branch runs too
     (f, g, it), dt, peak = measure(lambda: solve(max_iter, solve_tol))
     dual_cost = float((sw * f).sum() + (tw * g).sum())
     return _dense_result(name, f, g, dt, peak, it, it < max_iter, dual_cost, sc, tc, sw, tw, eps)
 
 
 def geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
-    geomloss_online(sc, tc, sw, tw, eps, 10)  # warmup
-
     def solve():
         return geomloss_online(sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every)
 
+    geomloss_online(sc, tc, sw, tw, eps, 10, threshold=tol, check_every=check_every)  # warmup
     (f, g, it, converged, dual_cost, change), dt, peak = measure(solve)
     return _dense_result("GeomLoss (online)", f, g, dt, peak, it, converged, dual_cost, sc, tc, sw, tw, eps)
 
