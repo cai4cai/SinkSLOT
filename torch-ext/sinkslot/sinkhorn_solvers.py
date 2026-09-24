@@ -253,10 +253,6 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
                 if change < stop.tol:
                     converged = True
                     break
-                # copy_(), not swap_tensors: phi/psi are read again next
-                # iteration, so swapping in stale prev_phi/prev_psi would
-                # feed it back into the live recursion (sinkslot_symmetric_
-                # triton's potential mode already used copy_() for this).
                 prev_phi.copy_(phi)
                 prev_psi.copy_(psi)
         return phi, psi, it, converged, change

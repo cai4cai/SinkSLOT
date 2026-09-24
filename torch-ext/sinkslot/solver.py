@@ -109,12 +109,8 @@ def _ot_1d_coo_batched_cuda(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor,
 
     This is the SinkSLOT-CUDA setup path. Identical construction to the naive
     version above, restructured for the GPU: everything runs in the
-    TRANSPOSED (C, len) layout. Profiled at n=65536, L=200, the two cumsums
-    were 42.4 ms of the naive function's 55.8 ms -- ~5 GB/s, because `dim=0`
-    on an (n, C) tensor is the strided scan path. The same scan along the
-    contiguous last dim of (C, n) is 110x faster, and working in (C, ...)
-    throughout removes the `mid.T` copies (105 MB each, twice) and leaves the
-    gather indices contiguous. Net: 49.5x on the dominant stage.
+    TRANSPOSED (C, len) layout, since the cumsum's scan dimension is
+    contiguous that way instead of strided.
     """
     n, C = PX.shape
     m = PY.shape[0]
