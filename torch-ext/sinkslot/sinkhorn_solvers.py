@@ -253,8 +253,8 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
                 if change < stop.tol:
                     converged = True
                     break
-                torch.utils.swap_tensors(prev_phi, phi)
-                torch.utils.swap_tensors(prev_psi, psi)
+                prev_phi.copy_(phi)
+                prev_psi.copy_(psi)
         return phi, psi, it, converged, change
 
     # mode == "marginal" -- the only mode left after _resolve_stop_mode.

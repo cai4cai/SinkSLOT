@@ -105,44 +105,20 @@ def _ot_1d_coo_batched(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: t
 
 
 def _ot_1d_coo_batched_cuda(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
-    """CUDA-optimised `_ot_1d_coo_batched`: same plan, transposed layout, fp64 scan.
+    """CUDA-optimised `_ot_1d_coo_batched`: same plan, transposed layout, fp32 scan.
 
     This is the SinkSLOT-CUDA setup path. Identical construction to the naive
-    version above, restructured for the GPU on two measured axes:
-
-    * Layout. Everything runs in the TRANSPOSED (C, len) layout. Profiled at
-      n=65536, L=200, the two cumsums were 42.4 ms of the naive function's
-      55.8 ms -- ~5 GB/s, because `dim=0` on an (n, C) tensor is the strided scan
-      path. The same scan along the contiguous last dim of (C, n) is 110x faster,
-      and working in (C, ...) throughout removes the `mid.T` copies (105 MB each,
-      twice) and leaves the gather indices contiguous.
-
-    * Precision. With normalised weights ca runs 0->1, so an fp32 scan over n
-      terms carries ~sqrt(n)*eps ~ 3e-5 of accumulated error while a typical
-      segment mass is ~1/(n+m) ~ 7.6e-6. The rounding exceeds the masses it
-      defines, so `mass > 0` -- the support -- depends on the scan's blocking.
-      Against an fp64 reference plan the naive fp32 dim=0 scan disagreed on 1.27%
-      of the support at n=16384 and 3.81% at n=32768; fp64 accumulation is exact
-      to ~1e-16 relative, so the plan becomes layout- and blocking-independent.
-
-    Net: 49.5x on the dominant stage AND a strictly more accurate plan. Because
-    the support differs from the naive fp32 scan, SinkSLOT-CUDA keeps its own
-    reference-cache namespace (see sinkslot/bench/bench_forward.py).
-
-    Dtype: the `.double()` upcast below is internal and fixed, not driven by
-    the caller's dtype -- `a`, `b`, `PX`, `PY` can be float32 or float64 on the
-    way in, the cumsum always runs in float64, and `ca`/`cb` (and everything
-    returned) are always float32 on the way out. Passing float64 inputs does
-    not get you a float64 plan; it only feeds float64 values into a scan that
-    was going to run in float64 either way.
+    version above, restructured for the GPU: everything runs in the
+    TRANSPOSED (C, len) layout, since the cumsum's scan dimension is
+    contiguous that way instead of strided.
     """
     n, C = PX.shape
     m = PY.shape[0]
     PXt, PYt = PX.T.contiguous(), PY.T.contiguous()    # (C, n), (C, m)
     ix = torch.argsort(PXt, dim=-1)                    # (C, n)
     iy = torch.argsort(PYt, dim=-1)                    # (C, m)
-    ca = torch.cumsum(a[ix].double(), dim=-1).float()  # (C, n), sorted asc per row
-    cb = torch.cumsum(b[iy].double(), dim=-1).float()  # (C, m), sorted asc per row
+    ca = torch.cumsum(a[ix], dim=-1)                   # (C, n), sorted asc per row
+    cb = torch.cumsum(b[iy], dim=-1)                   # (C, m), sorted asc per row
 
     # Merge ca and cb into sorted `bounds` (C, n+m) via rank-scatter.
     # rank of ca[i] = i + #{cb < ca[i]}; rank of cb[j] = j + #{ca <= cb[j]}.
