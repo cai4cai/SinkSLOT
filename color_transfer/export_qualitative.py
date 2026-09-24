@@ -20,7 +20,6 @@ import argparse
 import os
 
 import torch
-from flash_sinkhorn.samples_loss import SamplesLoss
 from PIL import Image
 
 from color_transfer.main import DEFAULT_PAINTINGS_DIR, StopCfg, list_images
@@ -91,13 +90,18 @@ def solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, s
         return _barycentric_dense_chunked(f, g, sc, tc, sw, tw, eps)
 
     symmetric = method == "flashsinkhorn_symmetric"
-    loss = SamplesLoss(
-        loss="sinkhorn", backend="symmetric" if symmetric else "alternating",
-        potentials=True, return_n_iters=True, use_epsilon_scaling=False,
-        eps=eps, n_iters=max_iter, threshold=tol, inner_iterations=check_every,
-        debias=False, normalize=False, last_extrapolation=False,
-    )
-    f, g, it = loss(sw, sc, tw, tc)
+    if symmetric:
+        from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_symmetric
+        f, g, it = sinkhorn_flashstyle_symmetric(
+            sc, tc, sw, tw, eps=eps, use_epsilon_scaling=False, n_iters=max_iter,
+            threshold=tol, check_every=check_every, last_extrapolation=False, return_n_iters=True,
+        )
+    else:
+        from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_alternating
+        f, g, it = sinkhorn_flashstyle_alternating(
+            sc, tc, sw, tw, eps=eps, n_iters=max_iter, threshold=tol,
+            check_every=check_every, return_n_iters=True,
+        )
     it = int(it)
     converged = it < max_iter
     cost_val = float((sw * f).sum() + (tw * g).sum())

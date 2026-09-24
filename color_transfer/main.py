@@ -33,7 +33,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-from flash_sinkhorn.samples_loss import SamplesLoss
 from PIL import Image
 
 from sinkslot.bench.plan_diagnostics import (
@@ -222,25 +221,22 @@ def sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, sy
 
 
 def flashsinkhorn_row(name, sc, tc, sw, tw, eps, max_iter, tol, check_every, symmetric, allow_tf32=True):
-    backend = "symmetric" if symmetric else "alternating"
+    from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_alternating, sinkhorn_flashstyle_symmetric
     # tol/2 for the alpha=0.5 damped (symmetric) backend, same correction as sinkslot_row's.
     solve_tol = tol / 2 if symmetric else tol
 
     def solve(n_iters, threshold):
-        # use_epsilon_scaling=False: the library's own annealing schedule has a
-        # fixed natural length independent of n_iters, so threshold-based early
-        # stopping needs a fixed eps to mean what it says. debias=False,
-        # normalize=False: we want the raw entropic OT plan/potentials at our
-        # own calibrated eps, not a symmetrized/rescaled divergence.
-        # last_extrapolation=False (symmetric only): matches
-        # geomloss_online_native's own convention, which has no such step.
-        loss = SamplesLoss(
-            loss="sinkhorn", backend=backend, potentials=True, return_n_iters=True,
-            use_epsilon_scaling=False, eps=eps, n_iters=n_iters, threshold=threshold,
-            inner_iterations=check_every, allow_tf32=allow_tf32, debias=False,
-            normalize=False, last_extrapolation=False,
-        )
-        f, g, n_iters_used = loss(sw, sc, tw, tc)
+        if symmetric:
+            f, g, n_iters_used = sinkhorn_flashstyle_symmetric(
+                sc, tc, sw, tw, eps=eps, use_epsilon_scaling=False, n_iters=n_iters,
+                threshold=threshold, check_every=check_every, allow_tf32=allow_tf32,
+                last_extrapolation=False, return_n_iters=True,
+            )
+        else:
+            f, g, n_iters_used = sinkhorn_flashstyle_alternating(
+                sc, tc, sw, tw, eps=eps, n_iters=n_iters, threshold=threshold,
+                check_every=check_every, allow_tf32=allow_tf32, return_n_iters=True,
+            )
         return f, g, int(n_iters_used)
 
     solve(10, None)  # warmup
