@@ -4,10 +4,10 @@ Stop rule: max(|df|, |dg|) < 1e-5 * median(C) between checkpoints (tol/2 for the
 alpha=0.5 damped methods).
 
 One config covers all five problem slices: half_moon, 8gaussians and two_rings
-at d=2, and gaussian at d=3 and d=64. Each slice gets its own eps grid,
-median(C) * geomspace(1e-3, 0.5, 10), where median(C) is the lower median of
-the squared Euclidean cost on the seed-0 instance (MEDIAN_C, printed by
-scripts/speedup_prepare.py).
+at d=2, and gaussian at d=3 and d=64. Each slice gets its own eps grid, spanning
+the 1% and 10% cost-gap crossings (EPS_CROSSINGS), shared by every method.
+median(C) is the lower median of the squared Euclidean cost on the seed-0
+instance (MEDIAN_C, printed by scripts/speedup_prepare.py) and sets the tolerance.
 
 Methods: SROT, SinkSLOT-CUDA and SinkSLOT-CUDA-symmetric over L; FlashSinkhorn
 alternating and symmetric, each in strict FP32 and TF32; GeomLoss online;
@@ -39,7 +39,18 @@ MEDIAN_C: Dict[Tuple[str, int], Optional[float]] = {
     ("gaussian", 64): 126.7506103515625,
 }
 
-EPS_FACTORS = np.geomspace(1e-3, 0.5, 10)
+# (dataset, d) -> (eps where FlashSinkhorn-alternating fp32 reaches a 1% cost gap,
+# eps where it reaches 10%), interpolated from scripts/speedup_calibrate_eps.py
+# (seed 0). Each slice sweeps 10 log-spaced eps from eps_1% / 2 to 2 * eps_10%, the
+# same grid for every method.
+EPS_CROSSINGS: Dict[Tuple[str, int], Tuple[float, float]] = {
+    ("half_moon", 2): (0.02325, 0.4669),
+    ("8gaussians", 2): (0.003289, 0.03157),
+    ("two_rings", 2): (0.01537, 0.1917),
+    ("gaussian", 3): (0.002494, 0.008904),
+    ("gaussian", 64): (1.477, 3.774),
+}
+EPS_POINTS = 10
 # Stop tolerance relative to the cost scale (as OTT's scale_cost="median"): the
 # potentials grow with C, and an absolute 1e-6 falls below one fp32 ulp of them
 # once |f| exceeds ~8, so the rule could never fire on the larger-cost slices.
@@ -50,8 +61,8 @@ _s0 = 1e-3 * N * (math.log(N) ** 4)
 SPARSINK_S = [int(round(k * _s0)) for k in (1, 2, 4, 8, 16, 32, 64, 128)]
 
 
-def eps_grid(median: float):
-    return [float(f"{median * f:.6g}") for f in EPS_FACTORS]
+def eps_grid(eps_1pct: float, eps_10pct: float):
+    return [float(f"{e:.4g}") for e in np.geomspace(eps_1pct / 2, 2 * eps_10pct, EPS_POINTS)]
 
 
 def build_config(median_c: Dict[Tuple[str, int], Optional[float]] = MEDIAN_C) -> BenchConfig:
@@ -63,7 +74,7 @@ def build_config(median_c: Dict[Tuple[str, int], Optional[float]] = MEDIAN_C) ->
     return BenchConfig(
         sizes=[N],
         dims=sorted({d for _, d in median_c}),
-        problems=[(dataset, d, eps_grid(median)) for (dataset, d), median in median_c.items()],
+        problems=[(dataset, d, eps_grid(*EPS_CROSSINGS[(dataset, d)])) for (dataset, d) in median_c],
         n_iters=20000,
 
         stop_mode="potential",
@@ -105,7 +116,7 @@ def build_config(median_c: Dict[Tuple[str, int], Optional[float]] = MEDIAN_C) ->
         tensorized=False,
         max_dense_size=10000,
 
-        output_dir="output/speedup_potential_reltol",
+        output_dir="output/speedup_potential_final",
         dry_run=True,
     )
 
