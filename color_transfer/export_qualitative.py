@@ -23,9 +23,7 @@ import torch
 from PIL import Image
 
 from color_transfer.trajectory_potential import DEFAULT_PAINTINGS_DIR, StopCfg, list_images
-from sinkslot.bench.reference_solvers import (
-    flashsinkhorn_samplesloss_run, geomloss_multiscale_native, geomloss_online_native,
-)
+from sinkslot.bench.reference_solvers import flashsinkhorn_samplesloss_run, geomloss_online_native
 
 
 def load_pixels_weights_inverse(path, device, dtype):
@@ -91,12 +89,6 @@ def solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, s
         print(f"    geomloss_online: iters={it} converged={converged} cost={cost_val:.6f}")
         return _barycentric_dense_chunked(f, g, sc, tc, sw, tw, eps)
 
-    if method == "geomloss_multiscale":
-        f, g, it, converged, cost_val, _ = geomloss_multiscale_native(
-            sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every)
-        print(f"    geomloss_multiscale: iters={it} converged={converged} cost={cost_val:.6f}")
-        return _barycentric_dense_chunked(f, g, sc, tc, sw, tw, eps)
-
     symmetric = method == "flashsinkhorn_symmetric"
     f, g, it, converged, cost_val = flashsinkhorn_samplesloss_run(
         sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every, symmetric=symmetric)
@@ -131,7 +123,6 @@ _METHODS = [
     ("flashsinkhorn", "flashsinkhorn"),
     ("flashsinkhorn_symmetric", "flashsinkhorn_symmetric"),
     ("geomloss_online", "geomloss_online"),
-    ("geomloss_multiscale", "geomloss_multiscale"),
 ]
 
 

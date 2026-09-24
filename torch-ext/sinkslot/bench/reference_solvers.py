@@ -6,9 +6,9 @@ color_transfer/trajectory_potential.py). Not color-transfer-specific.
 flashsinkhorn_native_run calls sinkhorn_flashstyle_alternating/_symmetric's
 own threshold/check_every directly, with defaults mirroring SamplesLoss's
 own wherever the low-level function accepts them. GeomLoss's sinkhorn_loop
-has no such hook at all, so geomloss_online_native and
-geomloss_multiscale_native reimplement its update math (each verified
-bit-exact against sinkhorn_loop's own output) with the check added in.
+has no such hook at all, so geomloss_online_native reimplements its update
+math (verified bit-exact against sinkhorn_loop's own output) with the
+check added in.
 
 Every function also returns cost = <a,f> + <b,g> at each checkpoint, free
 from the dual potentials already in hand. Not expected to match bit-for-bit
@@ -330,92 +330,6 @@ def geomloss_online_native(
     f_ba, g_ab = f_ba.squeeze(0), g_ab.squeeze(0)
     cost = float((sw * f_ba).sum() + (tw * g_ab).sum())
     return f_ba, g_ab, n_iters_used, converged, cost, last_change
-
-
-def geomloss_multiscale_native(
-    sc: torch.Tensor, tc: torch.Tensor, sw: torch.Tensor, tw: torch.Tensor,
-    eps: float, max_iter: int, threshold: Optional[float] = None, check_every: int = 5,
-    warmup_coarse_iters: int = 5, cluster_scale: Optional[float] = None, truncate: float = 5.0,
-) -> Tuple[torch.Tensor, torch.Tensor, int, Optional[bool], float, float]:
-    """GeomLoss multiscale (KeOps): a coarse warm-start, one coarse-to-fine
-    jump, then fine-resolution updates with the same check -- reusing
-    GeomLoss's own clusterize/kernel_truncation/extrapolate_samples/
-    softmin_multiscale rather than reimplementing them. Runs at a fixed eps:
-    GeomLoss's own sinkhorn_multiscale anneals instead (incompatible with
-    the fixed-eps convention here), so warmup_coarse_iters plus the one
-    jump stand in for its annealing schedule. Verified bit-exact against a
-    direct sinkhorn_loop call built with the same two-scale inputs.
-
-    Returns (f, g, n_iters_used, converged, cost, last_change), de-permuted
-    back to sc/tc's own order (clusterize sorts points by cluster).
-    """
-    from functools import partial
-
-    from geomloss._legacy.sinkhorn_divergence import log_weights, max_diameter
-    from geomloss._legacy.sinkhorn_samples import (
-        clusterize, extrapolate_samples, keops_lse, kernel_truncation, softmin_multiscale,
-    )
-    from geomloss._legacy.utils import squared_distances
-
-    d = sc.shape[1]
-    softmin = partial(softmin_multiscale, log_conv=keops_lse("SqDist(X,Y)", d))
-    cost_matrix = lambda x, y: squared_distances(x, y)
-
-    if cluster_scale is None:
-        diameter = max_diameter(sc, tc)
-        cluster_scale = diameter / (d ** 0.5 * 2000 ** (1.0 / d))
-
-    [a_c, a_f], [x_c, x_f], [ranges_x], perm_x = clusterize(sw, sc, scale=cluster_scale)
-    [b_c, b_f], [y_c, y_f], [ranges_y], perm_y = clusterize(tw, tc, scale=cluster_scale)
-    a_log_c, b_log_c = log_weights(a_c), log_weights(b_c)
-    a_log_f, b_log_f = log_weights(a_f), log_weights(b_f)
-
-    C_xy_c = (x_c, y_c, ranges_x, ranges_y, None)
-    C_yx_c = (y_c, x_c, ranges_y, ranges_x, None)
-
-    g_ab = softmin(eps, C_yx_c, a_log_c)
-    f_ba = softmin(eps, C_xy_c, b_log_c)
-    for _ in range(warmup_coarse_iters):
-        ft_ba = softmin(eps, C_xy_c, b_log_c + g_ab / eps)
-        gt_ab = softmin(eps, C_yx_c, a_log_c + f_ba / eps)
-        f_ba, g_ab = 0.5 * (f_ba + ft_ba), 0.5 * (g_ab + gt_ab)
-
-    # Coarse -> fine jump (kernel_truncation + parallel extrapolation).
-    C_xy_f_full = (x_f, y_f.detach(), None, None, None)
-    C_yx_f_full = (y_f, x_f.detach(), None, None, None)
-    C_xy_fine, C_yx_fine = kernel_truncation(
-        C_xy_c, C_yx_c, C_xy_f_full, C_yx_f_full, f_ba, g_ab, eps,
-        truncate=truncate, cost=cost_matrix,
-    )
-    f_ba, g_ab = (
-        extrapolate_samples(f_ba, g_ab, eps, 1.0, C_xy_c, b_log_c, C_xy_fine, softmin=softmin),
-        extrapolate_samples(g_ab, f_ba, eps, 1.0, C_yx_c, a_log_c, C_yx_fine, softmin=softmin),
-    )
-
-    n_iters_used = max_iter
-    converged = False if threshold is not None else None
-    last_change = float("inf")
-    prev_f, prev_g = f_ba, g_ab
-    for i in range(max_iter):
-        ft_ba = softmin(eps, C_xy_fine, b_log_f + g_ab / eps)
-        gt_ab = softmin(eps, C_yx_fine, a_log_f + f_ba / eps)
-        f_ba, g_ab = 0.5 * (f_ba + ft_ba), 0.5 * (g_ab + gt_ab)
-
-        if threshold is not None and (i + 1) % check_every == 0:
-            change = max((f_ba - prev_f).abs().max().item(), (g_ab - prev_g).abs().max().item())
-            last_change = change
-            prev_f, prev_g = f_ba, g_ab
-            if change < threshold:
-                n_iters_used = i + 1
-                converged = True
-                break
-
-    f_out = torch.empty_like(f_ba)
-    f_out[perm_x] = f_ba
-    g_out = torch.empty_like(g_ab)
-    g_out[perm_y] = g_ab
-    cost = float((sw * f_out).sum() + (tw * g_out).sum())
-    return f_out, g_out, n_iters_used, converged, cost, last_change
 
 
 def plan_diagnostics_dense_rounded(

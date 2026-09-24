@@ -1,7 +1,9 @@
 """Final convergence numbers (cost, runtime, peak memory, iterations,
 marginal violation) for SinkSLOT, FlashSinkhorn and GeomLoss, one native
 call per method per pair -- no restart-based re-solving, no per-checkpoint
-trajectory (see trajectory_potential.py for that instead).
+trajectory (that approach was dropped; see git history for
+plot_trajectory_potential.py and trajectory_potential.py's own
+now-removed trajectory-recording functions).
 
     python -m color_transfer.main --output_dir DIR --pair_idx 2 9
     python -m color_transfer.main --output_dir DIR --max_pairs 0
