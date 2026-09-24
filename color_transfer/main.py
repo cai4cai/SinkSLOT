@@ -36,10 +36,10 @@ import torch
 from PIL import Image
 
 from sinkslot.bench.plan_diagnostics import (
-    plan_diagnostics_dense, plan_diagnostics_dense_l1, plan_diagnostics_dense_rounded,
-    sinkslot_plan_diagnostics, sinkslot_plan_diagnostics_l1, sinkslot_plan_diagnostics_rounded,
+    plan_diagnostics_dense, plan_diagnostics_dense_rounded,
+    sinkslot_plan_diagnostics, sinkslot_plan_diagnostics_rounded,
 )
-from sinkslot.bench.reference_solvers import geomloss_online_native
+from sinkslot.bench.reference_solvers import geomloss_online
 
 DEFAULT_PAINTINGS_DIR = Path(__file__).parent / "paintings"
 
@@ -120,7 +120,7 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
                 r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iter, stop=None, eps=eps)
             torch.cuda.synchronize()
             solve_dt = time.perf_counter() - t0
-            row_l1, col_l1, mass_l1 = sinkslot_plan_diagnostics_l1(phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
+            _, row_l1, col_l1, mass_l1, _ = sinkslot_plan_diagnostics(phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
             checkpoints.append({"iters": n_iter, "solve_time": solve_dt,
                                  "row_l1": row_l1, "col_l1": col_l1, "mass_l1": mass_l1})
         return checkpoints
@@ -141,7 +141,7 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
             f, g = sinkhorn_flashstyle_alternating(sc, tc, sw, tw, eps=eps, n_iters=n_iter, allow_tf32=allow_tf32)
         torch.cuda.synchronize()
         solve_dt = time.perf_counter() - t0
-        row_l1, col_l1, mass_l1 = plan_diagnostics_dense_l1(sc, tc, sw, tw, eps, f, g)
+        _, row_l1, col_l1, mass_l1, _ = plan_diagnostics_dense(sc, tc, sw, tw, eps, f, g)
         checkpoints.append({"iters": n_iter, "solve_time": solve_dt,
                              "row_l1": row_l1, "col_l1": col_l1, "mass_l1": mass_l1})
         prev = n_iter
@@ -160,9 +160,9 @@ def measure(fn):
 
 
 def _dense_result(name, f, g, dt, peak, it, converged, dual_cost, sc, tc, sw, tw, eps):
-    unrounded_viol, unrounded_cost = plan_diagnostics_dense(sc, tc, sw, tw, eps, f, g)
+    unrounded_viol, unrounded_row_l1, unrounded_col_l1, _, unrounded_cost = plan_diagnostics_dense(
+        sc, tc, sw, tw, eps, f, g)
     viol, viol_l1, cost = plan_diagnostics_dense_rounded(sc, tc, sw, tw, eps, f, g)
-    unrounded_row_l1, unrounded_col_l1, _ = plan_diagnostics_dense_l1(sc, tc, sw, tw, eps, f, g)
     return {"method": name, "cost": cost, "dual_cost": dual_cost, "time": dt,
             "peak_memory_bytes": peak, "iterations": it, "converged": bool(converged),
             "marginal_violation": viol, "marginal_violation_l1": viol_l1,
@@ -172,9 +172,9 @@ def _dense_result(name, f, g, dt, peak, it, converged, dual_cost, sc, tc, sw, tw
 
 def _sparse_result(name, phi, psi, rows, cols, S, cost_mat, dt, peak, it, converged, dual_cost,
                     sc, tc, eps, sw, tw):
-    unrounded_viol, unrounded_cost = sinkslot_plan_diagnostics(phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
+    unrounded_viol, unrounded_row_l1, unrounded_col_l1, _, unrounded_cost = sinkslot_plan_diagnostics(
+        phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
     viol, viol_l1, cost = sinkslot_plan_diagnostics_rounded(sc, tc, phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
-    unrounded_row_l1, unrounded_col_l1, _ = sinkslot_plan_diagnostics_l1(phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
     return {"method": name, "cost": cost, "dual_cost": dual_cost, "time": dt,
             "peak_memory_bytes": peak, "iterations": it, "converged": bool(converged),
             "marginal_violation": viol, "marginal_violation_l1": viol_l1,
@@ -246,10 +246,10 @@ def flashsinkhorn_row(name, sc, tc, sw, tw, eps, max_iter, tol, check_every, sym
 
 
 def geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
-    geomloss_online_native(sc, tc, sw, tw, eps, 10)  # warmup
+    geomloss_online(sc, tc, sw, tw, eps, 10)  # warmup
 
     def solve():
-        return geomloss_online_native(sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every)
+        return geomloss_online(sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every)
 
     (f, g, it, converged, dual_cost, change), dt, peak = measure(solve)
     return _dense_result("GeomLoss (online)", f, g, dt, peak, it, converged, dual_cost, sc, tc, sw, tw, eps)

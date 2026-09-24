@@ -3,8 +3,8 @@ as SinkSLOT's "potential" mode (verified identical once phi=f/eps is
 accounted for; see color_transfer/main.py). Not color-transfer-specific.
 
 GeomLoss's sinkhorn_loop has no early-stop hook of its own, so
-geomloss_online_native reimplements its update math (verified bit-exact
-against sinkhorn_loop's own output) with the check added in. Returns
+geomloss_online reimplements its update math (verified bit-exact against
+sinkhorn_loop's own output) with the check added in. Returns
 cost = <a,f> + <b,g> at convergence, free from the dual potentials already
 in hand -- not expected to match other methods' own cost bit-for-bit
 (different reference measures/update schemes), just a sanity signal.
@@ -19,10 +19,9 @@ from typing import Optional, Tuple
 import torch
 
 
-def geomloss_online_native(
+def geomloss_online(
     sc: torch.Tensor, tc: torch.Tensor, sw: torch.Tensor, tw: torch.Tensor,
     eps: float, max_iter: int, threshold: Optional[float] = None, check_every: int = 5,
-    stop_mode: str = "potential_linf",
 ) -> Tuple[torch.Tensor, torch.Tensor, int, Optional[bool], float, float]:
     """GeomLoss online (KeOps): reimplements sinkhorn_loop's own update math
     at a fixed eps (single-scale, debias=False), since sinkhorn_loop has no
@@ -30,16 +29,8 @@ def geomloss_online_native(
     itself at threshold=None. Always symmetric (damped-Jacobi) updates;
     GeomLoss has no alternating/Gauss-Seidel option at any level.
 
-    stop_mode="potential_linf" (default): max(|df|, |dg|) < threshold, same
-    rule as SinkSLOT's "potential" mode. stop_mode="marginal": max row/col
-    violation of the dense a(x)b plan, |P_i. - a_i| / |P_.j - b_j| <= threshold, matching FlashSinkhorn's/
-    SinkSLOT's own "marginal" stop mode. Derived for free from ft_ba/gt_ab
-    (already computed every iteration for the update itself), no extra
-    softmin call: P_i. = a_i*exp((f_ba_i - ft_ba_i)/eps) since ft_ba is
-    exactly the fresh row target -eps*logsumexp_j[...] that f_ba would equal
-    at a marginal-exact fixed point, same "no extra LSE call" trick
-    sinkslot_alternating_triton's and sinkhorn_flashstyle_alternating's own
-    marginal checks use.
+    Stop rule: max(|df|, |dg|) < threshold, same rule as SinkSLOT's
+    "potential" mode.
 
     Returns (f, g, n_iters_used, converged, cost, last_change).
     """
@@ -65,12 +56,7 @@ def geomloss_online_native(
         gt_ab = softmin(eps, C_yx, a_log + f_ba / eps)
 
         if threshold is not None and (i + 1) % check_every == 0:
-            if stop_mode == "marginal":
-                row_marg = sw * ((f_ba - ft_ba).squeeze(0) / eps).exp()
-                col_marg = tw * ((g_ab - gt_ab).squeeze(0) / eps).exp()
-                change = max((row_marg - sw).abs().max().item(), (col_marg - tw).abs().max().item())
-            else:
-                change = max((ft_ba - f_ba).abs().max().item(), (gt_ab - g_ab).abs().max().item())
+            change = max((ft_ba - f_ba).abs().max().item(), (gt_ab - g_ab).abs().max().item())
             last_change = change
             f_ba, g_ab = 0.5 * (f_ba + ft_ba), 0.5 * (g_ab + gt_ab)
             if change < threshold:

@@ -23,7 +23,7 @@ import torch
 from PIL import Image
 
 from color_transfer.main import DEFAULT_PAINTINGS_DIR, StopCfg, list_images
-from sinkslot.bench.reference_solvers import geomloss_online_native
+from sinkslot.bench.reference_solvers import geomloss_online
 
 
 def load_pixels_weights_inverse(path, device, dtype):
@@ -84,7 +84,7 @@ def solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, s
         return _barycentric_sparse(phi, psi, rows, cols, S, cost, tc, eps, n)
 
     if method == "geomloss_online":
-        f, g, it, converged, cost_val, _ = geomloss_online_native(
+        f, g, it, converged, cost_val, _ = geomloss_online(
             sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every)
         print(f"    geomloss_online: iters={it} converged={converged} cost={cost_val:.6f}")
         return _barycentric_dense_chunked(f, g, sc, tc, sw, tw, eps)

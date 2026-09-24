@@ -1,7 +1,7 @@
 """Post-hoc marginal violation and true transport cost <C,P>, computed
 directly from converged potentials rather than a solver's own internal
 shortcut. Dense (a(x)b reference, FlashSinkhorn/GeomLoss) and sparse
-(SinkSLOT's P^SOT) variants, each in an unrounded, L1, and rounded-to-the-
+(SinkSLOT's P^SOT) variants, each in an unrounded and a rounded-to-the-
 transport-polytope (issue #57: Altschuler, Weed, Rigollet, NeurIPS 2017
 Algorithm 2) form. Dense functions never materialize the N x M plan (N, M
 run up to ~2.5e5), streaming row blocks instead.
@@ -17,26 +17,16 @@ itself differs (e.g. SinkSLOT's sparse P^SOT vs the dense a(x)b).
 from typing import Tuple
 
 import torch
+from geomloss._legacy.utils import squared_distances
 
 
 def _dense_block(sc, tc, sw, tw, eps, f, g, start, end):
     """cost_block, p_block = a*b*exp((f+g-C)/eps) for rows [start:end)."""
-    cost_block = ((sc[start:end, None, :] - tc[None, :, :]) ** 2).sum(-1)
+    cost_block = squared_distances(sc[start:end], tc)
     p_block = sw[start:end, None] * tw[None, :] * (
         (f[start:end, None] + g[None, :] - cost_block) / eps
     ).exp()
     return cost_block, p_block
-
-
-def _index_logsumexp(log_vals, idx, size):
-    """logsumexp of log_vals grouped by idx, into a `size`-length tensor.
-    Groups with no entries stay at -inf (exponentiate to 0), not NaN."""
-    neg_inf = torch.finfo(log_vals.dtype).min
-    group_max = torch.full((size,), neg_inf, dtype=log_vals.dtype, device=log_vals.device)
-    group_max.index_reduce_(0, idx, log_vals, "amax", include_self=True)
-    sumexp = torch.zeros(size, dtype=log_vals.dtype, device=log_vals.device)
-    sumexp.index_add_(0, idx, (log_vals - group_max[idx]).exp())
-    return group_max + sumexp.clamp_min(torch.finfo(log_vals.dtype).tiny).log()
 
 
 def _rounding_marginals(row_sum_g2, col_sum_g2, sw, tw, tiny):
@@ -62,9 +52,11 @@ def _rounding_marginals(row_sum_g2, col_sum_g2, sw, tw, tiny):
 def plan_diagnostics_dense(
     sc: torch.Tensor, tc: torch.Tensor, sw: torch.Tensor, tw: torch.Tensor,
     eps: float, f: torch.Tensor, g: torch.Tensor, block_n: int = 4096,
-) -> Tuple[float, float]:
-    """Returns (max L-infinity marginal violation, <C,P>) for the dense
-    a(x)b reference measure."""
+) -> Tuple[float, float, float, float, float]:
+    """Returns (max L-infinity marginal violation, row_l1, col_l1, mass_l1,
+    <C,P>) for the dense a(x)b reference measure. row_l1+col_l1 is the
+    combined L1 marginal violation; mass_l1 = |1 - total mass|.
+    """
     n = sc.shape[0]
     row_sum = torch.empty_like(sw)
     col_sum = torch.zeros_like(tw)
@@ -75,80 +67,31 @@ def plan_diagnostics_dense(
         row_sum[start:end] = p_block.sum(dim=1)
         col_sum += p_block.sum(dim=0)
         transport_cost += float((cost_block * p_block).sum())
-    viol = float(torch.maximum((row_sum - sw).abs().max(), (col_sum - tw).abs().max()))
-    return viol, transport_cost
+    viol_lmax = float(torch.maximum((row_sum - sw).abs().max(), (col_sum - tw).abs().max()))
+    row_l1 = float((row_sum - sw).abs().sum())
+    col_l1 = float((col_sum - tw).abs().sum())
+    mass_l1 = float((1.0 - row_sum.sum()).abs())
+    return viol_lmax, row_l1, col_l1, mass_l1, transport_cost
 
 
 def sinkslot_plan_diagnostics(
     phi: torch.Tensor, psi: torch.Tensor, rows: torch.Tensor, cols: torch.Tensor,
     S: torch.Tensor, cost: torch.Tensor, eps: float, sw: torch.Tensor, tw: torch.Tensor,
-) -> Tuple[float, float]:
-    """Returns (max L-infinity marginal violation, <C,P>) for SinkSLOT's
-    sparse P^SOT support, P_ij = S_ij*exp(phi_i+psi_j-C_ij/eps) on
-    (rows,cols) only (zero elsewhere by construction)."""
+) -> Tuple[float, float, float, float, float]:
+    """Returns (max L-infinity marginal violation, row_l1, col_l1, mass_l1,
+    <C,P>) for SinkSLOT's sparse P^SOT support, P_ij =
+    S_ij*exp(phi_i+psi_j-C_ij/eps) on (rows,cols) only (zero elsewhere by
+    construction)."""
     log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
     p = (phi[rows] + psi[cols] + log_S - cost / eps).exp()
     row_sum = torch.zeros_like(sw).index_add_(0, rows, p)
     col_sum = torch.zeros_like(tw).index_add_(0, cols, p)
-    viol = float(torch.maximum((row_sum - sw).abs().max(), (col_sum - tw).abs().max()))
+    viol_lmax = float(torch.maximum((row_sum - sw).abs().max(), (col_sum - tw).abs().max()))
+    row_l1 = float((row_sum - sw).abs().sum())
+    col_l1 = float((col_sum - tw).abs().sum())
+    mass_l1 = float((1.0 - row_sum.sum()).abs())
     transport_cost = float((cost * p).sum())
-    return viol, transport_cost
-
-
-def plan_diagnostics_dense_l1(
-    sc: torch.Tensor, tc: torch.Tensor, sw: torch.Tensor, tw: torch.Tensor,
-    eps: float, f: torch.Tensor, g: torch.Tensor, block_n: int = 4096,
-) -> Tuple[float, float, float]:
-    """L1 marginal violations (row, column, total mass) for the dense a(x)b
-    reference measure, via logsumexp rather than plan_diagnostics_dense's
-    direct exp()-then-sum, to avoid over/underflow at small eps. Column
-    LSE composes across row-blocks (LSE(LSE(block1), LSE(block2), ...) ==
-    LSE of everything), so the full N x M plan is still never materialized.
-
-    Returns (row_l1, col_l1, mass_l1) = (sum_i |row_sum_i-a_i|,
-    sum_j |col_sum_j-b_j|, |1 - sum_i row_sum_i|).
-    """
-    n = sc.shape[0]
-    log_sw = sw.clamp_min(torch.finfo(sw.dtype).tiny).log()
-    log_tw = tw.clamp_min(torch.finfo(tw.dtype).tiny).log()
-    row_sum = torch.empty_like(sw)
-    col_lse_blocks = []
-    for start in range(0, n, block_n):
-        end = min(start + block_n, n)
-        cost_block = ((sc[start:end, None, :] - tc[None, :, :]) ** 2).sum(-1)
-        row_lse = torch.logsumexp(log_tw[None, :] + (g[None, :] - cost_block) / eps, dim=1)
-        row_sum[start:end] = sw[start:end] * (f[start:end] / eps + row_lse).exp()
-        col_lse_blocks.append(torch.logsumexp(
-            log_sw[start:end, None] + (f[start:end, None] - cost_block) / eps, dim=0))
-    col_lse = torch.logsumexp(torch.stack(col_lse_blocks, dim=0), dim=0)
-    col_sum = tw * (g / eps + col_lse).exp()
-
-    row_l1 = float((row_sum - sw).abs().sum())
-    col_l1 = float((col_sum - tw).abs().sum())
-    mass_l1 = float((1.0 - row_sum.sum()).abs())
-    return row_l1, col_l1, mass_l1
-
-
-def sinkslot_plan_diagnostics_l1(
-    phi: torch.Tensor, psi: torch.Tensor, rows: torch.Tensor, cols: torch.Tensor,
-    S: torch.Tensor, cost: torch.Tensor, eps: float, sw: torch.Tensor, tw: torch.Tensor,
-) -> Tuple[float, float, float]:
-    """L1 marginal violations (row, column, total mass) for SinkSLOT's
-    sparse P^SOT support, via _index_logsumexp (torch has no built-in
-    scatter/index logsumexp).
-
-    Returns (row_l1, col_l1, mass_l1), same definitions as
-    plan_diagnostics_dense_l1.
-    """
-    log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
-    log_p = phi[rows] + psi[cols] + log_S - cost / eps
-    row_sum = _index_logsumexp(log_p, rows, sw.shape[0]).exp()
-    col_sum = _index_logsumexp(log_p, cols, tw.shape[0]).exp()
-
-    row_l1 = float((row_sum - sw).abs().sum())
-    col_l1 = float((col_sum - tw).abs().sum())
-    mass_l1 = float((1.0 - row_sum.sum()).abs())
-    return row_l1, col_l1, mass_l1
+    return viol_lmax, row_l1, col_l1, mass_l1, transport_cost
 
 
 def plan_diagnostics_dense_rounded(
@@ -255,7 +198,7 @@ def sinkslot_plan_diagnostics_rounded(
     true_cost = float((cost * p2).sum())
     for start in range(0, n, block_n):
         end = min(start + block_n, n)
-        cost_block = ((sc[start:end, None, :] - tc[None, :, :]) ** 2).sum(-1)
+        cost_block = squared_distances(sc[start:end], tc)
         rank_one_block = err_a[start:end, None] * err_b[None, :] / max(sum_err_a, tiny)
         true_cost += float((cost_block * rank_one_block).sum())
 
