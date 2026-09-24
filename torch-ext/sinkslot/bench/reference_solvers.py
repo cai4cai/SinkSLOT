@@ -29,8 +29,9 @@ def geomloss_online(
     itself at threshold=None. Always symmetric (damped-Jacobi) updates;
     GeomLoss has no alternating/Gauss-Seidel option at any level.
 
-    Stop rule: max(|df|, |dg|) < threshold, same rule as SinkSLOT's
-    "potential" mode.
+    Stop rule: max(|df|, |dg|) < threshold between consecutive checkpoints
+    (every check_every iterations), on the damped iterates -- the same rule
+    as SinkSLOT's "potential" mode and FlashSinkhorn-symmetric's native check.
 
     Returns (f, g, n_iters_used, converged, cost, last_change).
     """
@@ -51,20 +52,20 @@ def geomloss_online(
     n_iters_used = max_iter
     converged = False if threshold is not None else None
     last_change = float("inf")
+    prev_f, prev_g = f_ba, g_ab
     for i in range(max_iter):
         ft_ba = softmin(eps, C_xy, b_log + g_ab / eps)
         gt_ab = softmin(eps, C_yx, a_log + f_ba / eps)
+        f_ba, g_ab = 0.5 * (f_ba + ft_ba), 0.5 * (g_ab + gt_ab)
 
         if threshold is not None and (i + 1) % check_every == 0:
-            change = max((ft_ba - f_ba).abs().max().item(), (gt_ab - g_ab).abs().max().item())
+            change = max((f_ba - prev_f).abs().max().item(), (g_ab - prev_g).abs().max().item())
             last_change = change
-            f_ba, g_ab = 0.5 * (f_ba + ft_ba), 0.5 * (g_ab + gt_ab)
+            prev_f, prev_g = f_ba, g_ab
             if change < threshold:
                 n_iters_used = i + 1
                 converged = True
                 break
-        else:
-            f_ba, g_ab = 0.5 * (f_ba + ft_ba), 0.5 * (g_ab + gt_ab)
 
     f_ba, g_ab = f_ba.squeeze(0), g_ab.squeeze(0)
     cost = float((sw * f_ba).sum() + (tw * g_ab).sum())
