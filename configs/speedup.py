@@ -1,4 +1,7 @@
-"""Speedup benchmark: time to a fixed potential-change tolerance at N=M=10,000.
+"""Speedup benchmark: time to a potential-change tolerance at N=M=10,000.
+
+Stop rule: max(|df|, |dg|) < 1e-5 * median(C) between checkpoints (tol/2 for the
+alpha=0.5 damped methods).
 
 One config covers all five problem slices: half_moon, 8gaussians and two_rings
 at d=2, and gaussian at d=3 and d=64. Each slice gets its own eps grid,
@@ -37,6 +40,10 @@ MEDIAN_C: Dict[Tuple[str, int], Optional[float]] = {
 }
 
 EPS_FACTORS = np.geomspace(1e-3, 0.5, 10)
+# Stop tolerance relative to the cost scale (as OTT's scale_cost="median"): the
+# potentials grow with C, and an absolute 1e-6 falls below one fp32 ulp of them
+# once |f| exceeds ~8, so the rule could never fire on the larger-cost slices.
+REL_TOL = 1e-5
 L_VALUES = [25, 50, 100, 250, 500, 1000, 2500, 5000]
 
 _s0 = 1e-3 * N * (math.log(N) ** 4)
@@ -61,7 +68,8 @@ def build_config(median_c: Dict[Tuple[str, int], Optional[float]] = MEDIAN_C) ->
 
         stop_mode="potential",
         max_iter=20000,
-        stop_tol=1e-6,
+        stop_tol=REL_TOL,
+        stop_tol_by_problem={key: REL_TOL * median for key, median in median_c.items()},
         check_every=5,
 
         warmup=1,
@@ -97,7 +105,7 @@ def build_config(median_c: Dict[Tuple[str, int], Optional[float]] = MEDIAN_C) ->
         tensorized=False,
         max_dense_size=10000,
 
-        output_dir="output/speedup_potential",
+        output_dir="output/speedup_potential_reltol",
         dry_run=True,
     )
 

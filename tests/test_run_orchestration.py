@@ -92,7 +92,9 @@ def test_dry_run_command_contents(cfg):
                             dim=sym.d, slices=sym.slices, seed=sym.seed, tf32=sym.tf32)
     assert cmd[cmd.index("--sinkslotcuda-slices") + 1] == str(sym.slices)
     assert "--no-sinkslotcuda-symmetric" not in cmd
-    for flag, value in [("--stop-mode", "potential"), ("--stop-tol", "1e-06"),
+    expected_tol = speedup.REL_TOL * DUMMY_MEDIANS[(sym.dataset, sym.d)]
+    assert float(cmd[cmd.index("--stop-tol") + 1]) == pytest.approx(expected_tol)
+    for flag, value in [("--stop-mode", "potential"),
                         ("--check-every", "5"), ("--max-iter", "20000"),
                         ("--warmup", "1"), ("--warmup-iters", "10"), ("--rep", "5")]:
         assert cmd[cmd.index(flag) + 1] == value

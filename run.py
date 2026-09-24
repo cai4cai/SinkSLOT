@@ -133,7 +133,7 @@ def build_command(
     if cfg.stop_mode != "fixed":
         cmd += ["--stop-mode", cfg.stop_mode,
                 "--max-iter", str(cfg.max_iter),
-                "--stop-tol", str(cfg.stop_tol),
+                "--stop-tol", str(_stop_tol(cfg, dataset, dim)),
                 "--scaling-tol", str(cfg.scaling_tol),
                 "--check-every", str(cfg.check_every)]
 
@@ -151,6 +151,12 @@ def build_command(
         cmd.append("--quiet")
 
     return cmd
+
+
+def _stop_tol(cfg: BenchConfig, dataset: str, dim: Optional[int]) -> float:
+    """cfg.stop_tol_by_problem[(dataset, dim)] when set, else cfg.stop_tol."""
+    by_problem = cfg.stop_tol_by_problem or {}
+    return by_problem.get((dataset, dim), cfg.stop_tol)
 
 
 def _results_csv(cfg: BenchConfig, output_dir: str) -> Path:

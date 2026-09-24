@@ -5,7 +5,7 @@ Edit ``CONFIG`` below to change what ``run.py`` executes, then
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 @dataclass
@@ -135,6 +135,7 @@ class BenchConfig:
     stop_mode: str = "fixed"     # "fixed" | "marginal" | "potential" | "scaling"
     max_iter: int = 10000        # cap in non-fixed modes (n_iters is the count in "fixed")
     stop_tol: float = 1e-4       # marginal/potential threshold
+    stop_tol_by_problem: Optional[Dict[Tuple[str, int], float]] = None  # per-(dataset, d) override of stop_tol
     scaling_tol: float = 1e-6    # Spar-Sink u/v threshold ("scaling" mode)
     check_every: int = 10        # iterations between convergence checks
     warmup: int = 5
