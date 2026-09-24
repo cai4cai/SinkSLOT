@@ -69,9 +69,9 @@ def solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, s
     if method == "sinkslot":
         from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
         from sinkslot.solver import (
-            _ot_1d_coo_batched, _ot_1d_coo_batched_cuda_fp32, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
+            _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
         )
-        ot1d = _ot_1d_coo_batched_cuda_fp32 if sc.is_cuda else _ot_1d_coo_batched
+        ot1d = _ot_1d_coo_batched_cuda if sc.is_cuda else _ot_1d_coo_batched
         rows, cols, S = sot_plan_coo(sc, tc, sw, tw, L=sinkslot_L, seed=0, ot1d=ot1d)
         cost = sparse_sqeuclidean_cost(sc, tc, rows, cols)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()

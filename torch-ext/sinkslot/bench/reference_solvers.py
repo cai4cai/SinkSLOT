@@ -421,7 +421,7 @@ def geomloss_multiscale_native(
 def plan_diagnostics_dense_rounded(
     sc: torch.Tensor, tc: torch.Tensor, sw: torch.Tensor, tw: torch.Tensor,
     eps: float, f: torch.Tensor, g: torch.Tensor, block_n: int = 4096,
-) -> Tuple[float, float]:
+) -> Tuple[float, float, float]:
     """Marginal violation and true transport cost of the ROUNDED plan (issue
     #57: Altschuler, Niles-Weed & Rigollet, NeurIPS 2017, Algorithm 2), for
     the dense a(x)b reference measure. Never materializes the N x M plan --
@@ -457,7 +457,12 @@ def plan_diagnostics_dense_rounded(
     directly from Pass 3's outputs, not by re-deriving the marginals of a
     materialized G_hat.
 
-    Returns (max L-infinity marginal violation, <C, G_hat>).
+    Returns (max L-infinity marginal violation, L1 marginal violation
+    (row+col combined), <C, G_hat>). Individual row/col violations can be
+    as small as 1e-10 -- row_sum_ghat/col_sum_ghat are still each a single
+    block-local (row sums) or torch.sum-composed (col sums) reduction, not
+    a naive sequential accumulation, so this stays direct/linear rather
+    than routing through logsumexp.
     """
     n = sc.shape[0]
     tiny = torch.finfo(sw.dtype).tiny
@@ -505,7 +510,8 @@ def plan_diagnostics_dense_rounded(
     # sum is err_a_i * sum(err_b)/sum(err_a); its column sum is err_b_j exactly.
     row_sum_ghat = row_sum_g2 + err_a * (sum_err_b / max(sum_err_a, tiny))
     col_sum_ghat = col_sum_g2 + err_b
-    viol = float(torch.maximum((row_sum_ghat - sw).abs().max(), (col_sum_ghat - tw).abs().max()))
+    viol_lmax = float(torch.maximum((row_sum_ghat - sw).abs().max(), (col_sum_ghat - tw).abs().max()))
+    viol_l1 = float((row_sum_ghat - sw).abs().sum() + (col_sum_ghat - tw).abs().sum())
 
     # Pass 4: true cost of G2, plus true cost of the rank-one deficit term.
     true_cost = 0.0
@@ -520,14 +526,14 @@ def plan_diagnostics_dense_rounded(
         rank_one_block = err_a[start:end, None] * err_b[None, :] / max(sum_err_a, tiny)
         true_cost += float((cost_block * rank_one_block).sum())
 
-    return viol, true_cost
+    return viol_lmax, viol_l1, true_cost
 
 
 def sinkslot_plan_diagnostics_rounded(
     sc: torch.Tensor, tc: torch.Tensor, phi: torch.Tensor, psi: torch.Tensor,
     rows: torch.Tensor, cols: torch.Tensor, S: torch.Tensor, cost: torch.Tensor,
     eps: float, sw: torch.Tensor, tw: torch.Tensor, block_n: int = 4096,
-) -> Tuple[float, float]:
+) -> Tuple[float, float, float]:
     """Marginal violation and true transport cost of the ROUNDED plan (same
     algorithm as plan_diagnostics_dense_rounded, see its docstring) for
     SinkSLOT's sparse P^SOT support.
@@ -544,7 +550,11 @@ def sinkslot_plan_diagnostics_rounded(
     not the sparse `cost` argument, which only covers the original support)
     -- the one genuinely expensive part of rounding a sparse plan.
 
-    Returns (max L-infinity marginal violation, <C, G_hat>).
+    Returns (max L-infinity marginal violation, L1 marginal violation
+    (row+col combined), <C, G_hat>). Individual row/col violations can be
+    as small as 1e-10 -- row_sum_g2/col_sum_g2 are still a single
+    index_add_ reduction each (not a naive sequential sum), so this stays
+    direct/linear rather than routing through logsumexp.
     """
     n, m = sw.shape[0], tw.shape[0]
     tiny = torch.finfo(sw.dtype).tiny
@@ -569,7 +579,8 @@ def sinkslot_plan_diagnostics_rounded(
 
     row_sum_ghat = row_sum_g2 + err_a * (sum_err_b / max(sum_err_a, tiny))
     col_sum_ghat = col_sum_g2 + err_b
-    viol = float(torch.maximum((row_sum_ghat - sw).abs().max(), (col_sum_ghat - tw).abs().max()))
+    viol_lmax = float(torch.maximum((row_sum_ghat - sw).abs().max(), (col_sum_ghat - tw).abs().max()))
+    viol_l1 = float((row_sum_ghat - sw).abs().sum() + (col_sum_ghat - tw).abs().sum())
 
     # Sparse part of the cost: <C, G2> on the original support.
     true_cost = float((cost * p2).sum())
@@ -582,4 +593,4 @@ def sinkslot_plan_diagnostics_rounded(
         rank_one_block = err_a[start:end, None] * err_b[None, :] / max(sum_err_a, tiny)
         true_cost += float((cost_block * rank_one_block).sum())
 
-    return viol, true_cost
+    return viol_lmax, viol_l1, true_cost

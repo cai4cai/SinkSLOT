@@ -3,8 +3,8 @@ marginal violation) for SinkSLOT, FlashSinkhorn and GeomLoss, one native
 call per method per pair -- no restart-based re-solving, no per-checkpoint
 trajectory (see trajectory_potential.py for that instead).
 
-    python -m color_transfer.convergence_table --output_dir DIR --pair_idx 2 9
-    python -m color_transfer.convergence_table --output_dir DIR --max_pairs 0
+    python -m color_transfer.main --output_dir DIR --pair_idx 2 9
+    python -m color_transfer.main --output_dir DIR --max_pairs 0
 
 --max_pairs 0 (or omitted with --sweep) runs every ordered pair (132 for
 the 12 bundled paintings), saving incrementally after each pair (so an
@@ -68,9 +68,9 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
     if method_key == "sinkslot":
         from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
         from sinkslot.solver import (
-            _ot_1d_coo_batched, _ot_1d_coo_batched_cuda_fp32, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
+            _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
         )
-        ot1d = _ot_1d_coo_batched_cuda_fp32 if sc.is_cuda else _ot_1d_coo_batched
+        ot1d = _ot_1d_coo_batched_cuda if sc.is_cuda else _ot_1d_coo_batched
         n, m = sc.shape[0], tc.shape[0]
         rows, cols, S = sot_plan_coo(sc, tc, sw, tw, L=sinkslot_L, seed=0, ot1d=ot1d)
         cost_mat = sparse_sqeuclidean_cost(sc, tc, rows, cols)
@@ -128,15 +128,10 @@ def measure(fn):
 def sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L):
     from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
     from sinkslot.solver import (
-        _ot_1d_coo_batched, _ot_1d_coo_batched_cuda_fp32, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
+        _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
     )
 
-    # Same device-switch convention as sinkslot_solve's own default and every
-    # gradient_flow/ call site: the CUDA-optimised (transposed-layout) support
-    # builder is ~7x faster at construction with no accuracy cost, at this
-    # pipeline's own float32 (the _fp32 variant, not the fp64-internal
-    # SinkSLOT-CUDA baseline used elsewhere in the paper's own benchmarks).
-    ot1d = _ot_1d_coo_batched_cuda_fp32 if sc.is_cuda else _ot_1d_coo_batched
+    ot1d = _ot_1d_coo_batched_cuda if sc.is_cuda else _ot_1d_coo_batched
 
     def solve():
         n, m = sc.shape[0], tc.shape[0]
@@ -160,33 +155,26 @@ def sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L):
     # timed. "cost"/"marginal_violation" below are the ROUNDED plan's; the
     # unrounded ones (what the solver actually returned) are kept alongside.
     unrounded_viol, unrounded_cost = sinkslot_plan_diagnostics(phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
-    viol, cost = sinkslot_plan_diagnostics_rounded(sc, tc, phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
+    viol, viol_l1, cost = sinkslot_plan_diagnostics_rounded(sc, tc, phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
+    unrounded_row_l1, unrounded_col_l1, _ = sinkslot_plan_diagnostics_l1(phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
     return {"method": "SinkSLOT", "cost": cost, "dual_cost": dual_cost, "time": dt,
             "peak_memory_bytes": peak, "iterations": it, "converged": bool(converged),
-            "marginal_violation": viol,
-            "unrounded_cost": unrounded_cost, "unrounded_marginal_violation": unrounded_viol}
+            "marginal_violation": viol, "marginal_violation_l1": viol_l1,
+            "unrounded_cost": unrounded_cost, "unrounded_marginal_violation": unrounded_viol,
+            "unrounded_marginal_violation_l1": unrounded_row_l1 + unrounded_col_l1}
 
 
 def sinkslot_sym_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L):
     """Same construction as sinkslot_row, but the alpha=0.5 Jacobi
-    (sinkslot_symmetric_triton) solver instead of Gauss-Seidel. Its
-    "potential" stop check is structurally identical to
-    sinkslot_alternating_triton's / FlashSinkhorn-alternating's (checkpoint-
-    to-checkpoint delta of the CURRENT state, every check_every iterations)
-    -- but here that state is itself alpha-damped
-    (phi_new = (1-alpha)*phi + alpha*phi_cand), so the observed checkpoint
-    delta is ~alpha=0.5 times the raw (undamped) step for the same
-    underlying progress, exactly the same asymmetry FlashSinkhorn-symmetric
-    has relative to alternating/GeomLoss. tol/2 restores parity: see
-    chat -- observed_step = alpha*raw_step, so observed_step < alpha*tol
-    <=> raw_step < tol, matching alternating's own precision.
+    (sinkslot_symmetric_triton) solver instead of Gauss-Seidel; tol/2
+    corrects for the alpha-damped step, matching FlashSinkhorn-symmetric.
     """
     from sinkslot.sinkhorn_solvers import sinkslot_symmetric_triton
     from sinkslot.solver import (
-        _ot_1d_coo_batched, _ot_1d_coo_batched_cuda_fp32, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
+        _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
     )
 
-    ot1d = _ot_1d_coo_batched_cuda_fp32 if sc.is_cuda else _ot_1d_coo_batched
+    ot1d = _ot_1d_coo_batched_cuda if sc.is_cuda else _ot_1d_coo_batched
     sym_tol = tol / 2
 
     def solve():
@@ -206,28 +194,35 @@ def sinkslot_sym_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L
     solve()  # warmup
     (phi, psi, it, converged, dual_cost, rows, cols, S, cost_mat), dt, peak = measure(solve)
     unrounded_viol, unrounded_cost = sinkslot_plan_diagnostics(phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
-    viol, cost = sinkslot_plan_diagnostics_rounded(sc, tc, phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
+    viol, viol_l1, cost = sinkslot_plan_diagnostics_rounded(sc, tc, phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
+    unrounded_row_l1, unrounded_col_l1, _ = sinkslot_plan_diagnostics_l1(phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
     return {"method": "SinkSLOT (symmetric)", "cost": cost, "dual_cost": dual_cost, "time": dt,
             "peak_memory_bytes": peak, "iterations": it, "converged": bool(converged),
-            "marginal_violation": viol,
-            "unrounded_cost": unrounded_cost, "unrounded_marginal_violation": unrounded_viol}
+            "marginal_violation": viol, "marginal_violation_l1": viol_l1,
+            "unrounded_cost": unrounded_cost, "unrounded_marginal_violation": unrounded_viol,
+            "unrounded_marginal_violation_l1": unrounded_row_l1 + unrounded_col_l1}
 
 
 def flashsinkhorn_row(name, sc, tc, sw, tw, eps, max_iter, tol, check_every, symmetric, allow_tf32=True):
     flashsinkhorn_samplesloss_run(sc, tc, sw, tw, eps, 10, symmetric=symmetric, allow_tf32=allow_tf32)  # warmup
+    # tol/2 for the alpha=0.5 damped (symmetric) backend, same correction and
+    # reasoning as sinkslot_sym_row's own -- undamped (alternating) keeps tol.
+    solve_tol = tol / 2 if symmetric else tol
 
     def solve():
         return flashsinkhorn_samplesloss_run(
-            sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every,
+            sc, tc, sw, tw, eps, max_iter, threshold=solve_tol, check_every=check_every,
             symmetric=symmetric, allow_tf32=allow_tf32)
 
     (f, g, it, converged, dual_cost), dt, peak = measure(solve)
     unrounded_viol, unrounded_cost = plan_diagnostics_dense(sc, tc, sw, tw, eps, f, g)
-    viol, cost = plan_diagnostics_dense_rounded(sc, tc, sw, tw, eps, f, g)
+    viol, viol_l1, cost = plan_diagnostics_dense_rounded(sc, tc, sw, tw, eps, f, g)
+    unrounded_row_l1, unrounded_col_l1, _ = plan_diagnostics_dense_l1(sc, tc, sw, tw, eps, f, g)
     return {"method": name, "cost": cost, "dual_cost": dual_cost, "time": dt,
             "peak_memory_bytes": peak, "iterations": it, "converged": bool(converged),
-            "marginal_violation": viol,
-            "unrounded_cost": unrounded_cost, "unrounded_marginal_violation": unrounded_viol}
+            "marginal_violation": viol, "marginal_violation_l1": viol_l1,
+            "unrounded_cost": unrounded_cost, "unrounded_marginal_violation": unrounded_viol,
+            "unrounded_marginal_violation_l1": unrounded_row_l1 + unrounded_col_l1}
 
 
 def geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
@@ -238,11 +233,13 @@ def geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
 
     (f, g, it, converged, dual_cost, change), dt, peak = measure(solve)
     unrounded_viol, unrounded_cost = plan_diagnostics_dense(sc, tc, sw, tw, eps, f, g)
-    viol, cost = plan_diagnostics_dense_rounded(sc, tc, sw, tw, eps, f, g)
+    viol, viol_l1, cost = plan_diagnostics_dense_rounded(sc, tc, sw, tw, eps, f, g)
+    unrounded_row_l1, unrounded_col_l1, _ = plan_diagnostics_dense_l1(sc, tc, sw, tw, eps, f, g)
     return {"method": "GeomLoss (online)", "cost": cost, "dual_cost": dual_cost, "time": dt,
             "peak_memory_bytes": peak, "iterations": it, "converged": bool(converged),
-            "marginal_violation": viol,
-            "unrounded_cost": unrounded_cost, "unrounded_marginal_violation": unrounded_viol}
+            "marginal_violation": viol, "marginal_violation_l1": viol_l1,
+            "unrounded_cost": unrounded_cost, "unrounded_marginal_violation": unrounded_viol,
+            "unrounded_marginal_violation_l1": unrounded_row_l1 + unrounded_col_l1}
 
 
 _METHOD_KEYS = ["sinkslot", "sinkslot_sym", "flashsinkhorn_alt", "flashsinkhorn_sym", "geomloss_online",

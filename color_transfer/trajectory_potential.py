@@ -1,6 +1,6 @@
 """Shared color-transfer utilities: the bundled painting set, unique-RGB
 point-cloud loading, and the stop-config dataclass used by
-convergence_table.py and export_qualitative.py.
+main.py and export_qualitative.py.
 
 Point cloud: the UNIQUE RGB colors of an image, not raw pixels and not a
 palette/cluster reduction -- duplicate pixels collapse into one point, and
@@ -24,8 +24,8 @@ class StopCfg:
     """Duck-typed stop config accepted by sinkslot_alternating_triton's
     `stop` argument (mode/max_iter/check_every/tol attributes only)."""
     mode: str = "potential"
-    max_iter: int = 5000
-    check_every: int = 500
+    max_iter: int = 8000
+    check_every: int = 5
     tol: float = 1e-6
 
 

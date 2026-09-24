@@ -105,44 +105,24 @@ def _ot_1d_coo_batched(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: t
 
 
 def _ot_1d_coo_batched_cuda(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
-    """CUDA-optimised `_ot_1d_coo_batched`: same plan, transposed layout, fp64 scan.
+    """CUDA-optimised `_ot_1d_coo_batched`: same plan, transposed layout, fp32 scan.
 
     This is the SinkSLOT-CUDA setup path. Identical construction to the naive
-    version above, restructured for the GPU on two measured axes:
-
-    * Layout. Everything runs in the TRANSPOSED (C, len) layout. Profiled at
-      n=65536, L=200, the two cumsums were 42.4 ms of the naive function's
-      55.8 ms -- ~5 GB/s, because `dim=0` on an (n, C) tensor is the strided scan
-      path. The same scan along the contiguous last dim of (C, n) is 110x faster,
-      and working in (C, ...) throughout removes the `mid.T` copies (105 MB each,
-      twice) and leaves the gather indices contiguous.
-
-    * Precision. With normalised weights ca runs 0->1, so an fp32 scan over n
-      terms carries ~sqrt(n)*eps ~ 3e-5 of accumulated error while a typical
-      segment mass is ~1/(n+m) ~ 7.6e-6. The rounding exceeds the masses it
-      defines, so `mass > 0` -- the support -- depends on the scan's blocking.
-      Against an fp64 reference plan the naive fp32 dim=0 scan disagreed on 1.27%
-      of the support at n=16384 and 3.81% at n=32768; fp64 accumulation is exact
-      to ~1e-16 relative, so the plan becomes layout- and blocking-independent.
-
-    Net: 49.5x on the dominant stage AND a strictly more accurate plan. Because
-    the support differs from the naive fp32 scan, SinkSLOT-CUDA keeps its own
-    reference-cache namespace (see sinkslot/bench/bench_forward.py).
-
-    Dtype: the `.double()` upcast below is internal and fixed, not driven by
-    the caller's dtype -- `a`, `b`, `PX`, `PY` can be float32 or float64 on the
-    way in, the cumsum always runs in float64, and `ca`/`cb` (and everything
-    returned) are always float32 on the way out. Passing float64 inputs does
-    not get you a float64 plan; it only feeds float64 values into a scan that
-    was going to run in float64 either way.
+    version above, restructured for the GPU: everything runs in the
+    TRANSPOSED (C, len) layout. Profiled at n=65536, L=200, the two cumsums
+    were 42.4 ms of the naive function's 55.8 ms -- ~5 GB/s, because `dim=0`
+    on an (n, C) tensor is the strided scan path. The same scan along the
+    contiguous last dim of (C, n) is 110x faster, and working in (C, ...)
+    throughout removes the `mid.T` copies (105 MB each, twice) and leaves the
+    gather indices contiguous. Net: 49.5x on the dominant stage.
     """
     n, C = PX.shape
     m = PY.shape[0]
     PXt, PYt = PX.T.contiguous(), PY.T.contiguous()    # (C, n), (C, m)
     ix = torch.argsort(PXt, dim=-1)                    # (C, n)
     iy = torch.argsort(PYt, dim=-1)                    # (C, m)
-    ca = torch.cumsum(a[ix].double(), dim=-1).float()  # (C, n), sorted asc per row
-    cb = torch.cumsum(b[iy].double(), dim=-1).float()  # (C, m), sorted asc per row
+    ca = torch.cumsum(a[ix], dim=-1)                   # (C, n), sorted asc per row
+    cb = torch.cumsum(b[iy], dim=-1)                   # (C, m), sorted asc per row
 
     # Merge ca and cb into sorted `bounds` (C, n+m) via rank-scatter.
     # rank of ca[i] = i + #{cb < ca[i]}; rank of cb[j] = j + #{ca <= cb[j]}.
@@ -170,57 +150,6 @@ def _ot_1d_coo_batched_cuda(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor,
     # R/Cc/mass separately (which runs the compaction scan three times): 3.27 ->
     # 1.24 ms at n=65536, L=200, bit-identical output. Flattens slice-major, but
     # the caller coalesces by key immediately so emission order is immaterial.
-    sel = (mass > 0).reshape(-1).nonzero(as_tuple=False).squeeze(1)
-    return R.reshape(-1)[sel], Cc.reshape(-1)[sel], mass.reshape(-1)[sel]
-
-
-def _ot_1d_coo_batched_cuda_fp32(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
-    """Identical to `_ot_1d_coo_batched_cuda` (transposed (C, len) layout,
-    single coalesce) but without the internal `.double()` upcast -- genuine
-    float32 throughout.
-
-    Measured on color-transfer pairs (N in the 1e5-2.5e5 range): build time is
-    indistinguishable from `_ot_1d_coo_batched_cuda` (both ~7x faster than
-    `_ot_1d_coo_batched` there), and the resulting Sinkhorn solve reaches the
-    same converged cost to displayed precision, despite the two functions'
-    supports themselves disagreeing on 4-16% of entries (a further, separate
-    disagreement on top of naive-vs-either's 70-95% -- support selection is
-    sensitive to this precision choice, converged solution quality is not).
-    So the fp64 upcast in `_ot_1d_coo_batched_cuda` buys accuracy against a
-    naive fp32 reference, not speed: this function gets the same ~7x layout
-    speedup without it. Kept separate from `_ot_1d_coo_batched_cuda` rather
-    than edited in place, since that function is the paper's own established
-    "SinkSLOT-CUDA" baseline (bench_forward.py, configs/scalability.py,
-    gradient_flow/, hvp.py) with its own reference cache and test suite --
-    this one is for call sites (color_transfer) that just want the layout
-    speedup at the same precision as everything else in that pipeline.
-    """
-    n, C = PX.shape
-    m = PY.shape[0]
-    PXt, PYt = PX.T.contiguous(), PY.T.contiguous()
-    ix = torch.argsort(PXt, dim=-1)
-    iy = torch.argsort(PYt, dim=-1)
-    ca = torch.cumsum(a[ix], dim=-1)
-    cb = torch.cumsum(b[iy], dim=-1)
-
-    rank_a = (torch.arange(n, device=PX.device)[None, :]
-              + torch.searchsorted(cb, ca, right=True))
-    rank_b = (torch.arange(m, device=PX.device)[None, :]
-              + torch.searchsorted(ca, cb, right=False))
-
-    bounds = ca.new_empty(C, n + m)
-    bounds.scatter_(1, rank_a, ca)
-    bounds.scatter_(1, rank_b, cb)
-
-    prev = torch.cat([bounds.new_zeros(C, 1), bounds[:, :-1]], dim=1)
-    mass = bounds - prev
-    mid = 0.5 * (prev + bounds)
-
-    i = torch.searchsorted(ca, mid).clamp_(max=n - 1)
-    j = torch.searchsorted(cb, mid).clamp_(max=m - 1)
-    R = torch.gather(ix, 1, i)
-    Cc = torch.gather(iy, 1, j)
-
     sel = (mass > 0).reshape(-1).nonzero(as_tuple=False).squeeze(1)
     return R.reshape(-1)[sel], Cc.reshape(-1)[sel], mass.reshape(-1)[sel]
 
