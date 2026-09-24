@@ -1,14 +1,16 @@
 """Time/iterations/memory to reach a cost-gap threshold, from the merged speedup CSV.
 
 A configuration is (dataset, d, method, tf32, eps, L or s); its metrics are the
-means over seeds. It reaches a threshold T when its mean cost gap is <= T and
-every seed's plan is feasible (|mass - 1| < 1e-3 and marginal violation < 1e-4).
-Rows count whether or not they converged before max_iter. For each method and
+means over seeds. It reaches a threshold T when its mean cost gap is <= T,
+whether or not its runs converged before max_iter. For each method and
 threshold:
 
   runtime     min mean total_ms over the configurations that reach T,
   iterations  mean iters_run of that same configuration,
   memory      min mean gpu_memory_mb over the configurations that reach T.
+
+Flags on a selected configuration: "M" if any seed hit max_iter, "V" if any
+seed's marginal violation (L-infinity) exceeds 1e-6.
 
     python scripts/speedup_tables.py output/speedup_potential_final/forward_all.csv
 """
@@ -32,6 +34,7 @@ METHODS = [
     ("sinkslotcuda_symmetric", False, "SinkSLOT (ours, symmetric)"),
 ]
 REFERENCE = ("sinkslotcuda", False)
+MARG_VIOL_FLAG = 1e-6
 
 
 def _f(v):
@@ -55,11 +58,12 @@ def load_configs(path):
         gaps = [_f(r["cost_gap_pct"]) for r in rows]
         if any(g is None for g in gaps):
             continue
-        feasible = all(
-            _f(r["mass"]) is not None and abs(_f(r["mass"]) - 1) < 1e-3
-            and _f(r["marg_viol"]) is not None and _f(r["marg_viol"]) < 1e-4 for r in rows)
+        viol = [_f(r["marg_viol"]) for r in rows]
+        flags = ("M" if any(r["hit_max_iters"] == "True" for r in rows) else "") + \
+                ("V" if any(v is None or v > MARG_VIOL_FLAG for v in viol) else "")
         configs[key] = dict(
-            gap=st.mean(gaps), feasible=feasible, n_seeds=len(rows),
+            gap=st.mean(gaps), flags=flags, n_seeds=len(rows),
+            max_marg_viol=max((v for v in viol if v is not None), default=None),
             total_ms=st.mean(_f(r["total_ms"]) for r in rows),
             iters=st.mean(_f(r["iters_run"]) for r in rows),
             mem=st.mean(_f(r["gpu_memory_mb"]) for r in rows),
@@ -70,7 +74,7 @@ def load_configs(path):
 
 def best(configs, dataset, d, method, tf32, threshold):
     ok = [(k, c) for k, c in configs.items()
-          if k[:4] == (dataset, d, method, tf32) and c["feasible"] and c["gap"] <= threshold]
+          if k[:4] == (dataset, d, method, tf32) and c["gap"] <= threshold]
     if not ok:
         return None, None
     fastest = min(ok, key=lambda kc: kc[1]["total_ms"])
@@ -98,7 +102,9 @@ def main():
                 sp = f"x{c['total_ms'] / ref_ms:.1f}" if ref_ms else "n/a"
                 print(f"   {label:34s} {c['total_ms']:10.1f} ms {sp:>7s}  eps={k[4]:<9g} param={k[5]:<8s} "
                       f"gap={c['gap']:.3g}% iters={c['iters']:.0f} conv={c['converged']}/{c['n_seeds']} "
-                      f"min_mem={cm['mem']:.0f} MB")
+                      f"viol={c['max_marg_viol']:.1e} min_mem={cm['mem']:.0f} MB"
+                      + (f"  FLAG {c['flags']}" if c["flags"] else "")
+                      + (f"  mem-FLAG {cm['flags']}" if cm["flags"] else ""))
 
 
 if __name__ == "__main__":
