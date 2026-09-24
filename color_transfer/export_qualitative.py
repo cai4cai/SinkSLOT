@@ -4,11 +4,11 @@ under this PR's potential-change convergence criterion.
 
     python -m color_transfer.export_qualitative --output_dir DIR
 
-pixels_and_weights() (see trajectory_potential.py) collapses each image to
-its unique colors before solving; this module's load_pixels_weights_inverse
-also keeps torch.unique's own return_inverse map, so the transferred image
-is just the transferred *colors* array indexed back out through it,
-reshaped to the original (H, W, 3) layout.
+pixels_and_weights() (see main.py) collapses each image to its unique
+colors before solving; this module's load_pixels_weights_inverse also
+keeps torch.unique's own return_inverse map, so the transferred image is
+just the transferred *colors* array indexed back out through it, reshaped
+to the original (H, W, 3) layout.
 
 Barycentric projection T(x_i) = (1/a_i) * sum_j P_ij * y_j, computed
 directly from each method's own solved representation (FlashSinkhorn's
@@ -22,7 +22,7 @@ import os
 import torch
 from PIL import Image
 
-from color_transfer.trajectory_potential import DEFAULT_PAINTINGS_DIR, StopCfg, list_images
+from color_transfer.main import DEFAULT_PAINTINGS_DIR, StopCfg, list_images
 from sinkslot.bench.reference_solvers import flashsinkhorn_samplesloss_run, geomloss_online_native
 
 

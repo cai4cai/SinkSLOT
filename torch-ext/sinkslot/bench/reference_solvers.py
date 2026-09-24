@@ -1,7 +1,7 @@
 """Reusable early-stopping wrappers for FlashSinkhorn and GeomLoss, checked
 under the same potential-change rule as SinkSLOT's "potential" mode
 (verified identical once phi=f/eps is accounted for; see
-color_transfer/trajectory_potential.py). Not color-transfer-specific.
+color_transfer/main.py). Not color-transfer-specific.
 
 flashsinkhorn_native_run calls sinkhorn_flashstyle_alternating/_symmetric's
 own threshold/check_every directly, with defaults mirroring SamplesLoss's

@@ -29,15 +29,46 @@ import json
 import math
 import os
 import time
+from dataclasses import dataclass
+from pathlib import Path
 
 import torch
+from PIL import Image
 
-from color_transfer.trajectory_potential import DEFAULT_PAINTINGS_DIR, StopCfg, list_images, pixels_and_weights
 from sinkslot.bench.reference_solvers import (
     flashsinkhorn_samplesloss_run, geomloss_online_native, plan_diagnostics_dense,
     plan_diagnostics_dense_l1, plan_diagnostics_dense_rounded, sinkslot_plan_diagnostics, sinkslot_plan_diagnostics_l1,
     sinkslot_plan_diagnostics_rounded,
 )
+
+DEFAULT_PAINTINGS_DIR = Path(__file__).parent / "paintings"
+
+
+@dataclass
+class StopCfg:
+    """Duck-typed stop config accepted by sinkslot_alternating_triton's
+    `stop` argument (mode/max_iter/check_every/tol attributes only)."""
+    mode: str = "potential"
+    max_iter: int = 8000
+    check_every: int = 5
+    tol: float = 1e-6
+
+
+def list_images(root):
+    valid_ext = {".jpg", ".jpeg", ".png"}
+    return [os.path.join(root, n) for n in sorted(os.listdir(root))
+            if os.path.splitext(n)[1].lower() in valid_ext]
+
+
+def pixels_and_weights(path, device, dtype):
+    """Unique RGB pixel values with summed weights -- duplicate pixels combined."""
+    img = Image.open(path).convert("RGB")
+    raw = torch.frombuffer(bytearray(img.tobytes()), dtype=torch.uint8).view(-1, 3).to(device)
+    total = raw.shape[0]
+    uniq, counts = torch.unique(raw, dim=0, return_counts=True)
+    pixels = uniq.to(dtype) / 255.0
+    weights = counts.to(dtype) / total
+    return pixels, weights
 
 # Two representative pairs (lowest/highest SinkSLOT transport cost at eps=0.01,
 # per the paper's own qualitative-figure selection) get an embedded marginal-
