@@ -337,9 +337,15 @@ def _is_done(unit: Unit, done: _DoneIndex) -> bool:
 # ---------------------------------------------------------------------------
 # Sweep.
 
-def count_units(cfg: BenchConfig, base_dir: str, *, num_shards: int = 1, shard_idx: int = 0) -> None:
+def _config_units(cfg) -> List[Tuple[BenchConfig, Unit]]:
+    """(config, unit) pairs for one BenchConfig or a list of them (a module's CONFIGS)."""
+    cfgs = cfg if isinstance(cfg, (list, tuple)) else [cfg]
+    return [(c, u) for c in cfgs for u in _units(c)]
+
+
+def count_units(cfg, base_dir: str, *, num_shards: int = 1, shard_idx: int = 0) -> None:
     """Print total/done/remaining unit counts, overall and per method."""
-    all_units = list(_units(cfg))
+    all_units = [u for _, u in _config_units(cfg)]
     units = all_units[shard_idx::num_shards] if num_shards > 1 else all_units
     done = _load_done(_existing_result_csvs(base_dir))
     n_done = sum(_is_done(u, done) for u in units)
@@ -355,15 +361,19 @@ def count_units(cfg: BenchConfig, base_dir: str, *, num_shards: int = 1, shard_i
 
 
 def run_sweep(
-    cfg: BenchConfig, base_dir: str, *, dry_run: bool, label: str = "",
+    cfg, base_dir: str, *, dry_run: bool, label: str = "",
     num_shards: int = 1, shard_idx: int = 0, resume: bool = False,
 ) -> None:
-    """Run the benchmark for every unit of work (or one shard of them)."""
+    """Run the benchmark for every unit of work (or one shard of them). cfg is one
+    BenchConfig or a list of them sharing base_dir."""
     prefix = f"{label} " if label else ""
     sharded = num_shards > 1
     resume = resume or sharded
-    all_units = list(_units(cfg))
-    units = all_units[shard_idx::num_shards] if sharded else all_units
+    all_pairs = _config_units(cfg)
+    all_units = [u for _, u in all_pairs]
+    pairs = all_pairs[shard_idx::num_shards] if sharded else all_pairs
+    units = [u for _, u in pairs]
+    unit_cfg = {id(u): c for c, u in pairs}
     out_dir = _shard_dir(base_dir, shard_idx) if sharded else base_dir
 
     done: _DoneIndex = _load_done(_existing_result_csvs(base_dir)) if resume else {}
@@ -373,11 +383,11 @@ def run_sweep(
           f"{len(units) - len(todo)} done, {len(todo)} remaining", flush=True)
 
     if not dry_run and not resume:
-        _clear_csvs(cfg, out_dir)
+        _clear_csvs(pairs[0][0] if pairs else cfg, out_dir)
     failures: List[Tuple[str, int]] = []
     for i, unit in enumerate(todo, 1):
         cmd = build_command(
-            cfg, unit.dataset, unit.eps, out_dir, method=unit.method, size=unit.n,
+            unit_cfg[id(unit)], unit.dataset, unit.eps, out_dir, method=unit.method, size=unit.n,
             dim=unit.d, slices=unit.slices, seed=unit.seed, tf32=unit.tf32,
         )
         printable = " ".join(cmd)
@@ -541,28 +551,32 @@ def main() -> None:
     # Accept either the bare module name ("speedup") or a dotted path
     # ("configs.speedup"); the bare form is what the docs and --help use.
     _name = args.config if "." in args.config else f"configs.{args.config}"
-    CONFIG = importlib.import_module(_name).CONFIG
+    module = importlib.import_module(_name)
+    # A module may define CONFIGS, a list of BenchConfigs sharing one output_dir, in
+    # place of a single CONFIG; they are swept, sharded and merged as one set of units.
+    CONFIG = getattr(module, "CONFIGS", None) or module.CONFIG
+    first = CONFIG[0] if isinstance(CONFIG, list) else CONFIG
 
     if args.merge:
-        merge_shards(CONFIG.output_dir)
+        merge_shards(first.output_dir)
         return
 
     if args.count:
-        count_units(CONFIG, CONFIG.output_dir, num_shards=args.num_shards,
+        count_units(CONFIG, first.output_dir, num_shards=args.num_shards,
                     shard_idx=args.shard_idx)
         return
 
-    dry_run = CONFIG.dry_run
+    dry_run = first.dry_run
     if args.dry_run:
         dry_run = True
     if args.execute:
         dry_run = False
 
     if args.compare_tf32:
-        run_tf32_comparison(CONFIG, dry_run=dry_run)
+        run_tf32_comparison(first, dry_run=dry_run)
         return
 
-    run_sweep(CONFIG, CONFIG.output_dir, dry_run=dry_run, num_shards=args.num_shards,
+    run_sweep(CONFIG, first.output_dir, dry_run=dry_run, num_shards=args.num_shards,
               shard_idx=args.shard_idx, resume=args.resume)
 
 

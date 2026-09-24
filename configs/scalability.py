@@ -1,80 +1,115 @@
-"""Scalability: 3 N-scaling/d-scaling experiments, 5 seeds each, SinkSLOT-CUDA
-vs SROT vs FlashSinkhorn-alternating. Same potential-change stopping policy
-as configs/speedup.py: stop_tol=1e-6, check_every=5, max_iter=20000.
+"""Scalability: runtime to convergence against N and against d, Gaussian data.
 
-Spar-Sink data was also collected for this experiment (same s = k*s0(n)
-recipe as configs/speedup.py, run over 5 seeds) but is not part of the final
-scalability figure: it fails to reach N=50,000 in experiments 1/2 (its
-sampling step builds a dense N x M mask, which exceeds torch.nonzero()'s
-int32 index limit at N=M=50,000 -- see build_sparse_kernel's docstring in
-bench_forward.py) and was dropped from the plotted comparison as a result.
-Spar-Sink is intentionally excluded from METHODS below; re-add it there if
-it's ever needed again.
+Experiment 1: d=3,  N in N_SWEEP.
+Experiment 2: d=64, N in N_SWEEP.
+Experiment 3: N=10,000, d in D_SWEEP.
 
-Not expressed as a plain BenchConfig / run.py sweep: SinkSLOT-CUDA and SROT
-both need L swept independently of N/d (a per-method axis run.py's
-single-BenchConfig sweep can't express alongside the N-scaling/d-scaling
-axis), and the whole experiment is repeated over 5 seeds with the commands
-routed to per-seed output directories (save_results_csv's merge key omits
-seed, so seeds sharing one output directory silently overwrite each other --
-learned the hard way once this session). scripts/scalability.py builds the
-actual per-unit commands directly (mirroring run.py's build_command() flag
-ordering) rather than going through run.py's dry-run path; run it with:
+Every method of configs/speedup.py runs at each point, 5 seeds: FlashSinkhorn
+alternating and symmetric (fp32 and TF32), GeomLoss online, SROT, SinkSLOT-CUDA
+and SinkSLOT-CUDA-symmetric at L in L_VALUES, and Spar-Sink at
+s = k * s0(N), k in SPARSINK_K, s0(N) = 1e-3 * N * ln(N)^4.
 
-    python scripts/scalability.py
+eps at each d is the value where FlashSinkhorn-alternating fp32 reaches a ~5%
+cost gap at N=10,000 (scripts/speedup_calibrate_eps.py), so every point sits at
+roughly the same accuracy. The stop rule is the speedup benchmark's:
+max(|df|, |dg|) < 1e-5 * median(C) between checkpoints (tol/2 for the damped
+methods), check_every=5, max_iter=20000. No exact-OT reference (infeasible at
+N=50,000), so cost_gap_pct is N/A; runtime and memory are the outputs.
 
-Experiment 1 -- N-scaling, Gaussian d=3, eps=0.01, N in {5k,10k,20k,30k,50k}.
-Experiment 2 -- N-scaling, Gaussian d=64, eps=0.1, same N sweep as experiment 1.
-Experiment 3 -- d-scaling, Gaussian, N=10,000 fixed, eps=0.1, d in
-  {4,8,16,32,64,128,256,512,1024}.
+The points are several BenchConfigs (CONFIGS) sharing one output directory,
+because s depends on N. Run with run.py like the speedup config:
 
-SinkSLOT-CUDA and SROT are swept over the same 3 L values in every
-experiment. Experiment 3 (d-scaling) additionally needs --no-rmae-check on
-SinkSLOT-CUDA: at large d/L its cost_gap_pct/barycentric_sym diagnostics
-build a dense exact-OT reference that OOMs (confirmed at d>=256, L=4096);
-Flash-alternating and SROT never hit this and keep full diagnostics.
+    python run.py --config scalability --count
+    python run.py --config scalability --execute --num-shards K --shard-idx k
+    python run.py --config scalability --merge
 """
 
 import math
+from typing import Dict, List, Tuple
 
+from configs.base import BenchConfig
+from configs.speedup import REL_TOL
+
+N_SWEEP = [5000, 10000, 20000, 30000, 50000]
+D_SWEEP = [4, 8, 16, 32, 64, 128, 256, 512, 1024]
+N_DSWEEP = 10000
+L_VALUES = [100, 1000, 5000]
+SPARSINK_K = [4, 16, 64]
 SEEDS = [0, 1, 2, 3, 4]
 
-L_VALUES = [128, 1024, 4096]
-
-N_SWEEP = [5000, 10000, 20000, 30000, 50000]  # experiments 1 and 2
-D_SWEEP = [4, 8, 16, 32, 64, 128, 256, 512, 1024]  # experiment 3
-
-EPS_EXP1 = 0.01
-EPS_EXP2 = 0.1
-EPS_EXP3 = 0.1
-D_EXP1 = 3
-D_EXP2 = 64
-N_EXP3 = 10000
-
-METHODS = ["sinkslotcuda", "flash_alternating", "srot"]
-
-# shared solver policy, same as configs/speedup.py
-STOP_MODE = "potential"
-MAX_ITER = 20000
-STOP_TOL = 1e-6
-SCALING_TOL = 1e-6
-CHECK_EVERY = 5
-SROT_DELTA = 1e-8
-
-# Both SROT and Spar-Sink build a dense N x M intermediate (SROT's own pi_SOT
-# reference plan; Spar-Sink's sampling mask), gated by bench_forward.py's
-# --max-dense-size (default 10,000). N-scaling needs this raised to cover the
-# full N sweep; d-scaling's N is fixed at 10,000, so the default is enough.
-MAX_DENSE_SIZE_NSCALE = 50000
-MAX_DENSE_SIZE_DSCALE = 10000
+# d -> (median(C) at N=10,000 seed 0, eps at a ~5% cost gap), from
+# scripts/speedup_calibrate_eps.py.
+CALIBRATION: Dict[int, Tuple[float, float]] = {}
 
 
-def s_for(n: int) -> list[int]:
-    """Spar-Sink sample sizes for a given N, matching configs/speedup.py's
-    formula: s = k * s0(n), s0(n) = 1e-3 * n * log(n)^4, k in {5, 10, 15, 20}.
-    Kept here (unused by METHODS above) only so anyone re-adding Spar-Sink
-    to this experiment starts from the same recipe as configs/speedup.py,
-    not the retired density-based grid this file used to carry.
-    """
-    s0 = 1e-3 * n * (math.log(n) ** 4)
-    return [int(round(k * s0)) for k in [5, 10, 15, 20]]
+def s_values(n: int) -> List[int]:
+    s0 = 1e-3 * n * math.log(n) ** 4
+    return [int(round(k * s0)) for k in SPARSINK_K]
+
+
+def _config(n: int, d: int) -> BenchConfig:
+    median, eps = CALIBRATION[d]
+    return BenchConfig(
+        sizes=[n],
+        dims=[d],
+        problems=[("gaussian", d, [eps])],
+        n_iters=20000,
+
+        stop_mode="potential",
+        max_iter=20000,
+        stop_tol=REL_TOL,
+        stop_tol_by_problem={("gaussian", d): REL_TOL * median},
+        check_every=5,
+
+        warmup=1,
+        warmup_iters=10,
+        rep=5,
+        tf32=False,
+        flash_tf32=[False, True],
+
+        seeds=SEEDS,
+
+        no_srot=False,
+        srot_slices=L_VALUES,
+        srot_delta=1e-8,
+
+        no_sinkslot=True,
+
+        no_sinkslotcuda=False,
+        no_sinkslotcuda_symmetric=False,
+        sinkslotcuda_slices=L_VALUES,
+
+        no_sparsink=False,
+        no_randsink=True,
+        sparsink_s=s_values(n),
+        sparsink_replicates=1,
+
+        no_ott=True,
+        no_rmae_check=True,
+        no_geomloss=False,
+        no_flash_symmetric=False,
+        no_flash_alternating=False,
+
+        isolate=True,
+        tensorized=False,
+        max_dense_size=max(N_SWEEP),
+
+        output_dir="output/scalability_potential",
+        dry_run=True,
+    )
+
+
+def build_configs() -> List[BenchConfig]:
+    missing = sorted({3, 64, *D_SWEEP} - set(CALIBRATION))
+    if missing:
+        raise ValueError(f"configs/scalability.py: CALIBRATION has no entry for d={missing}.")
+    points = [(n, d) for d in (3, 64) for n in N_SWEEP]
+    points += [(N_DSWEEP, d) for d in D_SWEEP if (N_DSWEEP, d) not in points]
+    return [_config(n, d) for n, d in points]
+
+
+def __getattr__(name):
+    # CONFIGS is built on access so the module imports while CALIBRATION is incomplete.
+    if name == "CONFIGS":
+        return build_configs()
+    raise AttributeError(name)

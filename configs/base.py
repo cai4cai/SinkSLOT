@@ -196,7 +196,7 @@ class BenchConfig:
 
 
 # Quick-iteration sweep. Structurally identical ("ditto") to the published
-# sweeps in this package (speedup*.py, scalability.py) -- same fields, same
+# sweeps in this package (speedup.py, scalability.py) -- same fields, same
 # methods (including both SinkSLOT and SinkSLOT-CUDA), same early-stopping/
 # convergence block -- but a deliberately tiny grid so the whole thing runs in
 # minutes while wiring is being changed. The published configs are the same shape

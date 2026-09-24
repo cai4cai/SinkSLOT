@@ -6,6 +6,7 @@
 #   sbatch scripts/slurm/speedup_potential.slurm
 #   sbatch --array=0-99 --export=ALL,NUM_SHARDS=100 scripts/slurm/speedup_potential.slurm
 #   python run.py --config speedup --merge            # once every task has finished
+#   CONFIG=scalability runs configs/scalability.py instead (see its docstring).
 #
 # The --array range must be 0..NUM_SHARDS-1. The log paths below are fixed; pass
 # --output/--error to sbatch when ROOT is overridden.
@@ -23,6 +24,7 @@
 #SBATCH --error=/lustre/fswork/projects/rech/bmy/uyc83xr/potential_stop_benchmark/logs/speedup_potential_%A_%a.err
 
 NUM_SHARDS=${NUM_SHARDS:-210}
+CONFIG=${CONFIG:-speedup}
 ROOT=${ROOT:-/lustre/fswork/projects/rech/bmy/uyc83xr/potential_stop_benchmark}
 
 source /etc/profile.d/modules.sh
@@ -51,4 +53,4 @@ mkdir -p "$TRITON_CACHE_DIR" "$KEOPS_CACHE_FOLDER"
 echo "host=$(hostname) shard=$SLURM_ARRAY_TASK_ID/$NUM_SHARDS python=$(which python)"
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
 
-python run.py --config speedup --execute --num-shards "$NUM_SHARDS" --shard-idx "$SLURM_ARRAY_TASK_ID"
+python run.py --config "$CONFIG" --execute --num-shards "$NUM_SHARDS" --shard-idx "$SLURM_ARRAY_TASK_ID"

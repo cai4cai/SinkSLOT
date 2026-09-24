@@ -2,6 +2,7 @@
 # Cost gap vs eps per slice (scripts/speedup_calibrate_eps.py), one array task per slice.
 #
 #   sbatch scripts/slurm/speedup_calibrate_eps.slurm
+#   sbatch --array=0-1 --export=ALL,CALIB_SLICES="gaussian 4;gaussian 8" scripts/slurm/speedup_calibrate_eps.slurm
 #SBATCH --job-name=speedup_calib
 #SBATCH --account=bmy@h100
 #SBATCH -C h100
@@ -16,7 +17,9 @@
 #SBATCH --error=/lustre/fswork/projects/rech/bmy/uyc83xr/potential_stop_benchmark/logs/speedup_calib_%A_%a.err
 
 ROOT=${ROOT:-/lustre/fswork/projects/rech/bmy/uyc83xr/potential_stop_benchmark}
-SLICES=("half_moon 2" "8gaussians 2" "two_rings 2" "gaussian 3" "gaussian 64")
+# CALIB_SLICES overrides the slice list, e.g. "gaussian 4;gaussian 8" (one array task each).
+if [ -n "$CALIB_SLICES" ]; then IFS=';' read -r -a SLICES <<< "$CALIB_SLICES"
+else SLICES=("half_moon 2" "8gaussians 2" "two_rings 2" "gaussian 3" "gaussian 64"); fi
 read -r DATASET D <<< "${SLICES[$SLURM_ARRAY_TASK_ID]}"
 
 source /etc/profile.d/modules.sh

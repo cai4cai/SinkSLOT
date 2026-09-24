@@ -879,6 +879,31 @@ def _plan_metrics(T, rows, cols, cost_vals, x, y, a, b, ref) -> dict:
     return out
 
 
+def _safe_metrics(compute: Callable[[], dict]) -> dict:
+    """compute(), or {} when it runs out of GPU or host memory (the timing is kept)."""
+    try:
+        return compute()
+    except (torch.cuda.OutOfMemoryError, MemoryError) as e:
+        torch.cuda.empty_cache()
+        print(f"  [warn] plan diagnostics skipped: {type(e).__name__}")
+        return {}
+
+
+def _attach(res: TimingResult, metrics: dict) -> TimingResult:
+    for k, v in metrics.items():
+        setattr(res, k, v)
+    return res
+
+
+def _dense_plan_metrics(log_ref, f, g, x, y, a, b, eps, ref, cost=None) -> dict:
+    """_plan_metrics for T = exp(log_ref + (f (+) g - C)/eps); log_ref None means a (x) b."""
+    if cost is None:
+        cost = torch.cdist(x, y, p=2) ** 2
+    base = (a.log().unsqueeze(1) + b.log().unsqueeze(0)) if log_ref is None else log_ref
+    T = (base + (f.unsqueeze(1) + g.unsqueeze(0) - cost) / eps).exp()
+    return _plan_metrics(T, None, None, cost, x, y, a, b, ref)
+
+
 def _exact_ref(rmae_check: bool, n, m, d, seed, x, y, a, b, dataset):
     if rmae_check and n <= _EXACT_OT_MAX_N:
         return _cached_exact_ot_reference(n, m, d, seed, x, y, a, b, dataset=dataset)
@@ -977,12 +1002,8 @@ def bench_flashsinkhorn(
                      n_iters=n_iters, iters_run=iters_run, converged=converged,
                      dataset=dataset, tf32=allow_tf32, seed=seed)
 
-    ref = _exact_ref(rmae_check, n, m, d, seed, x, y, a, b, dataset)
-    cost = torch.cdist(x, y, p=2) ** 2
-    T = a.unsqueeze(1) * b.unsqueeze(0) * ((f.unsqueeze(1) + g.unsqueeze(0) - cost) / eps).exp()
-    for k, v in _plan_metrics(T, None, None, cost, x, y, a, b, ref).items():
-        setattr(res, k, v)
-    return res
+    ref = _safe_metrics(lambda: {"ref": _exact_ref(rmae_check, n, m, d, seed, x, y, a, b, dataset)}).get("ref")
+    return _attach(res, _safe_metrics(lambda: _dense_plan_metrics(None, f, g, x, y, a, b, eps, ref)))
 
 
 # =============================================================================
@@ -1035,12 +1056,8 @@ def bench_geomloss_online(
                      n_iters=n_iters, iters_run=iters_run, converged=converged,
                      dataset=dataset, tf32=False, seed=seed)
 
-    ref = _exact_ref(rmae_check, n, m, d, seed, x, y, a, b, dataset)
-    cost = torch.cdist(x, y, p=2) ** 2
-    T = a.unsqueeze(1) * b.unsqueeze(0) * ((f.unsqueeze(1) + g.unsqueeze(0) - cost) / eps).exp()
-    for k, v in _plan_metrics(T, None, None, cost, x, y, a, b, ref).items():
-        setattr(res, k, v)
-    return res
+    ref = _safe_metrics(lambda: {"ref": _exact_ref(rmae_check, n, m, d, seed, x, y, a, b, dataset)}).get("ref")
+    return _attach(res, _safe_metrics(lambda: _dense_plan_metrics(None, f, g, x, y, a, b, eps, ref)))
 
 
 def bench_geomloss_tensorized(
@@ -1186,11 +1203,8 @@ def bench_srot(
                      n_iters=n_iters, iters_run=iters_run, converged=converged, setup_ms=setup_ms,
                      final_viol=final_viol, **kw)
 
-    ref = _exact_ref(rmae_check, n, m, d, seed, x, y, a, b, dataset)
-    T = pi_sot * ((f.unsqueeze(1) + g.unsqueeze(0) - cost) / eps).exp()
-    for k, v in _plan_metrics(T, None, None, cost, x, y, a, b, ref).items():
-        setattr(res, k, v)
-    return res
+    ref = _safe_metrics(lambda: {"ref": _exact_ref(rmae_check, n, m, d, seed, x, y, a, b, dataset)}).get("ref")
+    return _attach(res, _safe_metrics(lambda: _dense_plan_metrics(log_pi, f, g, x, y, a, b, eps, ref, cost=cost)))
 
 
 def bench_sparsink(
@@ -1232,7 +1246,7 @@ def bench_sparsink(
             cost, a, b, eps, method=method, sample_size=sample_size, seed=draw)
         return cost, rows, cols, log_values
 
-    ref = _exact_ref(rmae_check, n, m, d, seed, x, y, a, b, dataset)
+    ref = _safe_metrics(lambda: {"ref": _exact_ref(rmae_check, n, m, d, seed, x, y, a, b, dataset)}).get("ref")
     res, draws = None, []
     try:
         for draw in range(replicates):
@@ -1251,11 +1265,12 @@ def bench_sparsink(
             else:
                 out = solve(None)
             f, g, empty, iters_run, converged, final_viol = out
-            T = (log_values + (f[rows] + g[cols]) / eps).exp()
-            metrics = _plan_metrics(T, rows, cols, cost[rows, cols], x, y, a, b, ref)
+            kept_cost = cost[rows, cols]
+            del cost
+            metrics = _safe_metrics(lambda: _plan_metrics(
+                (log_values + (f[rows] + g[cols]) / eps).exp(), rows, cols, kept_cost, x, y, a, b, ref))
             draws.append(dict(metrics, setup_ms=setup_ms, nnz=rows.numel(), empty_lines=empty,
                               iters_run=iters_run, converged=converged, final_viol=final_viol))
-            del cost
     except torch.cuda.OutOfMemoryError:
         return _oom_result(method, n, m, d, eps, n_iters, **kw)
 
@@ -1454,11 +1469,9 @@ def bench_sinkslotcuda(
                      n_iters=n_iters, iters_run=iters_run, converged=converged, setup_ms=setup_ms,
                      final_viol=final_viol, nnz=int(rows.numel()), **kw)
 
-    ref = _exact_ref(rmae_check, n, m, d, seed, x, y, a, b, dataset)
-    T = (phi[rows] + psi[cols] + lam).exp()
-    for k, v in _plan_metrics(T, rows, cols, cost, x, y, a, b, ref).items():
-        setattr(res, k, v)
-    return res
+    ref = _safe_metrics(lambda: {"ref": _exact_ref(rmae_check, n, m, d, seed, x, y, a, b, dataset)}).get("ref")
+    return _attach(res, _safe_metrics(
+        lambda: _plan_metrics((phi[rows] + psi[cols] + lam).exp(), rows, cols, cost, x, y, a, b, ref)))
 
 
 # =============================================================================

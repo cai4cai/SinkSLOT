@@ -1,8 +1,10 @@
-"""Cost gap vs eps for one slice, to place the speedup benchmark's eps grid.
+"""Cost gap vs eps for one slice, to place the speedup and scalability eps.
 
-FlashSinkhorn alternating, strict fp32, seed 0, the speedup config's stop rule,
-over median(C) * geomspace(1e-4, 0.5, 20). Prints one line per eps and writes a
-CSV. Rows that hit max_iter still report their gap.
+FlashSinkhorn alternating, strict fp32, seed 0, stop rule 1e-5 * median(C),
+over median(C) * geomspace(1e-4, 0.5, 20). median(C) comes from
+configs/speedup.py's MEDIAN_C when the slice is there, else is computed here.
+Prints one line per eps and writes a CSV. Rows that hit max_iter still report
+their gap.
 
     python scripts/speedup_calibrate_eps.py --dataset 8gaussians --d 2 --out calib.csv
 """
@@ -18,7 +20,8 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from configs import speedup  # noqa: E402
-from sinkslot.bench.bench_forward import StopCfg, bench_flashsinkhorn  # noqa: E402
+from scripts.speedup_prepare import lower_median_sq_cost  # noqa: E402
+from sinkslot.bench.bench_forward import StopCfg, _sample_problem, bench_flashsinkhorn  # noqa: E402
 
 
 def main() -> None:
@@ -26,22 +29,30 @@ def main() -> None:
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--d", type=int, required=True)
     ap.add_argument("--points", type=int, default=20)
+    ap.add_argument("--n", type=int, default=speedup.N)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
-    median = speedup.MEDIAN_C[(args.dataset, args.d)]
-    stop = StopCfg(mode="potential", max_iter=20000, tol=speedup.REL_TOL * median, check_every=5)
     device = torch.device("cuda")
-    fields = ["dataset", "d", "eps", "eps_over_median", "cost_gap_pct", "iters_run", "converged", "total_ms"]
+    median = speedup.MEDIAN_C.get((args.dataset, args.d))
+    if median is None:
+        x, y, _, _ = _sample_problem(args.n, args.n, args.d, device, args.dataset, 0)
+        median = lower_median_sq_cost(x, y)
+        del x, y
+    print(f"median(C) = {median!r}", flush=True)
+    stop = StopCfg(mode="potential", max_iter=20000, tol=speedup.REL_TOL * median, check_every=5)
+    fields = ["dataset", "d", "n", "median_c", "eps", "eps_over_median", "cost_gap_pct", "iters_run",
+              "converged", "total_ms"]
     with open(args.out, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields)
         writer.writeheader()
         for factor in np.geomspace(1e-4, 0.5, args.points):
             eps = float(f"{median * factor:.6g}")
-            r = bench_flashsinkhorn(speedup.N, speedup.N, args.d, eps, 20000, device, warmup=0, rep=1,
+            r = bench_flashsinkhorn(args.n, args.n, args.d, eps, 20000, device, warmup=0, rep=1,
                                     backend="alternating", allow_tf32=False, dataset=args.dataset,
                                     stop=stop, seed=0)
-            row = dict(dataset=args.dataset, d=args.d, eps=eps, eps_over_median=float(factor),
+            row = dict(dataset=args.dataset, d=args.d, n=args.n, median_c=median, eps=eps,
+                       eps_over_median=float(factor),
                        cost_gap_pct=r.cost_gap_pct, iters_run=r.iters_run, converged=r.converged,
                        total_ms=r.total_ms)
             writer.writerow(row)
