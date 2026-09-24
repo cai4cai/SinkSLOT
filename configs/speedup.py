@@ -3,8 +3,8 @@
 One config covers all five problem slices: half_moon, 8gaussians and two_rings
 at d=2, and gaussian at d=3 and d=64. Each slice gets its own eps grid,
 median(C) * geomspace(1e-3, 0.5, 10), where median(C) is the lower median of
-the squared Euclidean cost on the seed-0 instance. Fill MEDIAN_C from the output
-of scripts/speedup_prepare.py before running.
+the squared Euclidean cost on the seed-0 instance (MEDIAN_C, printed by
+scripts/speedup_prepare.py).
 
 Methods: SROT, SinkSLOT-CUDA and SinkSLOT-CUDA-symmetric over L; FlashSinkhorn
 alternating and symmetric, each in strict FP32 and TF32; GeomLoss online;
@@ -27,13 +27,13 @@ from configs.base import BenchConfig
 N = 10000
 
 # (dataset, d) -> lower median of the squared Euclidean cost on the seed-0
-# instance. PLACEHOLDERS: paste the dict printed by scripts/speedup_prepare.py.
+# instance, from scripts/speedup_prepare.py (fp32, H100).
 MEDIAN_C: Dict[Tuple[str, int], Optional[float]] = {
-    ("half_moon", 2): None,
-    ("8gaussians", 2): None,
-    ("two_rings", 2): None,
-    ("gaussian", 3): None,
-    ("gaussian", 64): None,
+    ("half_moon", 2): 1.9413249492645264,
+    ("8gaussians", 2): 7.766776084899902,
+    ("two_rings", 2): 4.999881267547607,
+    ("gaussian", 3): 4.734315872192383,
+    ("gaussian", 64): 126.7506103515625,
 }
 
 EPS_FACTORS = np.geomspace(1e-3, 0.5, 10)
