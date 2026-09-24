@@ -33,12 +33,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+from flash_sinkhorn.samples_loss import SamplesLoss
 from PIL import Image
 
 from sinkslot.bench.reference_solvers import (
-    flashsinkhorn_samplesloss_run, geomloss_online_native, plan_diagnostics_dense,
-    plan_diagnostics_dense_l1, plan_diagnostics_dense_rounded, sinkslot_plan_diagnostics, sinkslot_plan_diagnostics_l1,
-    sinkslot_plan_diagnostics_rounded,
+    geomloss_online_native, plan_diagnostics_dense, plan_diagnostics_dense_l1, plan_diagnostics_dense_rounded,
+    sinkslot_plan_diagnostics, sinkslot_plan_diagnostics_l1, sinkslot_plan_diagnostics_rounded,
 )
 
 DEFAULT_PAINTINGS_DIR = Path(__file__).parent / "paintings"
@@ -69,6 +69,7 @@ def pixels_and_weights(path, device, dtype):
     pixels = uniq.to(dtype) / 255.0
     weights = counts.to(dtype) / total
     return pixels, weights
+
 
 # Two representative pairs (lowest/highest SinkSLOT transport cost at eps=0.01,
 # per the paper's own qualitative-figure selection) get an embedded marginal-
@@ -220,17 +221,31 @@ def sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, sy
 
 
 def flashsinkhorn_row(name, sc, tc, sw, tw, eps, max_iter, tol, check_every, symmetric, allow_tf32=True):
-    flashsinkhorn_samplesloss_run(sc, tc, sw, tw, eps, 10, symmetric=symmetric, allow_tf32=allow_tf32)  # warmup
+    backend = "symmetric" if symmetric else "alternating"
     # tol/2 for the alpha=0.5 damped (symmetric) backend, same correction as sinkslot_row's.
     solve_tol = tol / 2 if symmetric else tol
 
-    def solve():
-        return flashsinkhorn_samplesloss_run(
-            sc, tc, sw, tw, eps, max_iter, threshold=solve_tol, check_every=check_every,
-            symmetric=symmetric, allow_tf32=allow_tf32)
+    def solve(n_iters, threshold):
+        # use_epsilon_scaling=False: the library's own annealing schedule has a
+        # fixed natural length independent of n_iters, so threshold-based early
+        # stopping needs a fixed eps to mean what it says. debias=False,
+        # normalize=False: we want the raw entropic OT plan/potentials at our
+        # own calibrated eps, not a symmetrized/rescaled divergence.
+        # last_extrapolation=False (symmetric only): matches
+        # geomloss_online_native's own convention, which has no such step.
+        loss = SamplesLoss(
+            loss="sinkhorn", backend=backend, potentials=True, return_n_iters=True,
+            use_epsilon_scaling=False, eps=eps, n_iters=n_iters, threshold=threshold,
+            inner_iterations=check_every, allow_tf32=allow_tf32, debias=False,
+            normalize=False, last_extrapolation=False,
+        )
+        f, g, n_iters_used = loss(sw, sc, tw, tc)
+        return f, g, int(n_iters_used)
 
-    (f, g, it, converged, dual_cost), dt, peak = measure(solve)
-    return _dense_result(name, f, g, dt, peak, it, converged, dual_cost, sc, tc, sw, tw, eps)
+    solve(10, None)  # warmup
+    (f, g, it), dt, peak = measure(lambda: solve(max_iter, solve_tol))
+    dual_cost = float((sw * f).sum() + (tw * g).sum())
+    return _dense_result(name, f, g, dt, peak, it, it < max_iter, dual_cost, sc, tc, sw, tw, eps)
 
 
 def geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
