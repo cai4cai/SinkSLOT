@@ -122,16 +122,42 @@ def latex_speedup_rows(configs, thresholds=(1.0, 10.0), wrap=lambda cell: cell) 
     return "\n".join(lines)
 
 
+def latex_threshold_rows(configs, kind: str, thresholds=(1.0, 5.0, 10.0), wrap=lambda cell: cell) -> str:
+    """Rows of Tables/convergence.tex (kind="iters": iterations of the fastest
+    configuration) or Tables/memory.tex (kind="mem": lowest mean memory, MB)."""
+    lines = []
+    for i, (method, tf32, label) in enumerate(METHODS):
+        name = f"\\textbf{{{label}}}" if method.startswith("sinkslotcuda") else label
+        cells = []
+        for dataset, d in SLICES:
+            for T in thresholds:
+                fastest, leanest = best(configs, dataset, d, method, tf32, T)
+                if fastest is None:
+                    cells.append("---")
+                    continue
+                c = fastest[1] if kind == "iters" else leanest[1]
+                value = c["iters"] if kind == "iters" else c["mem"]
+                cells.append(wrap(f"{value:,.0f}".replace(",", "{,}") + _flags_tex(c["flags"])))
+        row = ("\\rowcolor{LightGray}\n" if i % 2 else "") + name + " & " + " & ".join(cells) + " \\\\"
+        lines.append(row)
+    return "\n".join(lines)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("csv")
-    ap.add_argument("--latex", action="store_true", help="Print the rows of Tables/speedup_potential.tex.")
+    ap.add_argument("--latex", choices=("speedup", "iters", "mem"), nargs="?", const="speedup",
+                    help="Print table rows: speedup (Tables/speedup_potential.tex), iters "
+                         "(Tables/convergence.tex) or mem (Tables/memory.tex).")
     ap.add_argument("--red", action="store_true", help="With --latex: wrap every cell in \\textcolor{red}.")
     args = ap.parse_args()
     configs = load_configs(args.csv)
     if args.latex:
         wrap = (lambda cell: f"\\textcolor{{red}}{{{cell}}}") if args.red else (lambda cell: cell)
-        print(latex_speedup_rows(configs, wrap=wrap))
+        if args.latex == "speedup":
+            print(latex_speedup_rows(configs, wrap=wrap))
+        else:
+            print(latex_threshold_rows(configs, args.latex, wrap=wrap))
         return
     for T in THRESHOLDS:
         print(f"\n=== cost gap <= {T:g}% ===")
