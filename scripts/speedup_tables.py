@@ -7,7 +7,8 @@ threshold:
 
   runtime     min mean total_ms over the configurations that reach T,
   iterations  mean iters_run of that same configuration,
-  memory      min mean gpu_memory_mb over the configurations that reach T.
+  memory      min mean peak_alloc_mb (PyTorch allocator peak over the timed
+              solves) over the configurations that reach T.
 
 Flags on a selected configuration: "M" if any seed hit max_iter, "V" if any
 seed's marginal violation (L-infinity) exceeds 1e-6.
@@ -66,7 +67,7 @@ def load_configs(path):
             max_marg_viol=max((v for v in viol if v is not None), default=None),
             total_ms=st.mean(_f(r["total_ms"]) for r in rows),
             iters=st.mean(_f(r["iters_run"]) for r in rows),
-            mem=st.mean(_f(r["gpu_memory_mb"]) for r in rows),
+            mem=st.mean(_f(r["peak_alloc_mb"]) for r in rows),
             converged=sum(r["converged"] == "True" for r in rows),
         )
     return configs
@@ -137,7 +138,8 @@ def latex_threshold_rows(configs, kind: str, thresholds=(1.0, 5.0, 10.0), wrap=l
                     continue
                 c = fastest[1] if kind == "iters" else leanest[1]
                 value = c["iters"] if kind == "iters" else c["mem"]
-                cells.append(wrap(f"{value:,.0f}".replace(",", "{,}") + _flags_tex(c["flags"])))
+                text = f"{value:.1f}" if kind == "mem" and value < 10 else f"{value:,.0f}".replace(",", "{,}")
+                cells.append(wrap(text + _flags_tex(c["flags"])))
         row = ("\\rowcolor{LightGray}\n" if i % 2 else "") + name + " & " + " & ".join(cells) + " \\\\"
         lines.append(row)
     return "\n".join(lines)
