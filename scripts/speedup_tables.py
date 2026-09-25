@@ -46,23 +46,44 @@ def _f(v):
         return None
 
 
-def load_configs(path):
+def _row_key(r):
+    param = r["srot_slices"] if r["srot_slices"] not in ("", "N/A") else r["sample_size"]
+    return (r["dataset"], r["d"], r["method"], r["tf32"] in ("True", "true"), float(r["eps"]), param)
+
+
+def load_rounded_gaps(path):
+    """(config key, seed) -> rounded_cost_gap_pct from the rounded pass."""
+    gaps = {}
+    with open(path, newline="") as fh:
+        for r in csv.DictReader(fh):
+            g = _f(r.get("rounded_cost_gap_pct"))
+            if g is not None:
+                gaps[(_row_key(r), r["seed"])] = g
+    return gaps
+
+
+def load_configs(path, rounded_gaps=None):
+    """Configurations from the timed CSV. With rounded_gaps, each row's cost gap is
+    replaced by its rounded-plan gap, and the marginal-violation flag is dropped
+    (the rounded plan satisfies the marginals)."""
     groups = defaultdict(list)
     with open(path, newline="") as fh:
         for r in csv.DictReader(fh):
             if r.get("oom") in ("True", "true") or r.get("mean_ms") == "OOM":
                 continue
-            param = r["srot_slices"] if r["srot_slices"] not in ("", "N/A") else r["sample_size"]
-            key = (r["dataset"], r["d"], r["method"], r["tf32"] in ("True", "true"), float(r["eps"]), param)
-            groups[key].append(r)
+            groups[_row_key(r)].append(r)
     configs = {}
     for key, rows in groups.items():
-        gaps = [_f(r["cost_gap_pct"]) for r in rows]
+        if rounded_gaps is None:
+            gaps = [_f(r["cost_gap_pct"]) for r in rows]
+        else:
+            gaps = [rounded_gaps.get((key, r["seed"])) for r in rows]
         if any(g is None for g in gaps):
             continue
         viol = [_f(r["marg_viol"]) for r in rows]
-        flags = ("M" if any(r["hit_max_iters"] == "True" for r in rows) else "") + \
-                ("V" if any(v is None or v > MARG_VIOL_FLAG for v in viol) else "")
+        flags = ("M" if any(r["hit_max_iters"] == "True" for r in rows) else "")
+        if rounded_gaps is None:
+            flags += "V" if any(v is None or v > MARG_VIOL_FLAG for v in viol) else ""
         configs[key] = dict(
             gap=st.mean(gaps), flags=flags, n_seeds=len(rows),
             max_marg_viol=max((v for v in viol if v is not None), default=None),
@@ -175,9 +196,12 @@ def main():
                     help="Print table rows: speedup (Tables/speedup_potential.tex), iters "
                          "(Tables/convergence.tex), mem (Tables/memory.tex) or memfast "
                          "(Tables/memory_fastest.tex).")
+    ap.add_argument("--rounded", metavar="CSV",
+                    help="Merged CSV of the rounded pass (configs/speedup_rounded.py): select and report "
+                         "by the rounded-plan cost gap; runtimes still come from the timed CSV.")
     ap.add_argument("--red", action="store_true", help="With --latex: wrap every cell in \\textcolor{red}.")
     args = ap.parse_args()
-    configs = load_configs(args.csv)
+    configs = load_configs(args.csv, load_rounded_gaps(args.rounded) if args.rounded else None)
     if args.latex:
         wrap = (lambda cell: f"\\textcolor{{red}}{{{cell}}}") if args.red else (lambda cell: cell)
         if args.latex == "speedup":
