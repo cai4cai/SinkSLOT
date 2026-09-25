@@ -210,6 +210,8 @@ class TimingResult:
     stop_mode: Optional[str] = None  # StopCfg.mode used for this row
     stop_tol_eff: Optional[float] = None  # threshold passed to the solver (tol/2 for damped methods)
     peak_alloc_mb: Optional[float] = None  # torch.cuda.max_memory_allocated over the timed calls
+    rounded_cost_gap_pct: Optional[float] = None  # cost_gap_pct of the plan rounded onto the polytope
+    rounded_marg_viol: Optional[float] = None  # L-infinity marginal violation of the rounded plan
 
 
 @dataclass
@@ -876,7 +878,50 @@ def _plan_metrics(T, rows, cols, cost_vals, x, y, a, b, ref) -> dict:
     if ref is not None:
         out["cost_gap_pct"] = cost_gap(float((T * cost_vals).sum()), ref)
         out["barycentric_sym"] = barycentric_sym(Tx, Ty, ref, a, b)
+        rounded_cost, out["rounded_marg_viol"] = rounded_plan_cost(T, rows, cols, cost_vals, r, x, y, a, b)
+        out["rounded_cost_gap_pct"] = cost_gap(rounded_cost, ref)
     return out
+
+
+def rounded_plan_cost(T, rows, cols, cost_vals, r, x, y, a, b) -> Tuple[float, float]:
+    """<C, G> and L-infinity marginal violation of G, the plan rounded onto the
+    transport polytope (Altschuler, Weed, Rigollet 2017, Algorithm 2):
+
+        G1 = diag(min(a / r, 1)) T,  G2 = G1 diag(min(b / c(G1), 1)),
+        G  = G2 + err_a err_b^T / ||err_a||_1,  err_a = a - G2 1, err_b = b - G2^T 1.
+
+    Dense plan: T is (n, m), rows/cols None. Sparse plan: T holds the values at
+    (rows, cols). The rank-one term is dense, so its cost uses the full cost matrix.
+    """
+    n, m = a.shape[0], b.shape[0]
+    tiny = torch.finfo(T.dtype).tiny
+    sx = (a / r.clamp_min(tiny)).clamp(max=1.0)
+    if rows is None:
+        T1 = T * sx[:, None]
+        sy = (b / T1.sum(0).clamp_min(tiny)).clamp(max=1.0)
+        T2 = T1 * sy[None, :]
+        row2, col2 = T2.sum(1), T2.sum(0)
+        cost_c2 = float((cost_vals * T2).sum())
+        full_cost = cost_vals
+    else:
+        v1 = T * sx[rows]
+        c1 = torch.zeros(m, device=T.device, dtype=T.dtype).index_add_(0, cols, v1)
+        sy = (b / c1.clamp_min(tiny)).clamp(max=1.0)
+        v2 = v1 * sy[cols]
+        row2 = torch.zeros(n, device=T.device, dtype=T.dtype).index_add_(0, rows, v2)
+        col2 = torch.zeros(m, device=T.device, dtype=T.dtype).index_add_(0, cols, v2)
+        cost_c2 = float((cost_vals * v2).sum())
+        full_cost = torch.cdist(x, y, p=2) ** 2
+    err_a, err_b = a - row2, b - col2
+    mass = float(err_a.sum())
+    if mass > 0:
+        rank_one_cost = float(err_a @ (full_cost @ err_b)) / mass
+        row_g = row2 + err_a * float(err_b.sum()) / mass
+        col_g = col2 + err_b
+    else:
+        rank_one_cost, row_g, col_g = 0.0, row2, col2
+    viol = max(float((row_g - a).abs().max()), float((col_g - b).abs().max()))
+    return cost_c2 + rank_one_cost, viol
 
 
 def _safe_metrics(compute: Callable[[], dict]) -> dict:
@@ -1279,7 +1324,8 @@ def bench_sparsink(
         return sum(vals) / len(vals) if vals else None
 
     for key in ("cost_gap_pct", "barycentric_sym", "mass", "marg_viol", "marg_viol_l1",
-                "plan_empty_rows", "plan_empty_cols", "final_viol"):
+                "plan_empty_rows", "plan_empty_cols", "final_viol",
+                "rounded_cost_gap_pct", "rounded_marg_viol"):
         setattr(res, key, mean(key))
     res.setup_ms = mean("setup_ms")
     res.total_ms = res.mean_ms + res.setup_ms
@@ -2251,6 +2297,7 @@ FORWARD_CSV_COLUMNS = [
     "rmae_pct", "rmae_std", "srot_slices", "sample_size",
     "nnz", "empty_lines", "valid_replicates", "setup_ms",
     "total_ms", "marg_viol_l1", "stop_mode", "stop_tol_eff", "peak_alloc_mb",
+    "rounded_cost_gap_pct", "rounded_marg_viol",
 ]
 
 
@@ -2296,6 +2343,8 @@ def _forward_row(r: TimingResult) -> dict:
         "marg_viol_l1": f"{r.marg_viol_l1:.3e}" if r.marg_viol_l1 is not None else "N/A",
         "stop_mode": r.stop_mode if r.stop_mode is not None else "N/A",
         "stop_tol_eff": f"{r.stop_tol_eff:.3e}" if r.stop_tol_eff is not None else "N/A",
+        "rounded_cost_gap_pct": f"{r.rounded_cost_gap_pct:.4f}" if r.rounded_cost_gap_pct is not None else "N/A",
+        "rounded_marg_viol": f"{r.rounded_marg_viol:.3e}" if r.rounded_marg_viol is not None else "N/A",
         **timings,
     }
 
