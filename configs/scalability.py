@@ -19,7 +19,8 @@ N=50,000), so cost_gap_pct is N/A; runtime and memory are the outputs.
 The points are several BenchConfigs (CONFIGS) sharing one output directory,
 because s depends on N. SCAL_PART=small (N <= 20,000, including the d-sweep) or
 SCAL_PART=large (N >= 30,000) restricts CONFIGS to one part, with its own output
-directory, so the two parts can run on different queues at the same time. Run
+directory, so the two parts can run on different queues at the same time.
+SCAL_OUTPUT_DIR overrides the output directory. Run
 with run.py like the speedup config:
 
     python run.py --config scalability --count
@@ -110,7 +111,7 @@ def _config(n: int, d: int) -> BenchConfig:
         tensorized=False,
         max_dense_size=max(N_SWEEP),
 
-        output_dir="output/scalability_potential" + (f"_{PART}" if PART else ""),
+        output_dir=os.environ.get("SCAL_OUTPUT_DIR") or "output/scalability_potential" + (f"_{PART}" if PART else ""),
         dry_run=True,
     )
 
