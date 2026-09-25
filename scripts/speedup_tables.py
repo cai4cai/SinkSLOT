@@ -124,26 +124,47 @@ def latex_speedup_rows(configs, thresholds=(1.0, 10.0), wrap=lambda cell: cell) 
     return "\n".join(lines)
 
 
-def latex_threshold_rows(configs, kind: str, thresholds=(1.0, 5.0, 10.0), wrap=lambda cell: cell) -> str:
+def latex_threshold_rows(configs, kind: str, thresholds=(1.0, 10.0), wrap=lambda cell: cell) -> str:
     """Rows of Tables/convergence.tex (kind="iters": iterations of the fastest
     configuration), Tables/memory.tex (kind="mem": lowest mean peak memory, MB) or
-    Tables/memory_fastest.tex (kind="memfast": peak memory of the fastest configuration, MB)."""
-    lines = []
-    for i, (method, tf32, label) in enumerate(METHODS):
-        name = f"\\textbf{{{label}}}" if method.startswith("sinkslotcuda") else label
-        cells = []
+    Tables/memory_fastest.tex (kind="memfast": peak memory of the fastest configuration, MB).
+    The lowest value of each column is bold."""
+    table = []  # [method][column] -> (value, flags) or None
+    for method, tf32, _ in METHODS:
+        row = []
         for dataset, d in SLICES:
             for T in thresholds:
                 fastest, leanest = best(configs, dataset, d, method, tf32, T)
                 if fastest is None:
-                    cells.append("---")
+                    row.append(None)
                     continue
                 c = leanest[1] if kind == "mem" else fastest[1]
-                value = c["iters"] if kind == "iters" else c["mem"]
-                text = f"{value:.1f}" if kind != "iters" and value < 10 else f"{value:,.0f}".replace(",", "{,}")
-                cells.append(wrap(text + _flags_tex(c["flags"])))
-        row = ("\\rowcolor{LightGray}\n" if i % 2 else "") + name + " & " + " & ".join(cells) + " \\\\"
-        lines.append(row)
+                row.append((c["iters"] if kind == "iters" else c["mem"], c["flags"]))
+        table.append(row)
+
+    def fmt(value):
+        if kind != "iters" and value < 10:
+            return f"{value:.1f}"
+        return f"{value:,.0f}".replace(",", "{,}")
+
+    lowest = []
+    for j in range(len(table[0])):
+        shown = [fmt(r[j][0]) for r in table if r[j] is not None]
+        lowest.append(min(shown, key=lambda t: float(t.replace("{,}", ""))) if shown else None)
+
+    lines = []
+    for i, ((method, _, label), row) in enumerate(zip(METHODS, table)):
+        name = f"\\textbf{{{label}}}" if method.startswith("sinkslotcuda") else label
+        cells = []
+        for j, entry in enumerate(row):
+            if entry is None:
+                cells.append("---")
+                continue
+            text = fmt(entry[0])
+            if text == lowest[j]:
+                text = f"\\textbf{{{text}}}"
+            cells.append(wrap(text + _flags_tex(entry[1])))
+        lines.append(("\\rowcolor{LightGray}\n" if i % 2 else "") + name + " & " + " & ".join(cells) + " \\\\")
     return "\n".join(lines)
 
 
