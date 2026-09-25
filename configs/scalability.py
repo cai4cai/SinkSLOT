@@ -17,7 +17,10 @@ methods), check_every=5, max_iter=20000. No exact-OT reference (infeasible at
 N=50,000), so cost_gap_pct is N/A; runtime and memory are the outputs.
 
 The points are several BenchConfigs (CONFIGS) sharing one output directory,
-because s depends on N. Run with run.py like the speedup config:
+because s depends on N. SCAL_PART=small (N <= 20,000, including the d-sweep) or
+SCAL_PART=large (N >= 30,000) restricts CONFIGS to one part, with its own output
+directory, so the two parts can run on different queues at the same time. Run
+with run.py like the speedup config:
 
     python run.py --config scalability --count
     python run.py --config scalability --execute --num-shards K --shard-idx k
@@ -25,6 +28,7 @@ because s depends on N. Run with run.py like the speedup config:
 """
 
 import math
+import os
 from typing import Dict, List, Tuple
 
 from configs.base import BenchConfig
@@ -36,6 +40,7 @@ N_DSWEEP = 10000
 L_VALUES = [100, 1000, 5000]
 SPARSINK_K = [4, 16, 64]
 SEEDS = [0, 1, 2, 3, 4]
+PART = os.environ.get("SCAL_PART", "")  # "", "small" (N <= 20,000) or "large" (N >= 30,000)
 
 # d -> (median(C) at N=10,000 seed 0, eps at a ~5% cost gap), from
 # scripts/speedup_calibrate_eps.py.
@@ -105,7 +110,7 @@ def _config(n: int, d: int) -> BenchConfig:
         tensorized=False,
         max_dense_size=max(N_SWEEP),
 
-        output_dir="output/scalability_potential",
+        output_dir="output/scalability_potential" + (f"_{PART}" if PART else ""),
         dry_run=True,
     )
 
@@ -116,6 +121,12 @@ def build_configs() -> List[BenchConfig]:
         raise ValueError(f"configs/scalability.py: CALIBRATION has no entry for d={missing}.")
     points = [(n, d) for d in (3, 64) for n in N_SWEEP]
     points += [(N_DSWEEP, d) for d in D_SWEEP if (N_DSWEEP, d) not in points]
+    if PART == "small":
+        points = [(n, d) for n, d in points if n <= 20000]
+    elif PART == "large":
+        points = [(n, d) for n, d in points if n > 20000]
+    elif PART:
+        raise ValueError(f"SCAL_PART must be '', 'small' or 'large', got {PART!r}")
     return [_config(n, d) for n, d in points]
 
 
