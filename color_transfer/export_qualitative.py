@@ -84,8 +84,9 @@ def solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, s
         return _barycentric_sparse(phi, psi, rows, cols, S, cost, tc, eps, n)
 
     if method == "geomloss_online":
+        # tol/2 for alpha=0.5 damped updates, as in color_transfer/main.py.
         f, g, it, converged, cost_val, _ = geomloss_online(
-            sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every)
+            sc, tc, sw, tw, eps, max_iter, threshold=tol / 2, check_every=check_every)
         print(f"    geomloss_online: iters={it} converged={converged} cost={cost_val:.6f}")
         return _barycentric_dense_chunked(f, g, sc, tc, sw, tw, eps)
 
@@ -94,8 +95,9 @@ def solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, s
         from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_symmetric
         f, g, it = sinkhorn_flashstyle_symmetric(
             sc, tc, sw, tw, eps=eps, use_epsilon_scaling=False, n_iters=max_iter,
-            threshold=tol, check_every=check_every, last_extrapolation=False, return_n_iters=True,
+            threshold=tol / 2, check_every=check_every, last_extrapolation=False, return_n_iters=True,
         )
+        it = int(it) - 1  # it counts the initial alpha=1 step
     else:
         from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_alternating
         f, g, it = sinkhorn_flashstyle_alternating(
