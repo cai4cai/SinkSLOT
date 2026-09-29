@@ -195,13 +195,17 @@ def latex_param_rows(configs, thresholds=(1.0, 10.0), red_slices=(), wrap=lambda
     return "\n".join(lines)
 
 
-def latex_threshold_rows(configs, kind: str, thresholds=(1.0, 10.0), wrap=lambda cell: cell) -> str:
+def latex_threshold_rows(configs, kind: str, thresholds=(1.0, 10.0), wrap=lambda cell: cell,
+                         fp32_only=False, red_slices=()) -> str:
     """Rows of Tables/convergence.tex (kind="iters": iterations of the fastest
     configuration), Tables/memory.tex (kind="mem": lowest mean peak memory, MB) or
     Tables/memory_fastest.tex (kind="memfast": peak memory of the fastest configuration, MB).
-    The lowest value of each column is bold."""
+    The lowest value of each column is bold. fp32_only drops the TF32 rows; cells of
+    the (dataset, d) slices in red_slices are wrapped in \\textcolor{red}."""
+    methods = [m for m in METHODS if not (fp32_only and m[1])]
+    columns = [(dataset, d) for dataset, d in SLICES for _ in thresholds]
     table = []  # [method][column] -> (value, flags) or None
-    for method, tf32, _ in METHODS:
+    for method, tf32, _ in methods:
         row = []
         for dataset, d in SLICES:
             for T in thresholds:
@@ -224,17 +228,20 @@ def latex_threshold_rows(configs, kind: str, thresholds=(1.0, 10.0), wrap=lambda
         lowest.append(min(shown, key=lambda t: float(t.replace("{,}", ""))) if shown else None)
 
     lines = []
-    for i, ((method, _, label), row) in enumerate(zip(METHODS, table)):
+    for i, ((method, _, label), row) in enumerate(zip(methods, table)):
         name = f"\\textbf{{{label}}}" if method.startswith("sinkslotcuda") else label
         cells = []
         for j, entry in enumerate(row):
             if entry is None:
-                cells.append("---")
-                continue
-            text = fmt(entry[0])
-            if text == lowest[j]:
-                text = f"\\textbf{{{text}}}"
-            cells.append(wrap(text + _flags_tex(entry[1])))
+                text = "---"
+            else:
+                text = fmt(entry[0])
+                if text == lowest[j]:
+                    text = f"\\textbf{{{text}}}"
+                text = wrap(text + _flags_tex(entry[1]))
+            if columns[j] in red_slices:
+                text = f"\\textcolor{{red}}{{{text}}}"
+            cells.append(text)
         lines.append(("\\rowcolor{LightGray}\n" if i % 2 else "") + name + " & " + " & ".join(cells) + " \\\\")
     return "\n".join(lines)
 
