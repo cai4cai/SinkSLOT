@@ -1,7 +1,7 @@
 """Runtime or peak memory against N and d, from the scalability CSVs (configs/scalability.py).
 
 Three panels: Gaussian d=3 against N, Gaussian d=64 against N, and N=10,000
-against d. One line per (method, L or s): mean over seeds of total_ms (setup +
+against d. TF32 runs are left out unless --tf32 is given. One line per (method, L or s): mean over seeds of total_ms (setup +
 solve) or peak_alloc_mb, with standard-error bars. Colour = method, line style =
 L (SinkSLOT, SROT) or the multiple k of s0(N) (Spar-Sink). Hollow markers: at
 least one seed hit max_iter. Out-of-memory points are not drawn.
@@ -83,8 +83,8 @@ def series(rows, metric):
     return out
 
 
-def panel(ax, data, xs_key, fixed, title):
-    for m, tf32, _, colour, marker in METHODS:
+def panel(ax, data, xs_key, fixed, title, methods=METHODS):
+    for m, tf32, _, colour, marker in methods:
         for (mm, tt, rank), pts in data.items():
             if (mm, tt) != (m, tf32):
                 continue
@@ -112,13 +112,15 @@ def main():
     ap.add_argument("out")
     ap.add_argument("csvs", nargs="+")
     ap.add_argument("--metric", choices=("time", "memory"), default="time")
+    ap.add_argument("--tf32", action="store_true", help="Also plot the TF32 FlashSinkhorn runs.")
     args = ap.parse_args()
+    methods = [m for m in METHODS if args.tf32 or not m[1]]
     data = series(load(args.csvs), args.metric)
 
     fig, axes = plt.subplots(1, 3, figsize=(7.2, 2.6))
-    panel(axes[0], data, lambda n, d: n, lambda n, d: d == 3, "Gaussian, $d=3$")
-    panel(axes[1], data, lambda n, d: n, lambda n, d: d == 64, "Gaussian, $d=64$")
-    panel(axes[2], data, lambda n, d: d, lambda n, d: n == 10000, "Gaussian, $N=10^4$")
+    panel(axes[0], data, lambda n, d: n, lambda n, d: d == 3, "Gaussian, $d=3$", methods)
+    panel(axes[1], data, lambda n, d: n, lambda n, d: d == 64, "Gaussian, $d=64$", methods)
+    panel(axes[2], data, lambda n, d: d, lambda n, d: n == 10000, "Gaussian, $N=10^4$", methods)
     axes[0].set_xlabel("$N=M$", fontsize=FONT)
     axes[1].set_xlabel("$N=M$", fontsize=FONT)
     axes[2].set_xlabel("$d$", fontsize=FONT)
@@ -131,7 +133,7 @@ def main():
     axes[2].set_xticklabels(["4", "16", "64", "256", "1024"])
     axes[2].minorticks_off()
     fig.tight_layout(rect=(0, 0.17, 1, 1), w_pad=0.8)
-    methods = [Line2D([], [], color=c, marker=mk, ms=3.5, lw=1.2, label=lab) for _, _, lab, c, mk in METHODS]
+    methods = [Line2D([], [], color=c, marker=mk, ms=3.5, lw=1.2, label=lab) for _, _, lab, c, mk in methods]
     params = [Line2D([], [], color="0.3", ls=s, lw=1.1, label=lab) for s, lab in zip(STYLES, PARAM_LABELS)]
     params.append(Line2D([], [], ls="", marker="o", color="0.3", mfc="white", ms=3.5, label="hit max_iter"))
     fig.legend(handles=methods, loc="upper center", bbox_to_anchor=(0.5, 0.225), ncol=3, fontsize=FONT - 1.5,
