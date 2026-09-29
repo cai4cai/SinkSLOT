@@ -113,7 +113,8 @@ def _fmt_ms(t: float) -> str:
 
 
 def _flags_tex(flags: str) -> str:
-    marks = ("\\dagger" if "M" in flags else "") + ("\\ddagger" if "V" in flags else "")
+    marks = ("\\textcolor{red}{\\dagger}" if "M" in flags else "") + \
+        ("\\textcolor{red}{\\ddagger}" if "V" in flags else "")
     return f"$^{{{marks}}}$" if marks else ""
 
 
