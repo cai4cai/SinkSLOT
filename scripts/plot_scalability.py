@@ -1,7 +1,7 @@
 """Runtime or peak memory against N and d, from the scalability CSVs (configs/scalability.py).
 
 Three panels: Gaussian d=3 against N, Gaussian d=64 against N, and N=10,000
-against d. TF32 runs are left out unless --tf32 is given. One line per (method, L or s): mean over seeds of total_ms (setup +
+against d. TF32 runs and the symmetric variants are left out unless --tf32 / --symmetric are given. One line per (method, L or s): mean over seeds of total_ms (setup +
 solve) or peak_alloc_mb, with standard-error bars. Colour = method, line style =
 L (SinkSLOT, SROT) or the multiple k of s0(N) (Spar-Sink). Hollow markers: at
 least one seed hit max_iter. Out-of-memory points are not drawn.
@@ -113,8 +113,11 @@ def main():
     ap.add_argument("csvs", nargs="+")
     ap.add_argument("--metric", choices=("time", "memory"), default="time")
     ap.add_argument("--tf32", action="store_true", help="Also plot the TF32 FlashSinkhorn runs.")
+    ap.add_argument("--symmetric", action="store_true",
+                    help="Also plot SinkSLOT (symmetric) and FlashSinkhorn (symmetric).")
     args = ap.parse_args()
-    methods = [m for m in METHODS if args.tf32 or not m[1]]
+    methods = [m for m in METHODS
+               if (args.tf32 or not m[1]) and (args.symmetric or "symmetric" not in m[0])]
     data = series(load(args.csvs), args.metric)
 
     fig, axes = plt.subplots(1, 3, figsize=(7.2, 2.6))
