@@ -14,6 +14,10 @@ alternating and symmetric, each in strict FP32 and TF32; GeomLoss online;
 Spar-Sink (one kernel draw) over s = k * s0(n), s0(n) = 1e-3 * n * ln(n)^4,
 k in {1, 2, 4, ..., 128}. Every other method runs in strict FP32.
 
+Each run also records the cost gap of its plan rounded onto the transport
+polytope (rounded_cost_gap_pct), outside the timed region. SPEEDUP_OUTPUT_DIR
+overrides the output directory.
+
 Run with:
 
     python run.py --config speedup --dry-run
@@ -21,6 +25,7 @@ Run with:
 """
 
 import math
+import os
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -116,7 +121,7 @@ def build_config(median_c: Dict[Tuple[str, int], Optional[float]] = MEDIAN_C) ->
         tensorized=False,
         max_dense_size=10000,
 
-        output_dir="output/speedup_potential_final",
+        output_dir=os.environ.get("SPEEDUP_OUTPUT_DIR") or "output/speedup_potential_final",
         dry_run=True,
     )
 
