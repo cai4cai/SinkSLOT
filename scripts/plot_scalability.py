@@ -141,7 +141,7 @@ def main():
     params.append(Line2D([], [], ls="", marker="o", color="0.3", mfc="white", ms=3.5, label="hit max_iter"))
     fig.legend(handles=methods, loc="upper center", bbox_to_anchor=(0.5, 0.225), ncol=3, fontsize=FONT - 1.5,
                frameon=False, handlelength=1.8, columnspacing=1.0, labelspacing=0.3)
-    fig.legend(handles=params, loc="upper center", bbox_to_anchor=(0.5, 0.07), ncol=4, fontsize=FONT - 1.5,
+    fig.legend(handles=params, loc="upper center", bbox_to_anchor=(0.5, 0.225 - 0.052 * -(-len(methods) // 3)), ncol=4, fontsize=FONT - 1.5,
                frameon=False, handlelength=1.8, columnspacing=1.2)
     fig.savefig(args.out, bbox_inches="tight", pad_inches=0.02)
     fig.savefig(args.out.rsplit(".", 1)[0] + ".png", dpi=170, bbox_inches="tight", pad_inches=0.02)
