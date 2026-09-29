@@ -88,6 +88,7 @@ def load_configs(path, rounded_gaps=None):
             gap=st.mean(gaps), flags=flags, n_seeds=len(rows),
             max_marg_viol=max((v for v in viol if v is not None), default=None),
             total_ms=st.mean(_f(r["total_ms"]) for r in rows),
+            total_ms_sd=st.stdev([_f(r["total_ms"]) for r in rows]) if len(rows) > 1 else 0.0,
             iters=st.mean(_f(r["iters_run"]) for r in rows),
             mem=st.mean(_f(r["peak_alloc_mb"]) for r in rows),
             converged=sum(r["converged"] == "True" for r in rows),
@@ -145,22 +146,15 @@ def latex_speedup_rows(configs, thresholds=(1.0, 10.0), wrap=lambda cell: cell) 
     return "\n".join(lines)
 
 
-SWEPT = {  # method -> LaTeX description of its swept parameter
-    "srot": r"$L\in\{25,50,100,250,500,1000,2500,5000\}$",
-    "sinkslotcuda": r"$L\in\{25,50,100,250,500,1000,2500,5000\}$",
-    "sinkslotcuda_symmetric": r"$L\in\{25,50,100,250,500,1000,2500,5000\}$",
-    "spar_sink": r"$s=k s_0$, $k\in\{1,2,4,\dots,128\}$",
-}
-
-
 def _sig(x: float) -> str:
     return f"{x:.3g}"
 
 
 def latex_param_rows(configs, thresholds=(1.0, 10.0), red_slices=(), wrap=lambda cell: cell) -> str:
     """Rows of Tables/speedup_params.tex: the runtime of each method's fastest
-    configuration (as in Tables/speedup_potential.tex, fp32 methods only) with the
-    selected eps and L (or k = s / s0) under it. Cells of the (dataset, d) slices in
+    configuration (as in Tables/speedup_potential.tex, fp32 methods only), its
+    standard deviation over seeds in parentheses and SinkSLOT (alternating)'s speedup
+    over it, with the selected eps and L (or k = s / s0) under it. Cells of the (dataset, d) slices in
     red_slices are wrapped in \\textcolor{red}."""
     s0 = {}
     for key in configs:
@@ -184,12 +178,17 @@ def latex_param_rows(configs, thresholds=(1.0, 10.0), red_slices=(), wrap=lambda
                         params.append(f"$k$={round(int(key[5]) / s0[(dataset, d)])}")
                     elif key[5] not in ("N/A", ""):
                         params.append(f"$L$={key[5]}")
-                    cell = (f"\\makecell{{{_fmt_ms(c['total_ms'])}{_flags_tex(c['flags'])}\\\\"
-                            f"{{\\scriptsize {', '.join(params)}}}}}")
+                    ref, _ = best(configs, dataset, d, *REFERENCE, T)
+                    top = f"{_fmt_ms(c['total_ms'])}{_flags_tex(c['flags'])} ({_fmt_ms(c['total_ms_sd'])})"
+                    if (method, tf32) == REFERENCE:
+                        top = f"\\textbf{{{top}}}"
+                    elif ref is not None:
+                        top += f"\\spd{{{c['total_ms'] / ref[1]['total_ms']:.1f}}}"
+                    cell = f"\\makecell{{{top}\\\\{{\\scriptsize {', '.join(params)}}}}}"
                 if (dataset, d) in red_slices:
                     cell = f"\\textcolor{{red}}{{{cell}}}"
                 cells.append(wrap(cell))
-        row = ("\\rowcolor{LightGray}\n" if i % 2 else "") + name + " & " + SWEPT.get(method, "---")
+        row = ("\\rowcolor{LightGray}\n" if i % 2 else "") + name
         for j in range(0, len(cells), len(thresholds)):
             row += "\n & " + " & ".join(cells[j:j + len(thresholds)])
         lines.append(row + " \\\\")
