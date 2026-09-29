@@ -211,6 +211,7 @@ class TimingResult:
     stop_tol_eff: Optional[float] = None  # threshold passed to the solver (tol/2 for damped methods)
     peak_alloc_mb: Optional[float] = None  # torch.cuda.max_memory_allocated over the timed calls
     rounded_cost_gap_pct: Optional[float] = None  # cost_gap_pct of the plan rounded onto the polytope
+    plan_cost: Optional[float] = None  # <C, P> of the returned plan (not rounded)
     rounded_marg_viol: Optional[float] = None  # L-infinity marginal violation of the rounded plan
 
 
@@ -865,18 +866,27 @@ def _timed_setup(build: Callable[[], object], warm_build: Optional[Callable[[], 
 
 
 def _plan_metrics(T, rows, cols, cost_vals, x, y, a, b, ref) -> dict:
-    """cost_gap_pct, barycentric_sym and feasibility of a plan.
+    """plan_cost (<C, P>), cost_gap_pct, barycentric_sym and feasibility of a plan.
 
     Dense plan: T is (n, m), rows/cols None, cost_vals the (n, m) cost.
     Sparse plan: T holds the values at (rows, cols), cost_vals the matching costs.
+    plan_cost is computed first; when the barycentric maps (memory ~ nnz * d) run
+    out of memory, only plan_cost is returned.
     """
-    if rows is None:
-        Tx, Ty, r, c = plan_barycentric_dense(T, x, y)
-    else:
-        Tx, Ty, r, c = plan_barycentric_sparse(T, rows, cols, x, y)
-    out = plan_feasibility(r, c, a, b)
+    plan_cost = float((T * cost_vals).sum())
+    out = {"plan_cost": plan_cost}
+    try:
+        if rows is None:
+            Tx, Ty, r, c = plan_barycentric_dense(T, x, y)
+        else:
+            Tx, Ty, r, c = plan_barycentric_sparse(T, rows, cols, x, y)
+    except torch.cuda.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        print("  [warn] plan diagnostics skipped after plan_cost: OutOfMemoryError")
+        return out
+    out.update(plan_feasibility(r, c, a, b))
     if ref is not None:
-        out["cost_gap_pct"] = cost_gap(float((T * cost_vals).sum()), ref)
+        out["cost_gap_pct"] = cost_gap(plan_cost, ref)
         out["barycentric_sym"] = barycentric_sym(Tx, Ty, ref, a, b)
         rounded_cost, out["rounded_marg_viol"] = rounded_plan_cost(T, rows, cols, cost_vals, r, x, y, a, b)
         out["rounded_cost_gap_pct"] = cost_gap(rounded_cost, ref)
@@ -940,13 +950,37 @@ def _attach(res: TimingResult, metrics: dict) -> TimingResult:
     return res
 
 
+def _dense_plan_cost(log_ref, f, g, x, y, a, b, eps, cost=None, chunk: int = 2048) -> float:
+    """<C, T> for T = exp(log_ref + (f (+) g - C)/eps), built in row chunks, summed in fp64."""
+    total = 0.0
+    log_b = b.log().unsqueeze(0)
+    for i in range(0, x.shape[0], chunk):
+        C = cost[i:i + chunk] if cost is not None else torch.cdist(x[i:i + chunk], y, p=2) ** 2
+        base = a[i:i + chunk].log().unsqueeze(1) + log_b if log_ref is None else log_ref[i:i + chunk]
+        T = (base + (f[i:i + chunk].unsqueeze(1) + g.unsqueeze(0) - C) / eps).exp()
+        total += float((T * C).sum(dtype=torch.float64))
+    return total
+
+
 def _dense_plan_metrics(log_ref, f, g, x, y, a, b, eps, ref, cost=None) -> dict:
-    """_plan_metrics for T = exp(log_ref + (f (+) g - C)/eps); log_ref None means a (x) b."""
-    if cost is None:
-        cost = torch.cdist(x, y, p=2) ** 2
-    base = (a.log().unsqueeze(1) + b.log().unsqueeze(0)) if log_ref is None else log_ref
-    T = (base + (f.unsqueeze(1) + g.unsqueeze(0) - cost) / eps).exp()
-    return _plan_metrics(T, None, None, cost, x, y, a, b, ref)
+    """_plan_metrics for T = exp(log_ref + (f (+) g - C)/eps); log_ref None means a (x) b.
+
+    plan_cost is computed first in row chunks, so it is kept when the dense
+    diagnostics run out of memory.
+    """
+    plan_cost = _dense_plan_cost(log_ref, f, g, x, y, a, b, eps, cost)
+    try:
+        if cost is None:
+            cost = torch.cdist(x, y, p=2) ** 2
+        base = (a.log().unsqueeze(1) + b.log().unsqueeze(0)) if log_ref is None else log_ref
+        T = (base + (f.unsqueeze(1) + g.unsqueeze(0) - cost) / eps).exp()
+        out = _plan_metrics(T, None, None, cost, x, y, a, b, ref)
+    except (torch.cuda.OutOfMemoryError, MemoryError) as e:
+        torch.cuda.empty_cache()
+        print(f"  [warn] plan diagnostics skipped after plan_cost: {type(e).__name__}")
+        out = {}
+    out["plan_cost"] = plan_cost
+    return out
 
 
 def _exact_ref(rmae_check: bool, n, m, d, seed, x, y, a, b, dataset):
@@ -1325,7 +1359,7 @@ def bench_sparsink(
 
     for key in ("cost_gap_pct", "barycentric_sym", "mass", "marg_viol", "marg_viol_l1",
                 "plan_empty_rows", "plan_empty_cols", "final_viol",
-                "rounded_cost_gap_pct", "rounded_marg_viol"):
+                "rounded_cost_gap_pct", "rounded_marg_viol", "plan_cost"):
         setattr(res, key, mean(key))
     res.setup_ms = mean("setup_ms")
     res.total_ms = res.mean_ms + res.setup_ms
@@ -2297,7 +2331,7 @@ FORWARD_CSV_COLUMNS = [
     "rmae_pct", "rmae_std", "srot_slices", "sample_size",
     "nnz", "empty_lines", "valid_replicates", "setup_ms",
     "total_ms", "marg_viol_l1", "stop_mode", "stop_tol_eff", "peak_alloc_mb",
-    "rounded_cost_gap_pct", "rounded_marg_viol",
+    "rounded_cost_gap_pct", "rounded_marg_viol", "plan_cost",
 ]
 
 
@@ -2345,6 +2379,7 @@ def _forward_row(r: TimingResult) -> dict:
         "stop_tol_eff": f"{r.stop_tol_eff:.3e}" if r.stop_tol_eff is not None else "N/A",
         "rounded_cost_gap_pct": f"{r.rounded_cost_gap_pct:.4f}" if r.rounded_cost_gap_pct is not None else "N/A",
         "rounded_marg_viol": f"{r.rounded_marg_viol:.3e}" if r.rounded_marg_viol is not None else "N/A",
+        "plan_cost": f"{r.plan_cost:.8g}" if r.plan_cost is not None else "N/A",
         **timings,
     }
 

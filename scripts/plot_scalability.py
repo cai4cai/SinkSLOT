@@ -1,7 +1,7 @@
 """Runtime or peak memory against N and d, from the scalability CSVs (configs/scalability.py).
 
-Three panels: Gaussian d=3 against N, Gaussian d=64 against N, and N=10,000
-against d. TF32 runs and the symmetric variants are left out unless --tf32 / --symmetric are given. One line per (method, L or s): mean over seeds of total_ms (setup +
+Three columns: Gaussian d=3 against N, Gaussian d=64 against N, and N=10,000
+against d. --cost adds a top row with <C, P> of each run's plan over the same x axes. TF32 runs and the symmetric variants are left out unless --tf32 / --symmetric are given. One line per (method, L or s): mean over seeds of total_ms (setup +
 solve) or peak_alloc_mb, with standard-error bars. Colour = method, line style =
 L (SinkSLOT, SROT) or the multiple k of s0(N) (Spar-Sink). Hollow markers: at
 least one seed hit max_iter. Out-of-memory points are not drawn.
@@ -59,9 +59,13 @@ def _param(r):
     return None
 
 
+COLUMN = {"time": "total_ms", "memory": "peak_alloc_mb", "cost": "plan_cost"}
+YLABEL = {"time": "time (ms)", "memory": "peak memory (MB)", "cost": r"$\langle C, P\rangle$"}
+
+
 def series(rows, metric):
     """(method, tf32, param rank) -> {(n, d): (mean, se, any max_iter hit)}."""
-    col = "total_ms" if metric == "time" else "peak_alloc_mb"
+    col = COLUMN[metric]
     groups = defaultdict(list)
     for r in rows:
         tf32 = r["tf32"] in ("True", "true")
@@ -83,7 +87,7 @@ def series(rows, metric):
     return out
 
 
-def panel(ax, data, xs_key, fixed, title, methods=METHODS):
+def panel(ax, data, xs_key, fixed, title, methods=METHODS, ylog=True):
     for m, tf32, _, colour, marker in methods:
         for (mm, tt, rank), pts in data.items():
             if (mm, tt) != (m, tf32):
@@ -99,8 +103,9 @@ def panel(ax, data, xs_key, fixed, title, methods=METHODS):
             for xi, (yi, _, capped) in sel:
                 ax.plot(xi, yi, marker, ms=3.5, color=colour, mfc="white" if capped else colour, mew=0.8, zorder=3)
     ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_title(title, fontsize=FONT + 1, loc="left", pad=3)
+    ax.set_yscale("log" if ylog else "linear")
+    if title:
+        ax.set_title(title, fontsize=FONT + 1, loc="left", pad=3)
     ax.grid(True, which="major", color="0.88", lw=0.5)
     ax.tick_params(labelsize=FONT - 1, length=2.5)
     for side in ("top", "right"):
@@ -112,36 +117,45 @@ def main():
     ap.add_argument("out")
     ap.add_argument("csvs", nargs="+")
     ap.add_argument("--metric", choices=("time", "memory"), default="time")
+    ap.add_argument("--cost", action="store_true",
+                    help="Add a top row with <C, P> of each run's plan (CSV column plan_cost).")
     ap.add_argument("--tf32", action="store_true", help="Also plot the TF32 FlashSinkhorn runs.")
     ap.add_argument("--symmetric", action="store_true",
                     help="Also plot SinkSLOT (symmetric) and FlashSinkhorn (symmetric).")
     args = ap.parse_args()
     methods = [m for m in METHODS
                if (args.tf32 or not m[1]) and (args.symmetric or "symmetric" not in m[0])]
-    data = series(load(args.csvs), args.metric)
-
-    fig, axes = plt.subplots(1, 3, figsize=(7.2, 2.6))
-    panel(axes[0], data, lambda n, d: n, lambda n, d: d == 3, "Gaussian, $d=3$", methods)
-    panel(axes[1], data, lambda n, d: n, lambda n, d: d == 64, "Gaussian, $d=64$", methods)
-    panel(axes[2], data, lambda n, d: d, lambda n, d: n == 10000, "Gaussian, $N=10^4$", methods)
-    axes[0].set_xlabel("$N=M$", fontsize=FONT)
-    axes[1].set_xlabel("$N=M$", fontsize=FONT)
-    axes[2].set_xlabel("$d$", fontsize=FONT)
-    axes[0].set_ylabel("time (ms)" if args.metric == "time" else "peak memory (MB)", fontsize=FONT)
-    for ax in axes[:2]:
+    rows = load(args.csvs)
+    metrics = (["cost"] if args.cost else []) + [args.metric]
+    nrow = len(metrics)
+    fig, axes = plt.subplots(nrow, 3, figsize=(7.2, 2.6 + 2.0 * (nrow - 1)), sharex="col", squeeze=False)
+    cols = [(lambda n, d: n, lambda n, d: d == 3, "Gaussian, $d=3$"),
+            (lambda n, d: n, lambda n, d: d == 64, "Gaussian, $d=64$"),
+            (lambda n, d: d, lambda n, d: n == 10000, "Gaussian, $N=10^4$")]
+    for i, metric in enumerate(metrics):
+        data = series(rows, metric)
+        for j, (xs, fixed, title) in enumerate(cols):
+            panel(axes[i, j], data, xs, fixed, title if i == 0 else None, methods,
+                  ylog=metric != "cost" or j == 2)
+        axes[i, 0].set_ylabel(YLABEL[metric], fontsize=FONT)
+    axes[-1, 0].set_xlabel("$N=M$", fontsize=FONT)
+    axes[-1, 1].set_xlabel("$N=M$", fontsize=FONT)
+    axes[-1, 2].set_xlabel("$d$", fontsize=FONT)
+    for ax in axes[-1, :2]:
         ax.set_xticks([5000, 10000, 20000, 50000])
         ax.set_xticklabels(["5k", "10k", "20k", "50k"])
         ax.minorticks_off()
-    axes[2].set_xticks([4, 16, 64, 256, 1024])
-    axes[2].set_xticklabels(["4", "16", "64", "256", "1024"])
-    axes[2].minorticks_off()
-    fig.tight_layout(rect=(0, 0.17, 1, 1), w_pad=0.8)
+    axes[-1, 2].set_xticks([4, 16, 64, 256, 1024])
+    axes[-1, 2].set_xticklabels(["4", "16", "64", "256", "1024"])
+    axes[-1, 2].minorticks_off()
+    bottom = 0.17 / (1 + 0.77 * (nrow - 1))  # legend band keeps its height when rows are added
+    fig.tight_layout(rect=(0, bottom, 1, 1), w_pad=0.8, h_pad=0.6)
     methods = [Line2D([], [], color=c, marker=mk, ms=3.5, lw=1.2, label=lab) for _, _, lab, c, mk in methods]
     params = [Line2D([], [], color="0.3", ls=s, lw=1.1, label=lab) for s, lab in zip(STYLES, PARAM_LABELS)]
     params.append(Line2D([], [], ls="", marker="o", color="0.3", mfc="white", ms=3.5, label="hit max_iter"))
-    fig.legend(handles=methods, loc="upper center", bbox_to_anchor=(0.5, 0.225), ncol=3, fontsize=FONT - 1.5,
+    fig.legend(handles=methods, loc="upper center", bbox_to_anchor=(0.5, bottom * 0.225 / 0.17), ncol=3, fontsize=FONT - 1.5,
                frameon=False, handlelength=1.8, columnspacing=1.0, labelspacing=0.3)
-    fig.legend(handles=params, loc="upper center", bbox_to_anchor=(0.5, 0.225 - 0.052 * -(-len(methods) // 3)), ncol=4, fontsize=FONT - 1.5,
+    fig.legend(handles=params, loc="upper center", bbox_to_anchor=(0.5, bottom * (0.225 - 0.052 * -(-len(methods) // 3)) / 0.17), ncol=4, fontsize=FONT - 1.5,
                frameon=False, handlelength=1.8, columnspacing=1.2)
     fig.savefig(args.out, bbox_inches="tight", pad_inches=0.02)
     fig.savefig(args.out.rsplit(".", 1)[0] + ".png", dpi=170, bbox_inches="tight", pad_inches=0.02)

@@ -13,8 +13,9 @@ eps at each d is the value where FlashSinkhorn-alternating fp32 reaches a ~5%
 cost gap at N=10,000 (scripts/speedup_calibrate_eps.py), so every point sits at
 roughly the same accuracy. The stop rule is the speedup benchmark's:
 max(|df|, |dg|) < 1e-5 * median(C) between checkpoints (tol/2 for the damped
-methods), check_every=5, max_iter=20000. No exact-OT reference (infeasible at
-N=50,000), so cost_gap_pct is N/A; runtime and memory are the outputs.
+methods), check_every=5, max_iter=20000 (SCAL_MAX_ITER overrides). No exact-OT
+reference (infeasible at N=50,000), so cost_gap_pct is N/A; runtime, memory and
+the plan cost <C, P> are the outputs.
 
 The points are several BenchConfigs (CONFIGS) sharing one output directory,
 because s depends on N. SCAL_PART=small (N <= 20,000, including the d-sweep) or
@@ -42,6 +43,9 @@ L_VALUES = [100, 1000, 5000]
 SPARSINK_K = [4, 16, 64]
 SEEDS = [0, 1, 2, 3, 4]
 PART = os.environ.get("SCAL_PART", "")  # "", "small" (N <= 20,000) or "large" (N >= 30,000)
+MAX_ITER = int(os.environ.get("SCAL_MAX_ITER", "20000"))
+# SCAL_FIGURE_ONLY=1 runs only the methods in the scalability figure: fp32, no symmetric variants.
+FIGURE_ONLY = os.environ.get("SCAL_FIGURE_ONLY", "") == "1"
 
 # d -> (median(C) at N=10,000 seed 0, eps at a ~5% cost gap), from
 # scripts/speedup_calibrate_eps.py.
@@ -70,10 +74,10 @@ def _config(n: int, d: int) -> BenchConfig:
         sizes=[n],
         dims=[d],
         problems=[("gaussian", d, [eps])],
-        n_iters=20000,
+        n_iters=MAX_ITER,
 
         stop_mode="potential",
-        max_iter=20000,
+        max_iter=MAX_ITER,
         stop_tol=REL_TOL,
         stop_tol_by_problem={("gaussian", d): REL_TOL * median},
         check_every=5,
@@ -82,7 +86,7 @@ def _config(n: int, d: int) -> BenchConfig:
         warmup_iters=10,
         rep=5,
         tf32=False,
-        flash_tf32=[False, True],
+        flash_tf32=[False] if FIGURE_ONLY else [False, True],
 
         seeds=SEEDS,
 
@@ -93,7 +97,7 @@ def _config(n: int, d: int) -> BenchConfig:
         no_sinkslot=True,
 
         no_sinkslotcuda=False,
-        no_sinkslotcuda_symmetric=False,
+        no_sinkslotcuda_symmetric=FIGURE_ONLY,
         sinkslotcuda_slices=L_VALUES,
 
         no_sparsink=False,
@@ -104,7 +108,7 @@ def _config(n: int, d: int) -> BenchConfig:
         no_ott=True,
         no_rmae_check=True,
         no_geomloss=False,
-        no_flash_symmetric=False,
+        no_flash_symmetric=FIGURE_ONLY,
         no_flash_alternating=False,
 
         isolate=True,
