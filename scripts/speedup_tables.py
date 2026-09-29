@@ -145,6 +145,57 @@ def latex_speedup_rows(configs, thresholds=(1.0, 10.0), wrap=lambda cell: cell) 
     return "\n".join(lines)
 
 
+SWEPT = {  # method -> LaTeX description of its swept parameter
+    "srot": r"$L\in\{25,50,100,250,500,1000,2500,5000\}$",
+    "sinkslotcuda": r"$L\in\{25,50,100,250,500,1000,2500,5000\}$",
+    "sinkslotcuda_symmetric": r"$L\in\{25,50,100,250,500,1000,2500,5000\}$",
+    "spar_sink": r"$s=k s_0$, $k\in\{1,2,4,\dots,128\}$",
+}
+
+
+def _sig(x: float) -> str:
+    return f"{x:.3g}"
+
+
+def latex_param_rows(configs, thresholds=(1.0, 10.0), red_slices=(), wrap=lambda cell: cell) -> str:
+    """Rows of Tables/speedup_params.tex: the runtime of each method's fastest
+    configuration (as in Tables/speedup_potential.tex, fp32 methods only) with the
+    selected eps and L (or k = s / s0) under it. Cells of the (dataset, d) slices in
+    red_slices are wrapped in \\textcolor{red}."""
+    s0 = {}
+    for key in configs:
+        if key[2] == "spar_sink":
+            s0.setdefault((key[0], key[1]), set()).add(int(key[5]))
+    s0 = {k: min(v) for k, v in s0.items()}
+    lines = []
+    fp32 = [(m, tf32, lab) for m, tf32, lab in METHODS if not tf32]
+    for i, (method, tf32, label) in enumerate(fp32):
+        name = f"\\textbf{{{label}}}" if method.startswith("sinkslotcuda") else label
+        cells = []
+        for dataset, d in SLICES:
+            for T in thresholds:
+                fastest, _ = best(configs, dataset, d, method, tf32, T)
+                if fastest is None:
+                    cell = "---"
+                else:
+                    key, c = fastest
+                    params = [f"$\\varepsilon$={_sig(key[4])}"]
+                    if method == "spar_sink":
+                        params.append(f"$k$={round(int(key[5]) / s0[(dataset, d)])}")
+                    elif key[5] not in ("N/A", ""):
+                        params.append(f"$L$={key[5]}")
+                    cell = (f"\\makecell{{{_fmt_ms(c['total_ms'])}{_flags_tex(c['flags'])}\\\\"
+                            f"{{\\scriptsize {', '.join(params)}}}}}")
+                if (dataset, d) in red_slices:
+                    cell = f"\\textcolor{{red}}{{{cell}}}"
+                cells.append(wrap(cell))
+        row = ("\\rowcolor{LightGray}\n" if i % 2 else "") + name + " & " + SWEPT.get(method, "---")
+        for j in range(0, len(cells), len(thresholds)):
+            row += "\n & " + " & ".join(cells[j:j + len(thresholds)])
+        lines.append(row + " \\\\")
+    return "\n".join(lines)
+
+
 def latex_threshold_rows(configs, kind: str, thresholds=(1.0, 10.0), wrap=lambda cell: cell) -> str:
     """Rows of Tables/convergence.tex (kind="iters": iterations of the fastest
     configuration), Tables/memory.tex (kind="mem": lowest mean peak memory, MB) or
