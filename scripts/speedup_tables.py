@@ -151,7 +151,8 @@ def _sig(x: float) -> str:
     return f"{x:.3g}"
 
 
-def latex_param_rows(configs, thresholds=(1.0, 10.0), red_slices=(), wrap=lambda cell: cell) -> str:
+def latex_param_rows(configs, thresholds=(1.0, 10.0), red_slices=(), wrap=lambda cell: cell,
+                     red_pairs=()) -> str:
     """Rows of Tables/speedup_params.tex: the runtime of each method's fastest
     configuration (as in Tables/speedup_potential.tex, fp32 methods only), its
     standard deviation over seeds in parentheses and SinkSLOT (alternating)'s speedup
@@ -186,7 +187,7 @@ def latex_param_rows(configs, thresholds=(1.0, 10.0), red_slices=(), wrap=lambda
                     elif ref is not None:
                         top += f"\\spd{{{c['total_ms'] / ref[1]['total_ms']:.1f}}}"
                     cell = f"\\makecell{{{top}\\\\{{\\scriptsize {', '.join(params)}}}}}"
-                if (dataset, d) in red_slices:
+                if (dataset, d) in red_slices or (method, tf32, dataset, d) in red_pairs:
                     cell = f"\\textcolor{{red}}{{{cell}}}"
                 cells.append(wrap(cell))
         row = ("\\rowcolor{LightGray}\n" if i % 2 else "") + name
@@ -197,7 +198,7 @@ def latex_param_rows(configs, thresholds=(1.0, 10.0), red_slices=(), wrap=lambda
 
 
 def latex_threshold_rows(configs, kind: str, thresholds=(1.0, 10.0), wrap=lambda cell: cell,
-                         fp32_only=False, red_slices=()) -> str:
+                         fp32_only=False, red_slices=(), red_pairs=()) -> str:
     """Rows of Tables/convergence.tex (kind="iters": iterations of the fastest
     configuration), Tables/memory.tex (kind="mem": lowest mean peak memory, MB) or
     Tables/memory_fastest.tex (kind="memfast": peak memory of the fastest configuration, MB).
@@ -229,7 +230,7 @@ def latex_threshold_rows(configs, kind: str, thresholds=(1.0, 10.0), wrap=lambda
         lowest.append(min(shown, key=lambda t: float(t.replace("{,}", ""))) if shown else None)
 
     lines = []
-    for i, ((method, _, label), row) in enumerate(zip(methods, table)):
+    for i, ((method, tf32, label), row) in enumerate(zip(methods, table)):
         name = f"\\textbf{{{label}}}" if method.startswith("sinkslotcuda") else label
         cells = []
         for j, entry in enumerate(row):
@@ -240,7 +241,7 @@ def latex_threshold_rows(configs, kind: str, thresholds=(1.0, 10.0), wrap=lambda
                 if text == lowest[j]:
                     text = f"\\textbf{{{text}}}"
                 text = wrap(text + _flags_tex(entry[1]))
-            if columns[j] in red_slices:
+            if columns[j] in red_slices or (method, tf32) + columns[j] in red_pairs:
                 text = f"\\textcolor{{red}}{{{text}}}"
             cells.append(text)
         lines.append(("\\rowcolor{LightGray}\n" if i % 2 else "") + name + " & " + " & ".join(cells) + " \\\\")
