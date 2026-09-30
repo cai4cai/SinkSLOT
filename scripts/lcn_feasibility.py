@@ -34,6 +34,8 @@ def main() -> None:
     ap.add_argument("--landmarks", default="50,200")
     ap.add_argument("--neighbors", default="16,64")
     ap.add_argument("--max-iter", type=int, default=50000)
+    ap.add_argument("--eps-over-median", default="",
+                    help="comma-separated eps / median(C) values to run instead of the slice's eps grid")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -42,6 +44,8 @@ def main() -> None:
     key = (args.dataset, args.d)
     tol = speedup.REL_TOL * speedup.MEDIAN_C[key]
     eps_values = speedup.eps_grid(*speedup.EPS_CROSSINGS[key])
+    if args.eps_over_median:
+        eps_values = [float(r) * speedup.MEDIAN_C[key] for r in args.eps_over_median.split(",")]
     x, y, a, b = _sample_problem(n, n, args.d, device, args.dataset, args.seed)
     ref = _cached_exact_ot_reference(n, n, args.d, args.seed, x, y, a, b, dataset=args.dataset)
 
