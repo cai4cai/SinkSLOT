@@ -388,7 +388,8 @@ def test_sinkslot_symmetric_torch_potential_mode_converges():
     phi, psi, it, converged, change = sinkslot_symmetric_torch(
         rows, cols, lam, log_a, log_b, n, m, 20000, stop=stop, eps=eps)
     assert converged
-    assert change < stop.tol
+    # The damped (alpha=0.5) update is compared against alpha * stop.tol.
+    assert change < 0.5 * stop.tol
 
 
 def test_sinkslot_symmetric_converges_to_the_same_plan_as_alternating():
