@@ -170,3 +170,57 @@ def lcn_plan_metrics(f: LCNFactors, res: LCNResult, x, y, chunk: Optional[int] =
         r[s:e] = p.sum(1)
         c += p.sum(0)
     return {"plan_cost": cost, "row_sums": r, "col_sums": c, "negative_mass": -neg}
+
+
+class SparseKernel(NamedTuple):
+    rows: torch.Tensor       # (P,) kept pairs
+    cols: torch.Tensor       # (P,)
+    cost: torch.Tensor       # (P,) exact squared distances on the pairs
+
+
+def sparse_kernel(x, y, neighbors: int) -> SparseKernel:
+    """The sparse Sinkhorn of the same paper (lcn/sparse_sinkhorn.py): the kernel is kept
+    only on the k-nearest-neighbour pairs (both directions) and is zero elsewhere."""
+    x, y = x.double(), y.double()
+    rows, cols = knn_pairs(x, y, neighbors)
+    return SparseKernel(rows, cols, (x[rows] - y[cols]).square().sum(1))
+
+
+def _sparse_lse(vals: torch.Tensor, idx: torch.Tensor, size: int) -> torch.Tensor:
+    mx = torch.full((size,), -torch.inf, dtype=vals.dtype, device=vals.device).scatter_reduce(
+        0, idx, vals, "amax")
+    s = torch.zeros(size, dtype=vals.dtype, device=vals.device).index_add(0, idx, torch.exp(vals - mx[idx]))
+    return torch.log(s) + mx
+
+
+def sparse_sinkhorn(k: SparseKernel, a, b, eps: float, max_iter: int, tol: float,
+                    check_every: int = 5) -> LCNResult:
+    """Alternating log-domain Sinkhorn on the sparse kernel (arg_log_sparse_sinkhorn), with
+    weighted marginals and the benchmark's potential-change stop rule. failed=True if a
+    row or column has no kept pair (its log-sum is -inf)."""
+    log_a, log_b = a.double().log(), b.double().log()
+    n, m = log_a.numel(), log_b.numel()
+    sim = -k.cost / eps
+    u, v = torch.zeros_like(log_a), torch.zeros_like(log_b)
+    pu, pv = u, v
+    for it in range(1, max_iter + 1):
+        u = log_a - _sparse_lse(sim + v[k.cols], k.rows, n)
+        v = log_b - _sparse_lse(sim + u[k.rows], k.cols, m)
+        if it % check_every == 0:
+            if not (torch.isfinite(u).all() and torch.isfinite(v).all()):
+                return LCNResult(u, v, it, False, True)
+            change = eps * max(float((u - pu).abs().max()), float((v - pv).abs().max()))
+            if change < tol:
+                return LCNResult(u, v, it, True, False)
+            pu, pv = u, v
+    return LCNResult(u, v, max_iter, False, False)
+
+
+def sparse_plan_metrics(k: SparseKernel, res: LCNResult, eps: float) -> dict:
+    """<C, P>, row and column sums of the sparse plan P_ij = exp(u_i + v_j - C_ij / eps)."""
+    p = torch.exp(res.u[k.rows] + res.v[k.cols] - k.cost / eps)
+    n, m = res.u.numel(), res.v.numel()
+    return {"plan_cost": float((p * k.cost).sum()),
+            "row_sums": torch.zeros(n, dtype=p.dtype, device=p.device).index_add(0, k.rows, p),
+            "col_sums": torch.zeros(m, dtype=p.dtype, device=p.device).index_add(0, k.cols, p),
+            "negative_mass": 0.0}
