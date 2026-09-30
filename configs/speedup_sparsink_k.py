@@ -3,7 +3,7 @@ slices where k <= 128 does not reach the 1% or 10% cost gap (8-Gaussians,
 Gaussian d=3 and d=64). Otherwise configs/speedup.py: same eps grids, stop rule,
 seeds and timing protocol, with max_iter=50,000.
 
-SPARSINK_K_OUTPUT_DIR overrides the output directory.
+SPARSINK_K_OUTPUT_DIR overrides the output directory; SPARSINK_K_MAX_ITER overrides max_iter.
 
     python run.py --config speedup_sparsink_k --count
 """
@@ -15,7 +15,7 @@ from configs import speedup
 
 K_VALUES = (256, 512)
 SLICES = {("8gaussians", 2), ("gaussian", 3), ("gaussian", 64)}
-MAX_ITER = 50_000
+MAX_ITER = int(os.environ.get("SPARSINK_K_MAX_ITER", "50000"))
 
 
 def build_config():
