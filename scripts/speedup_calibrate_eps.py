@@ -7,6 +7,7 @@ Prints one line per eps and writes a CSV. Rows that hit max_iter still report
 their gap.
 
     python scripts/speedup_calibrate_eps.py --dataset 8gaussians --d 2 --out calib.csv
+    python scripts/speedup_calibrate_eps.py --dataset gaussian --d 4 --max-iter 500000 --only 1,2 --out rerun.csv
 """
 
 import argparse
@@ -30,6 +31,8 @@ def main() -> None:
     ap.add_argument("--d", type=int, required=True)
     ap.add_argument("--points", type=int, default=20)
     ap.add_argument("--n", type=int, default=speedup.N)
+    ap.add_argument("--max-iter", type=int, default=20000)
+    ap.add_argument("--only", default="", help="comma-separated indices of the eps grid to run (default: all)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -40,15 +43,18 @@ def main() -> None:
         median = lower_median_sq_cost(x, y)
         del x, y
     print(f"median(C) = {median!r}", flush=True)
-    stop = StopCfg(mode="potential", max_iter=20000, tol=speedup.REL_TOL * median, check_every=5)
+    stop = StopCfg(mode="potential", max_iter=args.max_iter, tol=speedup.REL_TOL * median, check_every=5)
     fields = ["dataset", "d", "n", "median_c", "eps", "eps_over_median", "cost_gap_pct", "iters_run",
               "converged", "total_ms"]
     with open(args.out, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields)
         writer.writeheader()
-        for factor in np.geomspace(1e-4, 0.5, args.points):
+        only = {int(i) for i in args.only.split(",") if i}
+        for i, factor in enumerate(np.geomspace(1e-4, 0.5, args.points)):
+            if only and i not in only:
+                continue
             eps = float(f"{median * factor:.6g}")
-            r = bench_flashsinkhorn(args.n, args.n, args.d, eps, 20000, device, warmup=0, rep=1,
+            r = bench_flashsinkhorn(args.n, args.n, args.d, eps, args.max_iter, device, warmup=0, rep=1,
                                     backend="alternating", allow_tf32=False, dataset=args.dataset,
                                     stop=stop, seed=0)
             row = dict(dataset=args.dataset, d=args.d, n=args.n, median_c=median, eps=eps,
