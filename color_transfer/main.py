@@ -104,7 +104,8 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
     begins with an undamped alpha=1 step, so chained calls are not one
     continuous run. Acceptable cost here since this only runs for 3 of 132
     pairs, and the early break above keeps restarts from running past
-    convergence. Damped methods (GeomLoss, FlashSinkhorn symmetric) use tol/2.
+    convergence. FlashSinkhorn symmetric is passed tol/2 (GeomLoss applies the
+    damping factor to its threshold internally).
     """
     checkpoints = []
 
@@ -156,13 +157,13 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
         return checkpoints
 
     if method_key == "geomloss_online":
-        geomloss_online(sc, tc, sw, tw, eps, 10, threshold=tol / 2, check_every=check_every)  # warmup
+        geomloss_online(sc, tc, sw, tw, eps, 10, threshold=tol, check_every=check_every)  # warmup
 
         for n_iter in TRAJECTORY_CHECKPOINTS:
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             f, g, total_iters, converged, _, _ = geomloss_online(
-                sc, tc, sw, tw, eps, n_iter, threshold=tol / 2, check_every=check_every)
+                sc, tc, sw, tw, eps, n_iter, threshold=tol, check_every=check_every)
             torch.cuda.synchronize()
             solve_dt = time.perf_counter() - t0
             viol_lmax, row_l1, col_l1, mass_l1, _ = plan_diagnostics_dense(sc, tc, sw, tw, eps, f, g)
@@ -249,8 +250,8 @@ def _sparse_result(name, phi, psi, rows, cols, S, cost_mat, dt, peak, it, conver
 
 def sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, symmetric=False):
     """SinkSLOT via Gauss-Seidel (symmetric=False) or alpha=0.5 Jacobi
-    (symmetric=True) sparse Sinkhorn. tol/2 corrects the Jacobi backend's
-    alpha-damped step, matching FlashSinkhorn-symmetric's own correction.
+    (symmetric=True) sparse Sinkhorn. The symmetric solver compares the
+    potential change against alpha * tol itself, so both variants get tol.
     """
     from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton, sinkslot_symmetric_triton
     from sinkslot.solver import (
@@ -259,7 +260,6 @@ def sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, sy
 
     ot1d = _ot_1d_coo_batched_cuda if sc.is_cuda else _ot_1d_coo_batched
     solver = sinkslot_symmetric_triton if symmetric else sinkslot_alternating_triton
-    solve_tol = tol / 2 if symmetric else tol
 
     def solve():
         n, m = sc.shape[0], tc.shape[0]
@@ -271,7 +271,7 @@ def sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, sy
         c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m)
         phi, psi, it, converged, change = solver(
             r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, sw.log(), tw.log(), n, m, max_iter,
-            stop=StopCfg(mode="potential", max_iter=max_iter, check_every=check_every, tol=solve_tol), eps=eps)
+            stop=StopCfg(mode="potential", max_iter=max_iter, check_every=check_every, tol=tol), eps=eps)
         dual_cost = float((sw * (eps * phi)).sum() + (tw * (eps * psi)).sum())
         return phi, psi, it, converged, dual_cost, rows, cols, S, cost_mat
 
@@ -287,7 +287,8 @@ def sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, sy
 
 def flashsinkhorn_row(name, sc, tc, sw, tw, eps, max_iter, tol, check_every, symmetric, allow_tf32=True):
     from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_alternating, sinkhorn_flashstyle_symmetric
-    # tol/2 for the alpha=0.5 damped (symmetric) backend, same correction as sinkslot_row's.
+    # tol/2 for the alpha=0.5 damped (symmetric) backend: the library compares its threshold
+    # directly against the damped change.
     solve_tol = tol / 2 if symmetric else tol
 
     def solve(n_iters, threshold):
@@ -312,11 +313,11 @@ def flashsinkhorn_row(name, sc, tc, sw, tw, eps, max_iter, tol, check_every, sym
 
 
 def geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
-    # tol/2 for GeomLoss's alpha=0.5 damped updates, same as the symmetric backends.
+    # geomloss_online applies the 0.5 damping factor to the threshold itself.
     def solve():
-        return geomloss_online(sc, tc, sw, tw, eps, max_iter, threshold=tol / 2, check_every=check_every)
+        return geomloss_online(sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every)
 
-    geomloss_online(sc, tc, sw, tw, eps, 10, threshold=tol / 2, check_every=check_every)  # warmup
+    geomloss_online(sc, tc, sw, tw, eps, 10, threshold=tol, check_every=check_every)  # warmup
     (f, g, it, converged, dual_cost, change), dt, peak = measure(solve)
     return _dense_result("GeomLoss (online)", f, g, dt, peak, it, converged, dual_cost, sc, tc, sw, tw, eps)
 

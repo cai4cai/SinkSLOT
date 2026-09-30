@@ -36,9 +36,11 @@ def geomloss_online(
     itself at threshold=None. Always symmetric (damped-Jacobi) updates;
     GeomLoss has no alternating/Gauss-Seidel option at any level.
 
-    Stop rule: max(|df|, |dg|) < threshold between consecutive checkpoints
-    (every check_every iterations), on the damped iterates -- the same rule
-    as SinkSLOT's "potential" mode and FlashSinkhorn-symmetric's native check.
+    Stop rule: max(|df|, |dg|) < 0.5 * threshold between consecutive checkpoints
+    (every check_every iterations), on the damped iterates. The 0.5 is the
+    damping weight: each update moves the potentials by half the undamped step,
+    so threshold means the same as for an undamped solver (as in SinkSLOT's
+    symmetric "potential" mode, which compares against alpha * tol).
 
     Returns (f, g, n_iters_used, converged, cost, last_change).
     """
@@ -69,7 +71,7 @@ def geomloss_online(
             change = max((f_ba - prev_f).abs().max().item(), (g_ab - prev_g).abs().max().item())
             last_change = change
             prev_f, prev_g = f_ba, g_ab
-            if change < threshold:
+            if change < 0.5 * threshold:
                 n_iters_used = i + 1
                 converged = True
                 break

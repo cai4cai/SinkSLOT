@@ -208,7 +208,7 @@ class TimingResult:
     marg_viol_l1: Optional[float] = None  # ||r-a||_1 + ||c-b||_1, achieved vs target marginals
     total_ms: Optional[float] = None  # setup_ms + mean_ms (mean_ms when there is no setup)
     stop_mode: Optional[str] = None  # StopCfg.mode used for this row
-    stop_tol_eff: Optional[float] = None  # threshold passed to the solver (tol/2 for damped methods)
+    stop_tol_eff: Optional[float] = None  # threshold the potential change is compared to (tol/2 for damped methods)
     peak_alloc_mb: Optional[float] = None  # torch.cuda.max_memory_allocated over the timed calls
     rounded_cost_gap_pct: Optional[float] = None  # cost_gap_pct of the plan rounded onto the polytope
     plan_cost: Optional[float] = None  # <C, P> of the returned plan (not rounded)
@@ -634,9 +634,11 @@ class StopCfg:
       "fixed"      run exactly n_iters.
       "potential"  max(|df|, |dg|) < tol between consecutive checkpoints --
                    FlashSinkhorn's native rule. Every method supports it.
-                   Methods with alpha=0.5 damped updates (flash_symmetric,
-                   sinkslotcuda_symmetric, geomloss_online) are passed tol/2,
-                   since the observed change is half the undamped step.
+                   Methods with alpha=0.5 damped updates compare the change
+                   against tol/2, since it is half the undamped step:
+                   sinkslotcuda_symmetric and geomloss_online apply the factor
+                   inside the solver; flash_symmetric (official library) is
+                   passed tol/2.
       "marginal"   L-infinity marginal violation <= tol (SROT, Spar-Sink,
                    SinkSLOT only).
       "scaling"    Spar-Sink's own rule on u = exp(f/eps), v = exp(g/eps),
@@ -1034,10 +1036,10 @@ def bench_flashsinkhorn(
     """FlashSinkhorn via the official low-level solvers
     (flash_sinkhorn.sinkhorn_solvers.sinkhorn_flashstyle_{symmetric,alternating}).
 
-    backend: "symmetric" (GeomLoss-style alpha=0.5 damped updates, passed tol/2
-    under "potential") or "alternating" (OTT-JAX-style). allow_tf32 is passed to
-    the Triton kernels; everything outside them runs strict fp32. Stop modes:
-    "fixed" and "potential" (the library's own threshold/check_every check).
+    backend: "symmetric" (GeomLoss-style alpha=0.5 damped updates; the library
+    compares its threshold directly, so it is passed tol/2 under "potential") or
+    "alternating" (OTT-JAX-style). allow_tf32 is passed to the Triton kernels;
+    everything outside them runs strict fp32. Stop modes: "fixed" and "potential" (the library's own threshold/check_every check).
 
     iters_run counts loop iterations: the symmetric solver's n_iters_used also
     counts its initial alpha=1 step, which is subtracted.
@@ -1103,7 +1105,8 @@ def bench_geomloss_online(
     """GeomLoss online (KeOps) via reference_solvers.geomloss_online: GeomLoss's
     own sinkhorn_loop update math at a fixed eps, with the potential-change check.
 
-    Always alpha=0.5 damped updates, so "potential" is passed tol/2. Stop modes:
+    Always alpha=0.5 damped updates; geomloss_online compares against half the
+    threshold, so it is passed tol. Stop modes:
     "fixed" and "potential". Cost: SqDist(X,Y) = ||x-y||^2. Strict fp32.
     seed: data-generation seed (x, y, a, b).
     """
@@ -1118,10 +1121,8 @@ def bench_geomloss_online(
     _stop = stop or StopCfg.fixed()
     if _stop.mode not in ("fixed", "potential"):
         raise ValueError(f"{method} does not support stop mode {_stop.mode!r}; choices: ('fixed', 'potential')")
-    stop_eff = _damped(_stop)
-
     def solve(cap):
-        st, it_fixed = _capped(stop_eff, n_iters, cap)
+        st, it_fixed = _capped(_stop, n_iters, cap)
         if st.mode == "fixed":
             return geomloss_online(x, y, a, b, eps, it_fixed)
         return geomloss_online(x, y, a, b, eps, st.max_iter, threshold=st.tol, check_every=st.check_every)
@@ -1131,7 +1132,7 @@ def bench_geomloss_online(
             solve, warmup, warmup_iters, rep, nvtx=nvtx, nvtx_label=f"{method} n={n} d={d} eps={eps}")
     except torch.cuda.OutOfMemoryError:
         return _oom_result(method, n, m, d, eps, n_iters, dataset=dataset, seed=seed)
-    res = _ok_result(method, n, m, d, eps, stats, peak, device, stop=_stop, stop_eff=stop_eff,
+    res = _ok_result(method, n, m, d, eps, stats, peak, device, stop=_stop, stop_eff=_damped(_stop),
                      n_iters=n_iters, iters_run=iters_run, converged=converged,
                      dataset=dataset, tf32=False, seed=seed)
 
@@ -1502,7 +1503,7 @@ def bench_sinkslotcuda(
 
     variant: "alternating" (sinkslot_alternating_triton, method "sinkslotcuda") or
     "symmetric" (sinkslot_symmetric_triton, alpha=0.5 damped, method
-    "sinkslotcuda_symmetric", passed tol/2 under "potential").
+    "sinkslotcuda_symmetric"; the solver compares against alpha * tol under "potential").
     Stop modes: "fixed", "potential", "marginal".
 
     seed: data-generation seed (x, y, a, b); the projection directions use seed 0.
@@ -1520,7 +1521,6 @@ def bench_sinkslotcuda(
     x, y, a, b = _sample_problem(n, m, d, device, dataset, seed)
     log_a, log_b = a.log(), b.log()
     _stop = stop or StopCfg.fixed()
-    stop_eff = _damped(_stop) if symmetric else _stop
     kw = dict(dataset=dataset, tf32=False, srot_slices=slices, seed=seed)
 
     def build():
@@ -1537,7 +1537,7 @@ def bench_sinkslotcuda(
         return _oom_result(method, n, m, d, eps, n_iters, **kw)
 
     def solve(cap):
-        st, it_fixed = _capped(stop_eff, n_iters, cap)
+        st, it_fixed = _capped(_stop, n_iters, cap)
         return solver(*csr, log_a, log_b, n, m, it_fixed, st, eps=eps)
 
     try:
@@ -1545,7 +1545,8 @@ def bench_sinkslotcuda(
             solve, warmup, warmup_iters, rep, nvtx=nvtx, nvtx_label=f"{method} n={n} d={d} eps={eps} L={slices}")
     except torch.cuda.OutOfMemoryError:
         return _oom_result(method, n, m, d, eps, n_iters, **kw)
-    res = _ok_result(method, n, m, d, eps, stats, peak, device, stop=_stop, stop_eff=stop_eff,
+    res = _ok_result(method, n, m, d, eps, stats, peak, device, stop=_stop,
+                     stop_eff=_damped(_stop) if symmetric else _stop,
                      n_iters=n_iters, iters_run=iters_run, converged=converged, setup_ms=setup_ms,
                      final_viol=final_viol, nnz=int(rows.numel()), **kw)
 
