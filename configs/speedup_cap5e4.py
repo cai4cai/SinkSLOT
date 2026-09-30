@@ -2,7 +2,7 @@
 runs that hit the 20,000 cap. Same eps grids, stop rule, seeds and timing
 protocol. SPEEDUP_CAP_SLICES (dataset:d entries separated by "+" or ",", e.g.
 "half_moon:2+gaussian:64"; "+" survives sbatch --export) restricts the slices; CAP5E4_OUTPUT_DIR overrides the
-output directory.
+output directory; CAP5E4_MAX_ITER overrides max_iter.
 
     python run.py --config speedup_cap5e4 --count
 """
@@ -12,7 +12,7 @@ import os
 
 from configs import speedup
 
-MAX_ITER = 50_000
+MAX_ITER = int(os.environ.get("CAP5E4_MAX_ITER", "50000"))
 
 
 def build_config():
