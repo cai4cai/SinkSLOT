@@ -113,7 +113,8 @@ def geomloss_multiscale(
 
     Conventions: cost ||x - y||**2 (GeomLoss: ||x - y||**2 / 2 with eps_GeomLoss = eps / 2, the
     same problem; the schedule, the jump test and the truncation are those of GeomLoss in its
-    units), updates damped by alpha (GeomLoss: 0.5), no debiasing, starting potentials from
+    units), schedule updates averaged with GeomLoss's 0.5 and continuation updates damped by
+    alpha, no debiasing, starting potentials from
     geomloss.ot's sinkhorn_initialization (GeomLoss's legacy loop starts from one softmin at the
     first, largest eps). geomloss.ot has no multiscale solver, so the clustering, the kernel
     truncation and the block-sparse softmin are the legacy ones; the rest is geomloss.ot's sample
@@ -170,9 +171,9 @@ def geomloss_multiscale(
     def lazy_updates(C_xy, C_yx, a_l, b_l):
         return lambda e, f, g: (softmin_sample(e, b_l, C_xy, g), softmin_sample(e, a_l, C_yx, f))
 
-    def step(updates, e, f, g):
+    def step(updates, e, f, g, w):
         ft, gt = updates(e, f, g)
-        return (1 - alpha) * f + alpha * ft, (1 - alpha) * g + alpha * gt
+        return (1 - w) * f + w * ft, (1 - w) * g + w * gt
 
     with torch.no_grad():
         C_xy_c, C_yx_c = cost_matrix(x_c, y_c), cost_matrix(y_c, x_c)
@@ -181,7 +182,9 @@ def geomloss_multiscale(
         updates = lazy_updates(C_xy_c, C_yx_c, a_log_c, b_log_c)
         kept, support, coarse = n * m, None, True
         for i, e in enumerate(schedule):
-            f, g = step(updates, e, f, g)
+            # GeomLoss's averaging (0.5): it removes the error shared by f and g in one update,
+            # which the schedule's single update per eps relies on before truncating.
+            f, g = step(updates, e, f, g, 0.5)
             if i != jump:
                 continue
             truncated = truncate is not None and i < len(schedule) - 1
@@ -218,7 +221,7 @@ def geomloss_multiscale(
         converged = False if threshold is not None else None
         last_change, prev_f, prev_g, cont = float("inf"), f, g, budget
         for i in range(budget):
-            f, g = step(updates, eps, f, g)
+            f, g = step(updates, eps, f, g, alpha)
             if threshold is not None and (i + 1) % check_every == 0:
                 last_change = max((f - prev_f).abs().max().item(), (g - prev_g).abs().max().item())
                 prev_f, prev_g = f, g
@@ -233,6 +236,24 @@ def geomloss_multiscale(
                 clusters=(len(x_c), len(y_c)), cluster_scale=None if cluster_scale is None else float(cluster_scale),
                 kept_fraction=kept / (n * m), support=support)
     return f_out, g_out, len(schedule) + cont, converged, cost, last_change, info
+
+
+def kmeans_labels(x: torch.Tensor, k: int, iters: int = 10, seed: int = 0) -> torch.Tensor:
+    """K-means cluster labels of the points x (Lloyd's algorithm, k-means++-style seeding from a
+    subsample, iters iterations), relabelled to 0..K-1 over the non-empty clusters; for
+    geomloss_multiscale's labels (Feydy et al. 2019 cluster with K-means)."""
+    g = torch.Generator(device=x.device).manual_seed(seed)
+    k = min(k, len(x))
+    sub = x[torch.randperm(len(x), generator=g, device=x.device)[:min(len(x), 20 * k)]]
+    c = sub[:1]
+    while len(c) < k:  # D^2 seeding, 64 centres at a time
+        d2 = torch.cdist(sub, c).min(1).values ** 2
+        c = torch.cat([c, sub[torch.multinomial(d2 + 1e-12, min(64, k - len(c)), generator=g)]])
+    for _ in range(iters):
+        lab = torch.cdist(x, c).argmin(1)
+        cnt = torch.bincount(lab, minlength=len(c)).clamp_min(1).unsqueeze(1)
+        c = torch.zeros_like(c).index_add_(0, lab, x) / cnt
+    return torch.unique(torch.cdist(x, c).argmin(1), return_inverse=True)[1]
 
 
 def flash_symmetric_alpha(x, y, a, b, alpha, *, eps, n_iters, allow_tf32, threshold, check_every):
