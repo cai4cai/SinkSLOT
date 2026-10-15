@@ -103,7 +103,7 @@ def geomloss_multiscale(
       2. eps-scaling, as GeomLoss: epsilon_schedule from the diameter down to eps, one damped
          symmetric update per entry, on the centroids first.
       3. jump, as GeomLoss: after the update before the first entry (from the third on) below
-         cluster_scale**2 (with labels: after the second entry), kernel_truncation keeps the
+         cluster_scale**2 (also with labels), kernel_truncation keeps the
          cluster pairs (k, l) with f_k + g_l > C(x_k, y_l) - truncate * eps_i at that entry's
          eps_i, and the coarse potentials are lifted to the points by one softmin. When no
          entry is below cluster_scale**2, the lift comes after the last entry, untruncated.
@@ -146,11 +146,11 @@ def geomloss_multiscale(
     n, d = sc.shape
     m = tc.shape[0]
     diameter = max_diameter(sc, tc)
+    if cluster_scale is None:
+        cluster_scale = diameter / (d ** 0.5 * 2000 ** (1 / d))
     if labels is None:
         if d > 3:
             raise ValueError(f"GeomLoss multiscale clusters points on a grid in d <= 3; got d={d}.")
-        if cluster_scale is None:
-            cluster_scale = diameter / (d ** 0.5 * 2000 ** (1 / d))
         [a_c, a], [x_c, x], [ranges_x], perm_x = clusterize(sw, sc, scale=cluster_scale)
         [b_c, b], [y_c, y], [ranges_y], perm_y = clusterize(tw, tc, scale=cluster_scale)
     else:
@@ -163,7 +163,7 @@ def geomloss_multiscale(
     eps_g = [float(e) for e in epsilon_schedule(2, diameter, (eps / 2) ** 0.5, scaling)]
     jump = len(eps_g) - 1
     for i, e in enumerate(eps_g[2:]):
-        if labels is not None or (cluster_scale ** 2 > e):
+        if cluster_scale ** 2 > e:
             jump = i + 1
             break
     schedule = [2 * e for e in eps_g]
