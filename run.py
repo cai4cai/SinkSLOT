@@ -101,6 +101,8 @@ def build_command(
         cmd.append("--no-geomloss")
     if cfg.no_geomloss_multiscale:
         cmd.append("--no-geomloss-multiscale")
+    elif method in (None, "geomloss_multiscale"):
+        cmd += ["--geomloss-truncate", str(cfg.geomloss_truncate)]
     if cfg.no_flash_symmetric:
         cmd.append("--no-flash-symmetric")
     if cfg.no_flash_alternating:

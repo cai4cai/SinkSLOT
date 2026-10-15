@@ -1151,13 +1151,16 @@ def bench_geomloss_multiscale(
     stop: "StopCfg" = None,
     seed: int = 0,
     warmup_iters: int = 10,
+    truncate: float = 5.0,
 ) -> TimingResult:
     """GeomLoss multiscale (KeOps, block-sparse) via reference_solvers.geomloss_multiscale:
     the two-scale scheme of GeomLoss's sinkhorn_multiscale at a fixed eps, with
-    GeomLoss's default cluster_scale and truncate, and the potential-change check
+    GeomLoss's default cluster_scale, kernel truncation margin truncate (in units of
+    eps; GeomLoss's default 5), and the potential-change check
     in both stages. d <= 3 only. Damping and stop threshold as bench_geomloss_online.
     The timed solve includes the clustering. nnz is the number of point pairs the
-    fine stage sums over (every pair when the kernel is not truncated).
+    fine stage sums over (every pair when the kernel is not truncated); the plan
+    metrics are those of the plan on these pairs.
     """
     method = "geomloss_multiscale"
     try:
@@ -1175,8 +1178,9 @@ def bench_geomloss_multiscale(
     def solve(cap):
         st, it_fixed = _capped(_stop, n_iters, cap)
         if st.mode == "fixed":
-            return geomloss_multiscale(x, y, a, b, eps, it_fixed)
-        return geomloss_multiscale(x, y, a, b, eps, st.max_iter, threshold=st.tol, check_every=st.check_every)
+            return geomloss_multiscale(x, y, a, b, eps, it_fixed, truncate=truncate)
+        return geomloss_multiscale(x, y, a, b, eps, st.max_iter, threshold=st.tol, check_every=st.check_every,
+                                   truncate=truncate)
 
     try:
         stats, (f, g, iters_run, converged, _, _, info), peak = _time_solve(
@@ -1189,7 +1193,19 @@ def bench_geomloss_multiscale(
     res.nnz = int(round(info["kept_fraction"] * n * m))
 
     ref = _safe_metrics(lambda: {"ref": _exact_ref(rmae_check, n, m, d, seed, x, y, a, b, dataset)}).get("ref")
-    return _attach(res, _safe_metrics(lambda: _dense_plan_metrics(None, f, g, x, y, a, b, eps, ref)))
+    if info["support"] is None:
+        return _attach(res, _safe_metrics(lambda: _dense_plan_metrics(None, f, g, x, y, a, b, eps, ref)))
+    return _attach(res, _safe_metrics(lambda: _kept_plan_metrics(info["support"], f, g, x, y, a, b, eps, ref)))
+
+
+def _kept_plan_metrics(support, f, g, x, y, a, b, eps, ref) -> dict:
+    """_plan_metrics of a (x) b exp((f (+) g - C)/eps) on the kept pairs of a truncated
+    GeomLoss multiscale kernel only (zero elsewhere), the plan its fine stage solves."""
+    label_x, label_y, keep = support
+    cost = torch.cdist(x, y, p=2) ** 2
+    T = (a.log().unsqueeze(1) + b.log().unsqueeze(0) + (f.unsqueeze(1) + g.unsqueeze(0) - cost) / eps).exp()
+    T = T * keep[label_x][:, label_y]
+    return _plan_metrics(T, None, None, cost, x, y, a, b, ref)
 
 def bench_geomloss_tensorized(
     n: int, m: int, d: int, eps: float, n_iters: int,
@@ -2156,6 +2172,7 @@ def run_forward_benchmark(
     include_sinkslotcuda_symmetric: bool = False,
     warmup_iters: int = 10,
     include_geomloss_multiscale: bool = False,
+    geomloss_truncate: float = 5.0,
 ) -> List[TimingResult]:
     """Run forward pass benchmark.
 
@@ -2253,7 +2270,7 @@ def run_forward_benchmark(
             if include_geomloss_multiscale and d <= 3:
                 res = bench_geomloss_multiscale(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, rmae_check=rmae_check,
-                    dataset=dataset, stop=stop, seed=seed, warmup_iters=warmup_iters,
+                    dataset=dataset, stop=stop, seed=seed, warmup_iters=warmup_iters, truncate=geomloss_truncate,
                 )
                 results.append(res)
                 if verbose:
@@ -2876,6 +2893,7 @@ def run_forward_benchmark_subprocess(
             cmd.append("--no-geomloss")
         if args.no_geomloss_multiscale:
             cmd.append("--no-geomloss-multiscale")
+        cmd.extend(["--geomloss-truncate", str(args.geomloss_truncate)])
         if args.no_ott:
             cmd.append("--no-ott")
         if args.no_rmae_check:
@@ -3005,6 +3023,8 @@ def main() -> None:
     parser.add_argument("--no-geomloss", action="store_true", help="Skip GeomLoss benchmarks.")
     parser.add_argument("--no-geomloss-multiscale", action="store_true",
                         help="Skip GeomLoss multiscale benchmarks (run only for d <= 3).")
+    parser.add_argument("--geomloss-truncate", type=float, default=5.0,
+                        help="GeomLoss multiscale: kernel truncation margin, in units of eps (GeomLoss's default 5).")
     parser.add_argument("--no-flash-symmetric", action="store_true", help="Skip FlashSinkhorn symmetric backend.")
     parser.add_argument("--no-flash-alternating", action="store_true", help="Skip FlashSinkhorn alternating backend.")
     parser.add_argument(
@@ -3140,6 +3160,7 @@ def main() -> None:
             include_sinkslotcuda=include_sinkslotcuda,
             include_sinkslotcuda_symmetric=include_sinkslotcuda_symmetric,
             include_geomloss_multiscale=include_geomloss_multiscale,
+            geomloss_truncate=args.geomloss_truncate,
             warmup_iters=args.warmup_iters,
             sinkslotcuda_slices=sinkslotcuda_slices,
             stop=_stop_cfg,
@@ -3299,6 +3320,7 @@ def main() -> None:
             include_sinkslotcuda=include_sinkslotcuda,
             include_sinkslotcuda_symmetric=include_sinkslotcuda_symmetric,
             include_geomloss_multiscale=include_geomloss_multiscale,
+            geomloss_truncate=args.geomloss_truncate,
             warmup_iters=args.warmup_iters,
             sinkslotcuda_slices=sinkslotcuda_slices,
             stop=_stop_cfg,

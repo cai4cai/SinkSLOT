@@ -87,6 +87,7 @@ def geomloss_multiscale(
     sc: torch.Tensor, tc: torch.Tensor, sw: torch.Tensor, tw: torch.Tensor,
     eps: float, max_iter: int, threshold: Optional[float] = None, check_every: int = 5,
     cluster_scale: Optional[float] = None, truncate: Optional[float] = 5.0,
+    labels: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, int, Optional[bool], float, float, dict]:
     """GeomLoss multiscale (KeOps, block-sparse): the two-scale scheme of
     geomloss._legacy.sinkhorn_samples.sinkhorn_multiscale at a fixed eps, with the
@@ -116,8 +117,11 @@ def geomloss_multiscale(
     ||x - y||**2.
 
     Parameters besides eps: cluster_scale (default GeomLoss's
-    diameter / (sqrt(d) * 2000**(1/d)), about 2000 cells) and truncate (default
-    GeomLoss's 5; None keeps every pair).
+    diameter / (sqrt(d) * 2000**(1/d)), about 2000 cells), truncate (default
+    GeomLoss's 5; None keeps every pair) and labels: (label_x, label_y), integer
+    cluster labels of the points (e.g. K-means, as in Feydy et al. 2019), used
+    instead of the grid, as sinkhorn_multiscale's labels_x / labels_y. With labels,
+    any d is allowed and the kernel is always truncated (when truncate is not None).
 
     Stop rule (both stages): max(|df|, |dg|) < 0.5 * threshold between consecutive
     checkpoints, every check_every iterations, as in geomloss_online. With
@@ -125,8 +129,10 @@ def geomloss_multiscale(
 
     Returns (f, g, n_iters_used, converged, cost, last_change, info), with f, g
     in the input order, n_iters_used = coarse + fine iterations, and info holding
-    coarse_iters, fine_iters, the cluster counts and the kept fraction of the
-    N x M pairs.
+    coarse_iters, fine_iters, the cluster counts, the kept fraction of the
+    N x M pairs and support: None when every pair is kept, else (label_x, label_y,
+    keep), the cluster of each point in the input order and the kept cluster
+    pairs, so that pair (i, j) is kept iff keep[label_x[i], label_y[j]].
     """
     from functools import partial
 
@@ -141,13 +147,16 @@ def geomloss_multiscale(
 
     n, d = sc.shape
     m = tc.shape[0]
-    if d > 3:
-        raise ValueError(f"GeomLoss multiscale clusters points on a grid in d <= 3; got d={d}.")
-    if cluster_scale is None:
-        cluster_scale = max_diameter(sc, tc) / (d ** 0.5 * 2000 ** (1 / d))
-
-    [a_c, a], [x_c, x], [ranges_x], perm_x = clusterize(sw, sc, scale=cluster_scale)
-    [b_c, b], [y_c, y], [ranges_y], perm_y = clusterize(tw, tc, scale=cluster_scale)
+    if labels is None:
+        if d > 3:
+            raise ValueError(f"GeomLoss multiscale clusters points on a grid in d <= 3; got d={d}.")
+        if cluster_scale is None:
+            cluster_scale = max_diameter(sc, tc) / (d ** 0.5 * 2000 ** (1 / d))
+        [a_c, a], [x_c, x], [ranges_x], perm_x = clusterize(sw, sc, scale=cluster_scale)
+        [b_c, b], [y_c, y], [ranges_y], perm_y = clusterize(tw, tc, scale=cluster_scale)
+    else:
+        [a_c, a], [x_c, x], [ranges_x], perm_x = clusterize(sw, sc, labels=labels[0].int())
+        [b_c, b], [y_c, y], [ranges_y], perm_y = clusterize(tw, tc, labels=labels[1].int())
     a_log_c, b_log_c, a_log, b_log = (bk.stable_log(w) for w in (a_c, b_c, a, b))
     balanced = lambda f: f  # noqa: E731 - geomloss.ot's dampening(rho=None)
 
@@ -181,7 +190,7 @@ def geomloss_multiscale(
         f_ba = softmin_sample(eps, b_log_c, cost_matrix(x, y_c), g_c)
         g_ab = softmin_sample(eps, a_log_c, cost_matrix(y, x_c), f_c)
 
-        if truncate is not None and cluster_scale ** 2 > eps / 2:
+        if truncate is not None and (labels is not None or cluster_scale ** 2 > eps / 2):
             # Legacy kernel truncation and block-sparse softmin (KeOps ranges).
             (_, _, _, _, ranges_xy), (_, _, _, _, ranges_yx) = kernel_truncation(
                 (x_c, y_c, ranges_x, ranges_y, None), (y_c, x_c, ranges_y, ranges_x, None),
@@ -196,9 +205,14 @@ def geomloss_multiscale(
             size_x = (ranges_x[:, 1] - ranges_x[:, 0]).to(f_c.dtype)
             size_y = (ranges_y[:, 1] - ranges_y[:, 0]).to(f_c.dtype)
             kept = int((size_x @ keep.to(f_c.dtype) @ size_y).item())
+            label_x = torch.empty(n, dtype=torch.long, device=sc.device)
+            label_y = torch.empty(m, dtype=torch.long, device=sc.device)
+            label_x[perm_x] = torch.repeat_interleave(torch.arange(len(x_c), device=sc.device), size_x.long())
+            label_y[perm_y] = torch.repeat_interleave(torch.arange(len(y_c), device=sc.device), size_y.long())
+            support = (label_x, label_y, keep)
         else:
             updates = lazy_updates(cost_matrix(x, y), cost_matrix(y, x), a_log, b_log)
-            kept = n * m
+            kept, support = n * m, None
 
         f_ba, g_ab, fine_iters, converged, last_change = damped_loop(
             updates, f_ba, g_ab, max(max_iter - coarse_iters, 0))
@@ -207,7 +221,8 @@ def geomloss_multiscale(
     f[perm_x], g[perm_y] = f_ba, g_ab
     cost = float((sw * f).sum() + (tw * g).sum())
     info = dict(coarse_iters=coarse_iters, fine_iters=fine_iters, clusters=(len(x_c), len(y_c)),
-                cluster_scale=float(cluster_scale), kept_fraction=kept / (n * m))
+                cluster_scale=None if cluster_scale is None else float(cluster_scale),
+                kept_fraction=kept / (n * m), support=support)
     return f, g, coarse_iters + fine_iters, converged, cost, last_change, info
 
 

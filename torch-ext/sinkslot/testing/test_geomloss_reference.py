@@ -79,3 +79,26 @@ def test_rejects_more_than_three_dimensions():
     x, y, a, b = _problem(n=100, d=4)
     with pytest.raises(ValueError, match="d <= 3"):
         geomloss_multiscale(x, y, a, b, 0.1, 10)
+
+
+def test_truncated_plan_is_feasible_on_its_kept_pairs():
+    """Truncation leaves the dropped pairs unconstrained: the plan meets the marginals on the
+    kept pairs (support), not on the full kernel."""
+    from sinkslot.bench.plan_diagnostics import plan_diagnostics_dense
+
+    x, y, a, b = _problem()
+    eps = 0.01
+    f, g, _, conv, _, _, info = geomloss_multiscale(x, y, a, b, eps, 50000, threshold=1e-5, truncate=1.0)
+    assert conv and info["support"] is not None
+    label_x, label_y, keep = info["support"]
+    assert label_x.shape == (len(x),) and label_y.shape == (len(y),) and keep.dtype == torch.bool
+    viol_kept, *_ = plan_diagnostics_dense(x, y, a, b, eps, f, g, support=info["support"])
+    viol_full, *_ = plan_diagnostics_dense(x, y, a, b, eps, f, g)
+    assert viol_kept < 1e-5
+    assert viol_full > viol_kept
+
+
+def test_untruncated_run_has_no_support():
+    x, y, a, b = _problem(n=2000)
+    *_, info = geomloss_multiscale(x, y, a, b, 0.05, 20000, threshold=1e-6, truncate=None)
+    assert info["support"] is None and info["kept_fraction"] == 1.0

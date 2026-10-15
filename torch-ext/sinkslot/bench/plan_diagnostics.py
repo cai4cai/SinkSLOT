@@ -20,12 +20,17 @@ import torch
 from geomloss._legacy.utils import squared_distances
 
 
-def _dense_block(sc, tc, sw, tw, eps, f, g, start, end):
-    """cost_block, p_block = a*b*exp((f+g-C)/eps) for rows [start:end)."""
+def _dense_block(sc, tc, sw, tw, eps, f, g, start, end, support=None):
+    """cost_block, p_block = a*b*exp((f+g-C)/eps) for rows [start:end), zero outside
+    support = (label_x, label_y, keep) when given: pair (i, j) is kept iff
+    keep[label_x[i], label_y[j]] (GeomLoss multiscale's truncated kernel)."""
     cost_block = squared_distances(sc[start:end], tc)
     p_block = sw[start:end, None] * tw[None, :] * (
         (f[start:end, None] + g[None, :] - cost_block) / eps
     ).exp()
+    if support is not None:
+        label_x, label_y, keep = support
+        p_block = p_block * keep[label_x[start:end]][:, label_y]
     return cost_block, p_block
 
 
@@ -51,11 +56,12 @@ def _rounding_marginals(row_sum_g2, col_sum_g2, sw, tw, tiny):
 
 def plan_diagnostics_dense(
     sc: torch.Tensor, tc: torch.Tensor, sw: torch.Tensor, tw: torch.Tensor,
-    eps: float, f: torch.Tensor, g: torch.Tensor, block_n: int = 4096,
+    eps: float, f: torch.Tensor, g: torch.Tensor, block_n: int = 4096, support=None,
 ) -> Tuple[float, float, float, float, float]:
     """Returns (max L-infinity marginal violation, row_l1, col_l1, mass_l1,
-    <C,P>) for the dense a(x)b reference measure. row_l1+col_l1 is the
-    combined L1 marginal violation; mass_l1 = |1 - total mass|.
+    <C,P>) for the dense a(x)b reference measure, restricted to support when
+    given (see _dense_block). row_l1+col_l1 is the combined L1 marginal
+    violation; mass_l1 = |1 - total mass|.
     """
     n = sc.shape[0]
     row_sum = torch.empty_like(sw)
@@ -63,7 +69,7 @@ def plan_diagnostics_dense(
     transport_cost = 0.0
     for start in range(0, n, block_n):
         end = min(start + block_n, n)
-        cost_block, p_block = _dense_block(sc, tc, sw, tw, eps, f, g, start, end)
+        cost_block, p_block = _dense_block(sc, tc, sw, tw, eps, f, g, start, end, support)
         row_sum[start:end] = p_block.sum(dim=1)
         col_sum += p_block.sum(dim=0)
         transport_cost += float((cost_block * p_block).sum())
@@ -96,7 +102,7 @@ def sinkslot_plan_diagnostics(
 
 def plan_diagnostics_dense_rounded(
     sc: torch.Tensor, tc: torch.Tensor, sw: torch.Tensor, tw: torch.Tensor,
-    eps: float, f: torch.Tensor, g: torch.Tensor, block_n: int = 4096,
+    eps: float, f: torch.Tensor, g: torch.Tensor, block_n: int = 4096, support=None,
 ) -> Tuple[float, float, float]:
     """Marginal violation (L-infinity and L1) and true transport cost of
     the plan rounded onto the exact transport polytope, for the dense
@@ -126,14 +132,14 @@ def plan_diagnostics_dense_rounded(
     row_sum_p = torch.empty_like(sw)
     for start in range(0, n, block_n):
         end = min(start + block_n, n)
-        _, p_block = _dense_block(sc, tc, sw, tw, eps, f, g, start, end)
+        _, p_block = _dense_block(sc, tc, sw, tw, eps, f, g, start, end, support)
         row_sum_p[start:end] = p_block.sum(dim=1)
     x = (sw / row_sum_p.clamp_min(tiny)).clamp(max=1.0)
 
     col_sum_g1 = torch.zeros_like(tw)
     for start in range(0, n, block_n):
         end = min(start + block_n, n)
-        _, p_block = _dense_block(sc, tc, sw, tw, eps, f, g, start, end)
+        _, p_block = _dense_block(sc, tc, sw, tw, eps, f, g, start, end, support)
         col_sum_g1 += (x[start:end, None] * p_block).sum(dim=0)
     y = (tw / col_sum_g1.clamp_min(tiny)).clamp(max=1.0)
 
@@ -141,7 +147,7 @@ def plan_diagnostics_dense_rounded(
     col_sum_g2 = torch.zeros_like(tw)
     for start in range(0, n, block_n):
         end = min(start + block_n, n)
-        _, p_block = _dense_block(sc, tc, sw, tw, eps, f, g, start, end)
+        _, p_block = _dense_block(sc, tc, sw, tw, eps, f, g, start, end, support)
         g2_block = x[start:end, None] * y[None, :] * p_block
         row_sum_g2[start:end] = g2_block.sum(dim=1)
         col_sum_g2 += g2_block.sum(dim=0)
@@ -151,7 +157,7 @@ def plan_diagnostics_dense_rounded(
     true_cost = 0.0
     for start in range(0, n, block_n):
         end = min(start + block_n, n)
-        cost_block, p_block = _dense_block(sc, tc, sw, tw, eps, f, g, start, end)
+        cost_block, p_block = _dense_block(sc, tc, sw, tw, eps, f, g, start, end, support)
         g2_block = x[start:end, None] * y[None, :] * p_block
         true_cost += float((cost_block * g2_block).sum())
         rank_one_block = err_a[start:end, None] * err_b[None, :] / max(sum_err_a, tiny)
