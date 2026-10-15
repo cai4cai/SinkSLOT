@@ -86,6 +86,7 @@ from sinkslot.bench.reference_solvers import (  # noqa: F401 - re-exported
     _srot_sinkhorn,
     build_sot_plan,
     build_sparse_kernel,
+    flash_symmetric_alpha,
     geomloss_multiscale,
     geomloss_online,
 )
@@ -821,9 +822,10 @@ def _capped(stop: "StopCfg", n_iters: int, cap: Optional[int]) -> Tuple["StopCfg
     return _dc_replace(stop, max_iter=min(cap, stop.max_iter)), min(cap, n_iters)
 
 
-def _damped(stop: "StopCfg") -> "StopCfg":
-    """stop with tol halved under "potential", for alpha=0.5 damped updates."""
-    return _dc_replace(stop, tol=stop.tol / 2) if stop.mode == "potential" else stop
+def _damped(stop: "StopCfg", alpha: float = 0.5) -> "StopCfg":
+    """stop with tol scaled by alpha under "potential", for alpha-damped updates (each moves
+    the potentials by alpha times the undamped step)."""
+    return _dc_replace(stop, tol=alpha * stop.tol) if stop.mode == "potential" else stop
 
 
 def _time_solve(
@@ -1033,12 +1035,14 @@ def bench_flashsinkhorn(
     stop: "StopCfg" = None,
     seed: int = 0,
     warmup_iters: int = 10,
+    sym_alpha: float = 0.5,
 ) -> TimingResult:
     """FlashSinkhorn via the official low-level solvers
     (flash_sinkhorn.sinkhorn_solvers.sinkhorn_flashstyle_{symmetric,alternating}).
 
-    backend: "symmetric" (GeomLoss-style alpha=0.5 damped updates; the library
-    compares its threshold directly, so it is passed tol/2 under "potential") or
+    backend: "symmetric" (GeomLoss-style damped updates, damping sym_alpha: the library's
+    own solver at 0.5, reference_solvers.flash_symmetric_alpha otherwise; the threshold
+    is compared directly, so it is passed sym_alpha * tol under "potential") or
     "alternating" (OTT-JAX-style). allow_tf32 is passed to the Triton kernels;
     everything outside them runs strict fp32. Stop modes: "fixed" and "potential" (the library's own threshold/check_every check).
 
@@ -1058,7 +1062,7 @@ def bench_flashsinkhorn(
     if _stop.mode not in ("fixed", "potential"):
         raise ValueError(f"{method} does not support stop mode {_stop.mode!r}; choices: ('fixed', 'potential')")
     symmetric = backend == "symmetric"
-    stop_eff = _damped(_stop) if symmetric else _stop
+    stop_eff = _damped(_stop, sym_alpha) if symmetric else _stop
 
     def solve(cap):
         st, it_fixed = _capped(stop_eff, n_iters, cap)
@@ -1066,10 +1070,14 @@ def bench_flashsinkhorn(
         common = dict(eps=eps, n_iters=it_fixed if fixed else st.max_iter, allow_tf32=allow_tf32,
                       threshold=None if fixed else st.tol, check_every=st.check_every,
                       return_n_iters=True)
-        if symmetric:
+        if symmetric and sym_alpha == 0.5:
             f, g, used = sinkhorn_flashstyle_symmetric(
                 x, y, a, b, use_epsilon_scaling=False, last_extrapolation=False, **common)
             return f, g, int(used) - 1  # n_iters_used counts the initial alpha=1 step
+        if symmetric:
+            common.pop("return_n_iters")
+            f, g, used = flash_symmetric_alpha(x, y, a, b, sym_alpha, **common)
+            return f, g, int(used) - 1
         f, g, used = sinkhorn_flashstyle_alternating(x, y, a, b, **common)
         return f, g, int(used)
 
@@ -1102,12 +1110,13 @@ def bench_geomloss_online(
     stop: "StopCfg" = None,
     seed: int = 0,
     warmup_iters: int = 10,
+    sym_alpha: float = 0.5,
 ) -> TimingResult:
     """GeomLoss online (KeOps) via reference_solvers.geomloss_online: GeomLoss's
     own sinkhorn_loop update math at a fixed eps, with the potential-change check.
 
-    Always alpha=0.5 damped updates; geomloss_online compares against half the
-    threshold, so it is passed tol. Stop modes:
+    Updates damped by sym_alpha (GeomLoss: 0.5); geomloss_online compares against
+    sym_alpha times the threshold itself, so it is passed tol. Stop modes:
     "fixed" and "potential". Cost: SqDist(X,Y) = ||x-y||^2. Strict fp32.
     seed: data-generation seed (x, y, a, b).
     """
@@ -1125,15 +1134,16 @@ def bench_geomloss_online(
     def solve(cap):
         st, it_fixed = _capped(_stop, n_iters, cap)
         if st.mode == "fixed":
-            return geomloss_online(x, y, a, b, eps, it_fixed)
-        return geomloss_online(x, y, a, b, eps, st.max_iter, threshold=st.tol, check_every=st.check_every)
+            return geomloss_online(x, y, a, b, eps, it_fixed, alpha=sym_alpha)
+        return geomloss_online(x, y, a, b, eps, st.max_iter, threshold=st.tol, check_every=st.check_every,
+                               alpha=sym_alpha)
 
     try:
         stats, (f, g, iters_run, converged, _, _), peak = _time_solve(
             solve, warmup, warmup_iters, rep, nvtx=nvtx, nvtx_label=f"{method} n={n} d={d} eps={eps}")
     except torch.cuda.OutOfMemoryError:
         return _oom_result(method, n, m, d, eps, n_iters, dataset=dataset, seed=seed)
-    res = _ok_result(method, n, m, d, eps, stats, peak, device, stop=_stop, stop_eff=_damped(_stop),
+    res = _ok_result(method, n, m, d, eps, stats, peak, device, stop=_stop, stop_eff=_damped(_stop, sym_alpha),
                      n_iters=n_iters, iters_run=iters_run, converged=converged,
                      dataset=dataset, tf32=False, seed=seed)
 
@@ -1152,6 +1162,7 @@ def bench_geomloss_multiscale(
     seed: int = 0,
     warmup_iters: int = 10,
     truncate: float = 5.0,
+    sym_alpha: float = 0.5,
 ) -> TimingResult:
     """GeomLoss multiscale (KeOps, block-sparse) via reference_solvers.geomloss_multiscale:
     the two-scale scheme of GeomLoss's sinkhorn_multiscale at a fixed eps, with
@@ -1178,16 +1189,16 @@ def bench_geomloss_multiscale(
     def solve(cap):
         st, it_fixed = _capped(_stop, n_iters, cap)
         if st.mode == "fixed":
-            return geomloss_multiscale(x, y, a, b, eps, it_fixed, truncate=truncate)
+            return geomloss_multiscale(x, y, a, b, eps, it_fixed, truncate=truncate, alpha=sym_alpha)
         return geomloss_multiscale(x, y, a, b, eps, st.max_iter, threshold=st.tol, check_every=st.check_every,
-                                   truncate=truncate)
+                                   truncate=truncate, alpha=sym_alpha)
 
     try:
         stats, (f, g, iters_run, converged, _, _, info), peak = _time_solve(
             solve, warmup, warmup_iters, rep, nvtx=nvtx, nvtx_label=f"{method} n={n} d={d} eps={eps}")
     except torch.cuda.OutOfMemoryError:
         return _oom_result(method, n, m, d, eps, n_iters, dataset=dataset, seed=seed)
-    res = _ok_result(method, n, m, d, eps, stats, peak, device, stop=_stop, stop_eff=_damped(_stop),
+    res = _ok_result(method, n, m, d, eps, stats, peak, device, stop=_stop, stop_eff=_damped(_stop, sym_alpha),
                      n_iters=n_iters, iters_run=iters_run, converged=converged,
                      dataset=dataset, tf32=False, seed=seed)
     res.nnz = int(round(info["kept_fraction"] * n * m))
@@ -1560,6 +1571,7 @@ def bench_sinkslotcuda(
     seed: int = 0,
     variant: str = "alternating",
     warmup_iters: int = 10,
+    sym_alpha: float = 0.5,
 ) -> TimingResult:
     """SinkSLOT-CUDA: SinkSLOT with the CUDA setup path, strict fp32.
 
@@ -1569,7 +1581,7 @@ def bench_sinkslotcuda(
     total_ms their sum.
 
     variant: "alternating" (sinkslot_alternating_triton, method "sinkslotcuda") or
-    "symmetric" (sinkslot_symmetric_triton, alpha=0.5 damped, method
+    "symmetric" (sinkslot_symmetric_triton, damped by sym_alpha, method
     "sinkslotcuda_symmetric"; the solver compares against alpha * tol under "potential").
     Stop modes: "fixed", "potential", "marginal".
 
@@ -1605,7 +1617,7 @@ def bench_sinkslotcuda(
 
     def solve(cap):
         st, it_fixed = _capped(_stop, n_iters, cap)
-        return solver(*csr, log_a, log_b, n, m, it_fixed, st, eps=eps)
+        return solver(*csr, log_a, log_b, n, m, it_fixed, st, eps=eps, **({"alpha": sym_alpha} if symmetric else {}))
 
     try:
         stats, (phi, psi, iters_run, converged, final_viol), peak = _time_solve(
@@ -1613,7 +1625,7 @@ def bench_sinkslotcuda(
     except torch.cuda.OutOfMemoryError:
         return _oom_result(method, n, m, d, eps, n_iters, **kw)
     res = _ok_result(method, n, m, d, eps, stats, peak, device, stop=_stop,
-                     stop_eff=_damped(_stop) if symmetric else _stop,
+                     stop_eff=_damped(_stop, sym_alpha) if symmetric else _stop,
                      n_iters=n_iters, iters_run=iters_run, converged=converged, setup_ms=setup_ms,
                      final_viol=final_viol, nnz=int(rows.numel()), **kw)
 
@@ -2173,6 +2185,7 @@ def run_forward_benchmark(
     warmup_iters: int = 10,
     include_geomloss_multiscale: bool = False,
     geomloss_truncate: float = 5.0,
+    sym_alpha: float = 0.5,
 ) -> List[TimingResult]:
     """Run forward pass benchmark.
 
@@ -2230,7 +2243,7 @@ def run_forward_benchmark(
                 res = bench_flashsinkhorn(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, backend="symmetric",
                     allow_tf32=allow_tf32, rmae_check=rmae_check, dataset=dataset, stop=stop,
-                    seed=seed, warmup_iters=warmup_iters,
+                    seed=seed, warmup_iters=warmup_iters, sym_alpha=sym_alpha,
                 )
                 res.dataset = dataset
                 res.tf32 = allow_tf32
@@ -2259,7 +2272,7 @@ def run_forward_benchmark(
             if include_geomloss:
                 res = bench_geomloss_online(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, rmae_check=rmae_check,
-                    dataset=dataset, stop=stop, seed=seed, warmup_iters=warmup_iters,
+                    dataset=dataset, stop=stop, seed=seed, warmup_iters=warmup_iters, sym_alpha=sym_alpha,
                 )
                 results.append(res)
                 if verbose:
@@ -2271,6 +2284,7 @@ def run_forward_benchmark(
                 res = bench_geomloss_multiscale(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, rmae_check=rmae_check,
                     dataset=dataset, stop=stop, seed=seed, warmup_iters=warmup_iters, truncate=geomloss_truncate,
+                    sym_alpha=sym_alpha,
                 )
                 results.append(res)
                 if verbose:
@@ -2336,7 +2350,7 @@ def run_forward_benchmark(
                         n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx,
                         allow_tf32=allow_tf32, dataset=dataset, rmae_check=rmae_check,
                         slices=slices, stop=stop, seed=seed, variant=variant,
-                        warmup_iters=warmup_iters,
+                        warmup_iters=warmup_iters, sym_alpha=sym_alpha,
                     )
                     results.append(res)
                     if verbose:
@@ -2893,7 +2907,7 @@ def run_forward_benchmark_subprocess(
             cmd.append("--no-geomloss")
         if args.no_geomloss_multiscale:
             cmd.append("--no-geomloss-multiscale")
-        cmd.extend(["--geomloss-truncate", str(args.geomloss_truncate)])
+        cmd.extend(["--geomloss-truncate", str(args.geomloss_truncate), "--sym-alpha", str(args.sym_alpha)])
         if args.no_ott:
             cmd.append("--no-ott")
         if args.no_rmae_check:
@@ -3023,6 +3037,9 @@ def main() -> None:
     parser.add_argument("--no-geomloss", action="store_true", help="Skip GeomLoss benchmarks.")
     parser.add_argument("--no-geomloss-multiscale", action="store_true",
                         help="Skip GeomLoss multiscale benchmarks (run only for d <= 3).")
+    parser.add_argument("--sym-alpha", type=float, default=0.5,
+                        help="Damping of the symmetric solvers (FlashSinkhorn symmetric, GeomLoss online and "
+                             "multiscale, SinkSLOT-CUDA symmetric); 0.5 is the libraries' default.")
     parser.add_argument("--geomloss-truncate", type=float, default=5.0,
                         help="GeomLoss multiscale: kernel truncation margin, in units of eps (GeomLoss's default 5).")
     parser.add_argument("--no-flash-symmetric", action="store_true", help="Skip FlashSinkhorn symmetric backend.")
@@ -3161,6 +3178,7 @@ def main() -> None:
             include_sinkslotcuda_symmetric=include_sinkslotcuda_symmetric,
             include_geomloss_multiscale=include_geomloss_multiscale,
             geomloss_truncate=args.geomloss_truncate,
+            sym_alpha=args.sym_alpha,
             warmup_iters=args.warmup_iters,
             sinkslotcuda_slices=sinkslotcuda_slices,
             stop=_stop_cfg,
@@ -3321,6 +3339,7 @@ def main() -> None:
             include_sinkslotcuda_symmetric=include_sinkslotcuda_symmetric,
             include_geomloss_multiscale=include_geomloss_multiscale,
             geomloss_truncate=args.geomloss_truncate,
+            sym_alpha=args.sym_alpha,
             warmup_iters=args.warmup_iters,
             sinkslotcuda_slices=sinkslotcuda_slices,
             stop=_stop_cfg,

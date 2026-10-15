@@ -97,6 +97,7 @@ def build_command(
         cmd.append("--no-ott")
     if cfg.no_rmae_check:
         cmd.append("--no-rmae-check")
+    cmd += ["--sym-alpha", str(cfg.sym_alpha)]
     if cfg.no_geomloss:
         cmd.append("--no-geomloss")
     if cfg.no_geomloss_multiscale:

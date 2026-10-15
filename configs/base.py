@@ -98,6 +98,8 @@ class BenchConfig:
             only; units with d > 3 are not generated). Skipped by default.
         geomloss_truncate: GeomLoss multiscale kernel truncation margin, in units of
             eps (GeomLoss's default 5).
+        sym_alpha: damping of the symmetric solvers (FlashSinkhorn symmetric, GeomLoss
+            online and multiscale, SinkSLOT-CUDA symmetric); 0.5 is the libraries' default.
         no_flash_symmetric: Skip FlashSinkhorn's symmetric backend.
         no_flash_alternating: Skip FlashSinkhorn's alternating backend.
         only: Restrict the sweep to a single method: ``"flash_symmetric"``,
@@ -177,6 +179,7 @@ class BenchConfig:
     no_geomloss: bool = False
     no_geomloss_multiscale: bool = True
     geomloss_truncate: float = 5.0
+    sym_alpha: float = 0.5
     no_flash_symmetric: bool = False
     no_flash_alternating: bool = False
     only: Optional[str] = None

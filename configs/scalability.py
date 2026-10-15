@@ -108,6 +108,7 @@ def _config(n: int, d: int) -> BenchConfig:
         no_ott=True,
         no_rmae_check=True,
         no_geomloss=False,
+        sym_alpha=0.9,
         no_flash_symmetric=FIGURE_ONLY,
         no_flash_alternating=False,
 

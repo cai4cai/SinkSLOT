@@ -102,3 +102,26 @@ def test_untruncated_run_has_no_support():
     x, y, a, b = _problem(n=2000)
     *_, info = geomloss_multiscale(x, y, a, b, 0.05, 20000, threshold=1e-6, truncate=None)
     assert info["support"] is None and info["kept_fraction"] == 1.0
+
+
+def test_online_alpha_reaches_the_same_fixed_point():
+    """Damping alpha changes the path, not the solution: alpha=0.9 and 0.5 agree at convergence."""
+    x, y, a, b = _problem(n=2000)
+    f5, g5, it5, c5, cost5, _ = geomloss_online(x, y, a, b, 0.05, 50000, threshold=1e-5, alpha=0.5)
+    f9, g9, it9, c9, cost9, _ = geomloss_online(x, y, a, b, 0.05, 50000, threshold=1e-5, alpha=0.9)
+    assert c5 and c9 and it9 < it5
+    assert abs(cost9 - cost5) <= 1e-4 * abs(cost5)
+    assert _gap(f5, g5, f9, g9) < 1e-3
+
+
+def test_flash_symmetric_alpha_matches_the_library_at_one_half():
+    flash = pytest.importorskip("flash_sinkhorn.sinkhorn_solvers")
+    from sinkslot.bench.reference_solvers import flash_symmetric_alpha
+
+    x, y, a, b = _problem(n=2000)
+    kw = dict(eps=0.05, n_iters=500, allow_tf32=False, threshold=1e-6, check_every=5)
+    f1, g1, n1 = flash.sinkhorn_flashstyle_symmetric(x, y, a, b, use_epsilon_scaling=False, last_extrapolation=False,
+                                                     return_n_iters=True, **kw)
+    f2, g2, n2 = flash_symmetric_alpha(x, y, a, b, 0.5, **kw)
+    assert int(n1) == int(n2)
+    assert torch.allclose(f1, f2, atol=1e-5) and torch.allclose(g1, g2, atol=1e-5)

@@ -39,7 +39,22 @@ from sinkslot.bench.plan_diagnostics import (
     plan_diagnostics_dense, plan_diagnostics_dense_rounded,
     sinkslot_plan_diagnostics, sinkslot_plan_diagnostics_rounded,
 )
-from sinkslot.bench.reference_solvers import geomloss_multiscale, geomloss_online
+from sinkslot.bench.reference_solvers import flash_symmetric_alpha, geomloss_multiscale, geomloss_online
+
+# Damping of the symmetric solvers (FlashSinkhorn symmetric, GeomLoss, SinkSLOT symmetric); set by --sym_alpha.
+SYM_ALPHA = 0.5
+
+
+def _flash_symmetric(sc, tc, sw, tw, *, eps, n_iters, threshold, check_every, allow_tf32):
+    """FlashSinkhorn symmetric at fixed eps, damped by SYM_ALPHA: the library's own solver at 0.5,
+    flash_symmetric_alpha otherwise. Returns (f, g, n_iters_used) counting the initial alpha=1 step."""
+    if SYM_ALPHA == 0.5:
+        from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_symmetric
+        return sinkhorn_flashstyle_symmetric(
+            sc, tc, sw, tw, eps=eps, n_iters=n_iters, use_epsilon_scaling=False, last_extrapolation=False,
+            allow_tf32=allow_tf32, threshold=threshold, check_every=check_every, return_n_iters=True)
+    return flash_symmetric_alpha(sc, tc, sw, tw, SYM_ALPHA, eps=eps, n_iters=n_iters, allow_tf32=allow_tf32,
+                                 threshold=threshold, check_every=check_every)
 
 DEFAULT_PAINTINGS_DIR = Path(__file__).parent / "paintings"
 
@@ -157,13 +172,13 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
         return checkpoints
 
     if method_key == "geomloss_online":
-        geomloss_online(sc, tc, sw, tw, eps, 10, threshold=tol, check_every=check_every)  # warmup
+        geomloss_online(sc, tc, sw, tw, eps, 10, threshold=tol, check_every=check_every, alpha=SYM_ALPHA)  # warmup
 
         for n_iter in TRAJECTORY_CHECKPOINTS:
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             f, g, total_iters, converged, _, _ = geomloss_online(
-                sc, tc, sw, tw, eps, n_iter, threshold=tol, check_every=check_every)
+                sc, tc, sw, tw, eps, n_iter, threshold=tol, check_every=check_every, alpha=SYM_ALPHA)
             torch.cuda.synchronize()
             solve_dt = time.perf_counter() - t0
             viol_lmax, row_l1, col_l1, mass_l1, _ = plan_diagnostics_dense(sc, tc, sw, tw, eps, f, g)
@@ -176,14 +191,14 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
         return checkpoints
 
     # flashsinkhorn_alt / flashsinkhorn_sym (+ their _fp32 variants)
-    from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_alternating, sinkhorn_flashstyle_symmetric
+    from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_alternating
     symmetric = "sym" in method_key
-    solve_tol = tol / 2 if symmetric else tol
+    solve_tol = SYM_ALPHA * tol if symmetric else tol
 
     # Warmup: not timed, avoids one-time Triton compile cost landing on checkpoint 1.
     if symmetric:
-        sinkhorn_flashstyle_symmetric(sc, tc, sw, tw, eps=eps, n_iters=10, use_epsilon_scaling=False,
-                                       last_extrapolation=False, allow_tf32=allow_tf32)
+        _flash_symmetric(sc, tc, sw, tw, eps=eps, n_iters=10, threshold=None, check_every=check_every,
+                         allow_tf32=allow_tf32)
     else:
         sinkhorn_flashstyle_alternating(sc, tc, sw, tw, eps=eps, n_iters=10, allow_tf32=allow_tf32)
 
@@ -191,10 +206,8 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         if symmetric:
-            f, g, n_used = sinkhorn_flashstyle_symmetric(
-                sc, tc, sw, tw, eps=eps, n_iters=n_iter, use_epsilon_scaling=False,
-                last_extrapolation=False, allow_tf32=allow_tf32,
-                threshold=solve_tol, check_every=check_every, return_n_iters=True)
+            f, g, n_used = _flash_symmetric(sc, tc, sw, tw, eps=eps, n_iters=n_iter, threshold=solve_tol,
+                                            check_every=check_every, allow_tf32=allow_tf32)
             total_iters = int(n_used) - 1  # n_used counts the initial alpha=1 step
         else:
             f, g, n_used = sinkhorn_flashstyle_alternating(
@@ -250,7 +263,7 @@ def _sparse_result(name, phi, psi, rows, cols, S, cost_mat, dt, peak, it, conver
 
 
 def sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, symmetric=False):
-    """SinkSLOT via Gauss-Seidel (symmetric=False) or alpha=0.5 Jacobi
+    """SinkSLOT via Gauss-Seidel (symmetric=False) or SYM_ALPHA-damped Jacobi
     (symmetric=True) sparse Sinkhorn. The symmetric solver compares the
     potential change against alpha * tol itself, so both variants get tol.
     """
@@ -272,7 +285,8 @@ def sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, sy
         c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m)
         phi, psi, it, converged, change = solver(
             r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, sw.log(), tw.log(), n, m, max_iter,
-            stop=StopCfg(mode="potential", max_iter=max_iter, check_every=check_every, tol=tol), eps=eps)
+            stop=StopCfg(mode="potential", max_iter=max_iter, check_every=check_every, tol=tol), eps=eps,
+            **({"alpha": SYM_ALPHA} if symmetric else {}))
         dual_cost = float((sw * (eps * phi)).sum() + (tw * (eps * psi)).sum())
         return phi, psi, it, converged, dual_cost, rows, cols, S, cost_mat
 
@@ -287,18 +301,15 @@ def sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, sy
 
 
 def flashsinkhorn_row(name, sc, tc, sw, tw, eps, max_iter, tol, check_every, symmetric, allow_tf32=True):
-    from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_alternating, sinkhorn_flashstyle_symmetric
-    # tol/2 for the alpha=0.5 damped (symmetric) backend: the library compares its threshold
-    # directly against the damped change.
-    solve_tol = tol / 2 if symmetric else tol
+    from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_alternating
+    # SYM_ALPHA * tol for the damped (symmetric) backend: its threshold is compared directly
+    # against the damped change.
+    solve_tol = SYM_ALPHA * tol if symmetric else tol
 
     def solve(n_iters, threshold):
         if symmetric:
-            f, g, n_iters_used = sinkhorn_flashstyle_symmetric(
-                sc, tc, sw, tw, eps=eps, use_epsilon_scaling=False, n_iters=n_iters,
-                threshold=threshold, check_every=check_every, allow_tf32=allow_tf32,
-                last_extrapolation=False, return_n_iters=True,
-            )
+            f, g, n_iters_used = _flash_symmetric(sc, tc, sw, tw, eps=eps, n_iters=n_iters, threshold=threshold,
+                                                  check_every=check_every, allow_tf32=allow_tf32)
             n_iters_used = n_iters_used - 1  # n_iters_used counts the initial alpha=1 step
         else:
             f, g, n_iters_used = sinkhorn_flashstyle_alternating(
@@ -314,11 +325,11 @@ def flashsinkhorn_row(name, sc, tc, sw, tw, eps, max_iter, tol, check_every, sym
 
 
 def geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
-    # geomloss_online applies the 0.5 damping factor to the threshold itself.
+    # geomloss_online applies the damping factor to the threshold itself.
     def solve():
-        return geomloss_online(sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every)
+        return geomloss_online(sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every, alpha=SYM_ALPHA)
 
-    geomloss_online(sc, tc, sw, tw, eps, 10, threshold=tol, check_every=check_every)  # warmup
+    geomloss_online(sc, tc, sw, tw, eps, 10, threshold=tol, check_every=check_every, alpha=SYM_ALPHA)  # warmup
     (f, g, it, converged, dual_cost, change), dt, peak = measure(solve)
     return _dense_result("GeomLoss (online)", f, g, dt, peak, it, converged, dual_cost, sc, tc, sw, tw, eps)
 
@@ -327,9 +338,10 @@ def geomloss_multiscale_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, tru
     # GeomLoss's default cluster_scale; nnz = point pairs of the fine stage.
     def solve():
         return geomloss_multiscale(sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every,
-                                   truncate=truncate)
+                                   truncate=truncate, alpha=SYM_ALPHA)
 
-    geomloss_multiscale(sc, tc, sw, tw, eps, 10, threshold=tol, check_every=check_every, truncate=truncate)  # warmup
+    geomloss_multiscale(sc, tc, sw, tw, eps, 10, threshold=tol, check_every=check_every, truncate=truncate,
+                        alpha=SYM_ALPHA)  # warmup
     (f, g, it, converged, dual_cost, change, info), dt, peak = measure(solve)
     row = _dense_result("GeomLoss (multiscale)", f, g, dt, peak, it, converged, dual_cost, sc, tc, sw, tw, eps,
                         support=info["support"])
@@ -432,6 +444,9 @@ def parse_args():
                     help="Run just this one ordered pair. Omit (or use --max_pairs) to sweep all pairs.")
     p.add_argument("--max_pairs", type=int, default=0,
                     help="0 = every ordered pair (n*(n-1) for n images); ignored if --pair_idx is given.")
+    p.add_argument("--sym_alpha", type=float, default=0.5,
+                   help="Damping of the symmetric solvers (FlashSinkhorn symmetric, GeomLoss, SinkSLOT symmetric); "
+                        "0.5 is the libraries' default, 0.9 the paper's.")
     p.add_argument("--geomloss_truncate", type=float, default=5.0,
                    help="GeomLoss multiscale: kernel truncation margin, in units of eps (GeomLoss's default 5).")
     p.add_argument("--methods", type=str, nargs="+", default=_METHOD_KEYS, choices=_METHOD_KEYS,
@@ -476,6 +491,8 @@ def combine_sweeps(paths_in, output_dir, eps, tol):
 
 def main():
     args = parse_args()
+    global SYM_ALPHA
+    SYM_ALPHA = args.sym_alpha
 
     if args.combine is not None:
         combine_sweeps(args.combine, args.output_dir, args.eps, args.tol)
