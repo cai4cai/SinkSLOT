@@ -24,24 +24,22 @@ def _gap(f1, g1, f2, g2):
     return max(float((f1 - f2 - c).abs().max()), float((g1 - g2 + c).abs().max()))
 
 
-def test_online_matches_the_legacy_kernels():
-    """geomloss.ot's cost_matrix + softmin_sample give the legacy lse_genred + softmin_online updates."""
-    from functools import partial
-
-    from geomloss._legacy.sinkhorn_samples import lse_genred, softmin_online
+def test_online_matches_geomloss_ot_sinkhorn_loop():
+    """At a constant eps, geomloss_online is geomloss.ot's sinkhorn_loop without its last extrapolation."""
+    from geomloss import _backends as bk
+    from geomloss._typing import CostMatrices, DescentParameters
+    from geomloss.ot._abstract_solvers import sinkhorn_loop
+    from geomloss.ot._implementations.sample import cost_matrix, softmin_sample
 
     x, y, a, b = _problem(n=2000)
     eps, iters = 0.05, 50
-    softmin = partial(softmin_online, log_conv=lse_genred("SqDist(X,Y)", 2))
-    a_log, b_log = a.log(), b.log()
-    g = softmin(eps, (y, x), a_log)
-    f = softmin(eps, (x, y), b_log)
-    for _ in range(iters):
-        ft, gt = softmin(eps, (x, y), b_log + g / eps), softmin(eps, (y, x), a_log + f / eps)
-        f, g = 0.5 * (f + ft), 0.5 * (g + gt)
-    f_new, g_new, *_ = geomloss_online(x, y, a, b, eps, iters)
-    assert torch.allclose(f_new, f.view(-1), rtol=0, atol=1e-5)
-    assert torch.allclose(g_new, g.view(-1), rtol=0, atol=1e-5)
+    C = [CostMatrices(xy=cost_matrix(x, y), yx=cost_matrix(y, x), xx=None, yy=None)]
+    descent = DescentParameters(scale_list=[0] * iters, eps_list=[eps] * iters, rho_list=[None] * iters)
+    ref = sinkhorn_loop(softmin=softmin_sample, log_a_list=[bk.stable_log(a)], log_b_list=[bk.stable_log(b)],
+                        C_list=C, descent=descent, debias=False, last_extrapolation=False)
+    f, g, *_ = geomloss_online(x, y, a, b, eps, iters)
+    assert torch.allclose(f, ref.f_ba.view(-1), rtol=0, atol=1e-5)
+    assert torch.allclose(g, ref.g_ab.view(-1), rtol=0, atol=1e-5)
 
 
 def test_without_truncation_it_reaches_the_online_fixed_point():

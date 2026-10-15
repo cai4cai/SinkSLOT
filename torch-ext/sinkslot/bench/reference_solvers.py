@@ -31,10 +31,13 @@ def geomloss_online(
     eps: float, max_iter: int, threshold: Optional[float] = None, check_every: int = 5,
 ) -> Tuple[torch.Tensor, torch.Tensor, int, Optional[bool], float, float]:
     """GeomLoss online (KeOps): sinkhorn_loop's update math at a fixed eps
-    (single-scale, debias=False), built from geomloss.ot's sample solver:
-    cost_matrix (a KeOps LazyTensor, never stored) and softmin_sample, as in
-    geomloss.ot.solve_sample. solve_sample anneals eps over max_iter iterations
-    and rejects tol, hence the loop here. Always symmetric (damped-Jacobi)
+    (single-scale, debias=False), built from geomloss.ot's sample solver as in
+    geomloss.ot.solve_sample: cost_matrix (a KeOps LazyTensor, never stored),
+    softmin_sample, and sinkhorn_initialization (the eps = inf potentials, the
+    mean cost against the other cloud, each shifted by half its mean).
+    solve_sample anneals eps over max_iter iterations and rejects tol, hence
+    the loop here; at a constant eps it is geomloss.ot's sinkhorn_loop without
+    its last extrapolation. Always symmetric (damped-Jacobi)
     updates; GeomLoss has no alternating/Gauss-Seidel option at any level.
 
     Stop rule: max(|df|, |dg|) < 0.5 * threshold between consecutive checkpoints
@@ -46,14 +49,16 @@ def geomloss_online(
     Returns (f, g, n_iters_used, converged, cost, last_change).
     """
     from geomloss import _backends as bk
+    from geomloss.ot._abstract_solvers.sinkhorn_ot import sinkhorn_initialization
     from geomloss.ot._implementations.sample import cost_matrix, softmin_sample
 
     a_log, b_log = bk.stable_log(sw), bk.stable_log(tw)
     C_xy = cost_matrix(sc, tc.detach())  # ||x_i - y_j||^2, lazy
     C_yx = cost_matrix(tc, sc.detach())
 
-    g_ab = softmin_sample(eps, a_log, C_yx, torch.zeros_like(a_log))
-    f_ba = softmin_sample(eps, b_log, C_xy, torch.zeros_like(b_log))
+    balanced = lambda f: f  # noqa: E731 - geomloss.ot's dampening(rho=None)
+    f_ba = sinkhorn_initialization(a_log, b_log, C_xy, softmin_sample, balanced)
+    g_ab = sinkhorn_initialization(b_log, a_log, C_yx, softmin_sample, balanced)
 
     n_iters_used = max_iter
     converged = False if threshold is not None else None
@@ -83,19 +88,18 @@ def geomloss_multiscale(
     eps: float, max_iter: int, threshold: Optional[float] = None, check_every: int = 5,
     cluster_scale: Optional[float] = None, truncate: Optional[float] = 5.0,
 ) -> Tuple[torch.Tensor, torch.Tensor, int, Optional[bool], float, float, dict]:
-    """GeomLoss multiscale (KeOps, block-sparse): sinkhorn_multiscale's two-scale
-    scheme at a fixed eps, with the stop rule of geomloss_online.
+    """GeomLoss multiscale (KeOps, block-sparse): the two-scale scheme of
+    geomloss._legacy.sinkhorn_samples.sinkhorn_multiscale at a fixed eps, with the
+    stop rule of geomloss_online.
 
-    geomloss.ot has no multiscale solver yet, so this uses the legacy one's
-    building blocks. As in geomloss._legacy.sinkhorn_samples.sinkhorn_multiscale:
       1. clusterize: both clouds are binned on a grid of cell size cluster_scale
          (pykeops grid_cluster, d <= 3), with cluster weights summed and centroids
          at the cells' centres of mass; the points are sorted so each cluster is
          contiguous.
       2. coarse stage: damped symmetric updates on the centroids.
       3. jump: kernel_truncation keeps the cluster pairs (k, l) with
-         f_k + g_l > C(x_k, y_l) - truncate * eps, from the coarse potentials;
-         extrapolate_samples lifts the coarse potentials to the points.
+         f_k + g_l > C(x_k, y_l) - truncate * eps, from the coarse potentials, and
+         the coarse potentials are lifted to the points by one softmin.
       4. fine stage: damped symmetric updates on the points, summing only over the
          kept cluster pairs (KeOps ranges).
     GeomLoss jumps when its eps schedule falls below cluster_scale**p, and only
@@ -103,14 +107,21 @@ def geomloss_multiscale(
     no schedule: the coarse stage runs to the stop rule (or max_iter), and the
     kernel is truncated when cluster_scale**2 > eps / 2 (GeomLoss's condition
     for its cost |x-y|**2 / 2), otherwise the fine stage uses every pair.
-    The cost is the full ||x - y||**2, as in geomloss_online.
+
+    geomloss.ot has no multiscale solver, so the legacy code is used only where
+    geomloss.ot has no counterpart: the clustering, the kernel truncation and the
+    block-sparse softmin of a truncated fine stage. The rest uses geomloss.ot's
+    sample solver, as geomloss_online: cost_matrix, softmin_sample and
+    sinkhorn_initialization (on the centroids). The cost is the full
+    ||x - y||**2.
 
     Parameters besides eps: cluster_scale (default GeomLoss's
     diameter / (sqrt(d) * 2000**(1/d)), about 2000 cells) and truncate (default
     GeomLoss's 5; None keeps every pair).
 
     Stop rule (both stages): max(|df|, |dg|) < 0.5 * threshold between consecutive
-    checkpoints, every check_every iterations, as in geomloss_online.
+    checkpoints, every check_every iterations, as in geomloss_online. With
+    threshold=None the coarse stage runs max_iter iterations and the fine stage none.
 
     Returns (f, g, n_iters_used, converged, cost, last_change, info), with f, g
     in the input order, n_iters_used = coarse + fine iterations, and info holding
@@ -119,37 +130,37 @@ def geomloss_multiscale(
     """
     from functools import partial
 
-    from geomloss._legacy.sinkhorn_divergence import log_weights, max_diameter
+    from geomloss import _backends as bk
     from geomloss._legacy.sinkhorn_samples import (
-        clusterize, extrapolate_samples, keops_lse, kernel_truncation, softmin_multiscale,
+        clusterize, keops_lse, kernel_truncation, softmin_multiscale,
     )
     from geomloss._legacy.utils import squared_distances
+    from geomloss.ot._abstract_solvers.annealing import max_diameter
+    from geomloss.ot._abstract_solvers.sinkhorn_ot import sinkhorn_initialization
+    from geomloss.ot._implementations.sample import cost_matrix, softmin_sample
 
     n, d = sc.shape
     m = tc.shape[0]
     if d > 3:
         raise ValueError(f"GeomLoss multiscale clusters points on a grid in d <= 3; got d={d}.")
-    diameter = max_diameter(sc, tc)
     if cluster_scale is None:
-        cluster_scale = diameter / (d ** 0.5 * 2000 ** (1 / d))
-    softmin = partial(softmin_multiscale, log_conv=keops_lse("SqDist(X,Y)", d, dtype=str(sc.dtype)[6:]))
+        cluster_scale = max_diameter(sc, tc) / (d ** 0.5 * 2000 ** (1 / d))
 
     [a_c, a], [x_c, x], [ranges_x], perm_x = clusterize(sw, sc, scale=cluster_scale)
     [b_c, b], [y_c, y], [ranges_y], perm_y = clusterize(tw, tc, scale=cluster_scale)
-    a_log_c, b_log_c, a_log, b_log = log_weights(a_c), log_weights(b_c), log_weights(a), log_weights(b)
-    C_xy_c = (x_c, y_c.detach(), ranges_x, ranges_y, None)
-    C_yx_c = (y_c, x_c.detach(), ranges_y, ranges_x, None)
-    C_xy = (x, y.detach(), None, None, None)
-    C_yx = (y, x.detach(), None, None, None)
+    a_log_c, b_log_c, a_log, b_log = (bk.stable_log(w) for w in (a_c, b_c, a, b))
+    balanced = lambda f: f  # noqa: E731 - geomloss.ot's dampening(rho=None)
 
-    def damped_loop(C_xy, C_yx, a_log, b_log, f_ba, g_ab, budget):
+    def lazy_updates(C_xy, C_yx, a_log, b_log):
+        return lambda f, g: (softmin_sample(eps, b_log, C_xy, g), softmin_sample(eps, a_log, C_yx, f))
+
+    def damped_loop(updates, f_ba, g_ab, budget):
         """Damped symmetric updates with the checkpoint stop; returns (f, g, iters, converged, last_change)."""
         converged = False if threshold is not None else None
         last_change = float("inf")
         prev_f, prev_g = f_ba, g_ab
         for i in range(budget):
-            ft_ba = softmin(eps, C_xy, b_log + g_ab / eps)
-            gt_ab = softmin(eps, C_yx, a_log + f_ba / eps)
+            ft_ba, gt_ab = updates(f_ba, g_ab)
             f_ba, g_ab = 0.5 * (f_ba + ft_ba), 0.5 * (g_ab + gt_ab)
             if threshold is not None and (i + 1) % check_every == 0:
                 last_change = max((f_ba - prev_f).abs().max().item(), (g_ab - prev_g).abs().max().item())
@@ -159,26 +170,38 @@ def geomloss_multiscale(
         return f_ba, g_ab, budget, converged, last_change
 
     with torch.no_grad():
-        # Coarse stage, initialised as in sinkhorn_loop (balanced: damping = 1).
-        g_c = softmin(eps, C_yx_c, a_log_c)
-        f_c = softmin(eps, C_xy_c, b_log_c)
-        f_c, g_c, coarse_iters, _, _ = damped_loop(C_xy_c, C_yx_c, a_log_c, b_log_c, f_c, g_c, max_iter)
+        # Coarse stage on the centroids (geomloss.ot).
+        C_xy_c, C_yx_c = cost_matrix(x_c, y_c), cost_matrix(y_c, x_c)
+        f_c = sinkhorn_initialization(a_log_c, b_log_c, C_xy_c, softmin_sample, balanced)
+        g_c = sinkhorn_initialization(b_log_c, a_log_c, C_yx_c, softmin_sample, balanced)
+        f_c, g_c, coarse_iters, _, _ = damped_loop(
+            lazy_updates(C_xy_c, C_yx_c, a_log_c, b_log_c), f_c, g_c, max_iter)
 
-        # Jump to the points: truncate the kernel on the cluster pairs, then lift.
-        kept = n * m
+        # Lift to the points: one softmin against the coarse potentials of the other side.
+        f_ba = softmin_sample(eps, b_log_c, cost_matrix(x, y_c), g_c)
+        g_ab = softmin_sample(eps, a_log_c, cost_matrix(y, x_c), f_c)
+
         if truncate is not None and cluster_scale ** 2 > eps / 2:
-            C_xy, C_yx = kernel_truncation(C_xy_c, C_yx_c, C_xy, C_yx, f_c, g_c, eps,
-                                           truncate=truncate, cost=squared_distances)
+            # Legacy kernel truncation and block-sparse softmin (KeOps ranges).
+            (_, _, _, _, ranges_xy), (_, _, _, _, ranges_yx) = kernel_truncation(
+                (x_c, y_c, ranges_x, ranges_y, None), (y_c, x_c, ranges_y, ranges_x, None),
+                (x, y, None, None, None), (y, x, None, None, None), f_c, g_c, eps,
+                truncate=truncate, cost=squared_distances)
+            softmin = partial(softmin_multiscale, log_conv=keops_lse("SqDist(X,Y)", d))
+            C_xy, C_yx = (x, y, None, None, ranges_xy), (y, x, None, None, ranges_yx)
+            updates = lambda f, g: (softmin(eps, C_xy, b_log + g / eps),  # noqa: E731
+                                    softmin(eps, C_yx, a_log + f / eps))
             # kernel_truncation's own cluster mask, to count the kept point pairs.
             keep = f_c.view(-1, 1) + g_c.view(1, -1) > squared_distances(x_c, y_c) - truncate * eps
             size_x = (ranges_x[:, 1] - ranges_x[:, 0]).to(f_c.dtype)
             size_y = (ranges_y[:, 1] - ranges_y[:, 0]).to(f_c.dtype)
             kept = int((size_x @ keep.to(f_c.dtype) @ size_y).item())
-        f_ba = extrapolate_samples(f_c, g_c, eps, 1, C_xy_c, b_log_c, C_xy, softmin=softmin)
-        g_ab = extrapolate_samples(g_c, f_c, eps, 1, C_yx_c, a_log_c, C_yx, softmin=softmin)
+        else:
+            updates = lazy_updates(cost_matrix(x, y), cost_matrix(y, x), a_log, b_log)
+            kept = n * m
 
         f_ba, g_ab, fine_iters, converged, last_change = damped_loop(
-            C_xy, C_yx, a_log, b_log, f_ba, g_ab, max(max_iter - coarse_iters, 0))
+            updates, f_ba, g_ab, max(max_iter - coarse_iters, 0))
 
     f, g = torch.empty_like(f_ba), torch.empty_like(g_ab)
     f[perm_x], g[perm_y] = f_ba, g_ab
