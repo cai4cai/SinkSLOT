@@ -1,14 +1,15 @@
 """SinkSLOT's Sinkhorn solver loops and device-agnostic entry point.
 
-The alternating scheme has both reductions fused into Triton kernels
-(online-softmax segmented LSE, CSR for the row half-step and CSC for the
-column half-step). Mathematically identical to a plain torch segmented
+The alternating scheme has both reductions fused into a single kernel per
+half-step (online-softmax segmented LSE, CSR for the row half-step and CSC
+for the column half-step), written in Triton for CUDA and in Metal for Apple
+silicon -- see `_backends.py` for the dispatch. Mathematically identical to a plain torch segmented
 LSE; the point is throughput, not a different algorithm. The CUDA-graph capture
 of the upstream production path is intentionally omitted here.
 
-`sinkslot_solve` is the device-agnostic entry point: `sinkslot_alternating_triton`
-above when Triton is installed and the input is CUDA, the pure-torch fallback
-(`sinkslot_alternating_torch`) otherwise -- same algorithm, cross-checked in
+`sinkslot_solve` is the device-agnostic entry point: `sinkslot_alternating_fused`
+below when the input's device has a fused backend (Triton on CUDA, Metal on
+MPS), the pure-torch fallback (`sinkslot_alternating_torch`) otherwise -- same algorithm, cross-checked in
 testing/test_torch_fallback.py, so a CPU machine or a machine without Triton
 installed can still run SinkSLOT, just without the fused-kernel throughput.
 
@@ -29,70 +30,14 @@ import torch
 from beartype import beartype
 from jaxtyping import Float, jaxtyped
 
+from ._backends import fused_backend, fused_ops, resolve_backend
 from .solver import (
-    _HAS_TRITON,
     _ot_1d_coo_batched,
     _ot_1d_coo_batched_cuda,
     sot_plan_coo,
     to_csr,
     sparse_sqeuclidean_cost,
 )
-
-if _HAS_TRITON:
-    import triton
-    import triton.language as tl
-
-    @triton.jit
-    def _seg_lse_online_kernel(
-        indptr, colidx, lam, phi, psi, out, base, SUB: tl.constexpr,
-        BLOCK: tl.constexpr,
-    ):
-        """Single-pass LSE with a running max -- FlashAttention's online softmax.
-
-        The two-pass kernel reads each row twice: once to find the max, once to
-        accumulate exp(v - max). This keeps a running (m, s) pair and rescales the
-        accumulator whenever the max grows:
-
-            m' = max(m, max(block));   s' = s * exp(m - m') + sum(exp(block - m'))
-
-        so every element is touched once. Halves the loads of colidx, lam and the
-        gathered psi, which is the whole cost here -- the arithmetic is negligible.
-
-        With SUB the kernel stores `base[i] - LSE` rather than the LSE itself. The
-        caller always wants `log_a - LSE`, and at small n the loop is bound by kernel
-        launches rather than bandwidth (67 GB/s at n=1000 against 443 at n=10000), so
-        folding that subtraction in removes two of the four launches per iteration.
-
-        Dtype: `m`/`s` (the running max/sum) take their dtype from `lam`/`phi`/`psi`
-        at the call site, not from a hardcoded declaration here -- unlike
-        `_cost_kernel`'s accumulator above, there's no `tl.zeros(..., dtype=...)`
-        pinning them. In practice every caller in this repo passes fp32 tensors
-        (see `seg_lse_online`), so this always runs fp32, but that's a property of
-        the callers, not a guarantee this kernel enforces.
-        """
-        i = tl.program_id(0)
-        start = tl.load(indptr + i)
-        end = tl.load(indptr + i + 1)
-        p = tl.load(phi + i)
-
-        m = -float("inf")
-        s = 0.0
-        for off in range(start, end, BLOCK):
-            k = off + tl.arange(0, BLOCK)
-            valid = k < end
-            c = tl.load(colidx + k, mask=valid, other=0).to(tl.int32)
-            v = tl.load(lam + k, mask=valid, other=0.0)
-            q = tl.load(psi + c, mask=valid, other=0.0)
-            x = tl.where(valid, v + p + q, -float("inf"))
-            m_new = tl.maximum(m, tl.max(x))
-            s = s * tl.exp(m - m_new) + tl.sum(tl.where(valid, tl.exp(x - m_new), 0.0))
-            m = m_new
-
-        lse = tl.where(s > 0.0, m + tl.log(s), -float("inf"))
-        if SUB:
-            lse = tl.load(base + i) - lse
-        tl.store(out + i, lse)
-
 
 def launch_cfg(nnz: int, n: int) -> tuple[int, int]:
     """(BLOCK, num_warps) for a mean row length of nnz/n.
@@ -126,24 +71,23 @@ def seg_lse_online(indptr, colidx, lam, phi, psi, n, block=None, num_warps=None,
     an n-vector per half-step -- another launch's worth of work the allocator
     would otherwise do inside the loop.
 
-    Triton-only (the fused CSR kernel). For a device- or Triton-agnostic solve,
-    use `sinkslot_solve` or `sinkslot_alternating_torch`, which use
-    `_seg_lse_coo` instead.
+    Runs the fused CSR kernel of `lam`'s device (`_backends.py`): Triton's
+    `_seg_lse_online_kernel` on CUDA, the Metal `seg_lse` shader on MPS. The
+    kernels are float32. For a device-agnostic solve, use `sinkslot_solve` or
+    `sinkslot_alternating_torch`, which use `_seg_lse_coo` instead.
     """
-    if not _HAS_TRITON:
+    name = fused_backend(lam.device)
+    if name is None:
         raise RuntimeError(
-            "seg_lse_online needs Triton (pip install triton); "
-            "use sinkslot_solve() for a solve that works without it"
+            f"seg_lse_online needs a fused backend for {lam.device.type} tensors "
+            f"(Triton on CUDA, Metal on MPS); use sinkslot_solve() for a solve "
+            f"that works without one"
         )
     if block is None:
         block, num_warps = launch_cfg(colidx.numel(), n)
     if out is None:
         out = torch.empty(n, dtype=lam.dtype, device=lam.device)
-    _seg_lse_online_kernel[(n,)](
-        indptr, colidx, lam, phi, psi, out, base if base is not None else out,
-        SUB=base is not None, BLOCK=block, num_warps=num_warps or 4,
-    )
-    return out
+    return fused_ops(name).seg_lse(indptr, colidx, lam, phi, psi, out, base, block, num_warps)
 
 
 # --------------------------------------------------------------------------
@@ -171,8 +115,8 @@ _STOP_MODES = ("fixed", "marginal", "potential")
 
 
 def _resolve_stop_mode(stop):
-    """Shared by all four solve loops (`sinkslot_alternating_triton`/`_torch`,
-    `sinkslot_symmetric_triton`/`_torch`): resolve `stop.mode` (or "fixed" if
+    """Shared by all four solve loops (`sinkslot_alternating_fused`/`_torch`,
+    `sinkslot_symmetric_fused`/`_torch`): resolve `stop.mode` (or "fixed" if
     `stop` is None) and validate it against `_STOP_MODES` upfront, so the
     three valid modes stay one source of truth instead of four independently
     -maintained checks.
@@ -192,9 +136,13 @@ def _resolve_stop_mode(stop):
     return mode
 
 
-def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
+def sinkslot_alternating_fused(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
             n_iters, stop=None, eps=None):
-    """Alternating (Gauss-Seidel) Sinkhorn over prebuilt CSR/CSC, fused Triton half-steps.
+    """Alternating (Gauss-Seidel) Sinkhorn over prebuilt CSR/CSC, fused half-steps.
+
+    Each half-step is one `seg_lse_online` launch, which runs the fused kernel
+    of the inputs' device (Triton on CUDA, Metal on MPS); nothing else here is
+    backend-specific.
 
     Potentials are absorbed (phi = f/eps, psi = g/eps): lam already carries
     log P^SOT - C/eps, so seg_lse_online with base=log_a returns log_a - LSE
@@ -289,12 +237,12 @@ def sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a,
     return phi, psi, it, converged, viol
 
 
-def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
+def sinkslot_symmetric_fused(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
             n_iters, stop=None, eps=None, alpha=0.5):
-    """Symmetric (Jacobi) Sinkhorn over prebuilt CSR/CSC, fused Triton half-steps.
+    """Symmetric (Jacobi) Sinkhorn over prebuilt CSR/CSC, fused half-steps.
 
     Both half-steps read the SAME (phi, psi) pair -- unlike
-    `sinkslot_alternating_triton`'s Gauss-Seidel scheme, where the column
+    `sinkslot_alternating_fused`'s Gauss-Seidel scheme, where the column
     half-step already sees the row half-step's fresh update -- so the two
     candidates are computed into separate buffers, then blended:
 
@@ -311,7 +259,7 @@ def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, l
     values, still order-independent unlike Gauss-Seidel).
 
     Returns (phi, psi, iters_run, converged, final_viol), same contract as
-    `sinkslot_alternating_triton`. With stop.mode == "marginal": unlike
+    `sinkslot_alternating_fused`. With stop.mode == "marginal": unlike
     alternating, NEITHER marginal is exact after a blended update --
     the column marginal being exact right after the column half-step is a
     Gauss-Seidel property this scheme doesn't have (both `phi` and `psi` move
@@ -331,7 +279,7 @@ def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, l
 
     mode = _resolve_stop_mode(stop)
 
-    # A shared closure here, unlike sinkslot_alternating_triton's inlined
+    # A shared closure here, unlike sinkslot_alternating_fused's inlined
     # seg_lse_online calls, because the two situations aren't the same
     # shape: half_steps() is called 5 times below with an IDENTICAL "compute
     # both candidates" pattern every time (the marginal branch reuses it
@@ -414,8 +362,15 @@ def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, l
     return phi, psi, it, converged, viol
 
 
+# The loops' names from when Triton was the only fused backend. Still the
+# names the benchmark harness, color_transfer/ and gradient_flow/ import, and
+# still correct there: on a CUDA tensor the fused loop is the Triton loop.
+sinkslot_alternating_triton = sinkslot_alternating_fused
+sinkslot_symmetric_triton = sinkslot_symmetric_fused
+
+
 # --------------------------------------------------------------------------
-# Pure-torch fallback -- no Triton, works on CPU or a non-CUDA device.
+# Pure-torch fallback -- no fused kernels, works on any device.
 # --------------------------------------------------------------------------
 
 
@@ -436,16 +391,16 @@ def _seg_lse_coo(vals, idx, size):
 
 
 def sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=None, eps=None):
-    """Pure-torch counterpart to `sinkslot_alternating_triton` -- same three
-    `stop.mode` semantics, no Triton, no CSR/CSC (operates directly on the COO
+    """Pure-torch counterpart to `sinkslot_alternating_fused` -- same three
+    `stop.mode` semantics, no fused kernels, no CSR/CSC (operates directly on the COO
     `sot_plan_coo` returns, since `index_add_`/`scatter_reduce_` don't need
-    sorted input the way the Triton kernel's one-program-per-row parallelism
+    sorted input the way the fused kernels' one-program-per-row parallelism
     does).
 
-    See `sinkslot_alternating_triton`'s docstring for what each mode does; the
+    See `sinkslot_alternating_fused`'s docstring for what each mode does; the
     logic here mirrors it exactly, substituting
     `_seg_lse_coo(lam + other[idx], self_idx, size)` for `seg_lse_online(...)`.
-    Cross-checked against `sinkslot_alternating_triton` in
+    Cross-checked against `sinkslot_alternating_fused` in
     testing/test_torch_fallback.py.
     """
     phi, psi = torch.zeros_like(log_a), torch.zeros_like(log_b)
@@ -506,16 +461,16 @@ def sinkslot_alternating_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, sto
 
 def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=None,
                               eps=None, alpha=0.5):
-    """Pure-torch counterpart to `sinkslot_symmetric_triton` -- see its
+    """Pure-torch counterpart to `sinkslot_symmetric_fused` -- see its
     docstring for the update rule and stop-mode semantics; the logic here
     mirrors it exactly, substituting `_seg_lse_coo(...)` for
     `seg_lse_online(...)`, matching `sinkslot_alternating_torch`'s own
-    relationship to `sinkslot_alternating_triton`.
+    relationship to `sinkslot_alternating_fused`.
     """
     phi, psi = torch.zeros_like(log_a), torch.zeros_like(log_b)
     mode = _resolve_stop_mode(stop)
 
-    # Shared closure for the same reason sinkslot_symmetric_triton's own
+    # Shared closure for the same reason sinkslot_symmetric_fused's own
     # half_steps() is -- see that function's docstring.
     def half_steps(phi_cur, psi_cur):
         phi_cand = log_a - _seg_lse_coo(lam + psi_cur[cols], rows, n)
@@ -535,7 +490,7 @@ def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=
         # No .clone() needed: phi/psi are reassigned to a new tensor each
         # iteration (the blend above is out-of-place), never mutated in
         # place, so `prev_phi = phi` before overwriting is already a cheap
-        # reference -- unlike sinkslot_symmetric_triton, where phi/psi are
+        # reference -- unlike sinkslot_symmetric_fused, where phi/psi are
         # mutated in place via .mul_()/.add_() and a real copy is required.
         prev_phi, prev_psi = phi, psi
         it = 0
@@ -569,7 +524,7 @@ def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=
         it += 1
         if it % stop.check_every == 0 or it == stop.max_iter:
             # Fresh half-steps from the just-updated (phi, psi) -- see
-            # sinkslot_symmetric_triton's docstring for why neither marginal
+            # sinkslot_symmetric_fused's docstring for why neither marginal
             # is exact here the way alternating's column marginal is.
             phi_fresh, psi_fresh = half_steps(phi, psi)
             row_marg = a * (phi - phi_fresh).exp()
@@ -593,31 +548,37 @@ def sinkslot_solve(X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
                     variant="alternating", alpha=0.5) -> SinkslotSolveResult:
     """SinkSLOT end to end: build the sliced plan, then solve -- on any device.
 
-    Dispatches on X's device and whether Triton is importable: the fused Triton
-    kernels when both hold, the pure-torch path (`sinkslot_alternating_torch`,
+    Dispatches on X's device: the fused kernels when its device has a fused
+    backend available (Triton on CUDA, Metal shaders on Apple-silicon MPS; see
+    `_backends.py`), the pure-torch path (`sinkslot_alternating_torch`,
     `_ot_1d_coo_batched`) otherwise. Same algorithm and stopping semantics
     either way -- the two are cross-checked in testing/test_torch_fallback.py --
-    so this is the one call that works whether or not the caller has a CUDA GPU
+    so this is the one call that works whether or not the caller has a GPU
     or Triton installed. The pure-torch path is meaningfully slower (no
     fused kernels, no CSR launch-config tuning): use it for
     correctness/portability, not for reproducing the paper's own throughput
     numbers, which are all measured on the Triton path.
 
-    `backend`: "auto" (default) picks Triton when it's importable and X is
-    CUDA, torch otherwise -- covers the CPU and the "no Triton installed"
-    cases. "triton" forces it, raising if unavailable. "torch" forces the
-    pure-torch cost/solve path regardless of device -- the only way to run
-    that path ON a CUDA tensor, since "auto" always prefers Triton there when
-    it's available; useful for testing the torch path's CUDA numerics
-    specifically, or as a workaround if Triton itself is ever the problem.
+    `backend`: "auto" (default) picks the device's fused backend -- "triton"
+    on CUDA when Triton is importable, "metal" on MPS when
+    `torch.mps.compile_shader` exists -- and torch otherwise, which covers the
+    CPU and the "no Triton installed" cases. "triton"/"metal" force that
+    backend, raising if it can't run on X's device. Both are float32-only
+    (MPS has no float64 at all). "torch" forces the pure-torch cost/solve path
+    regardless of device -- the only way to run that path ON a GPU tensor,
+    since "auto" always prefers the fused kernels there when they're
+    available; useful for testing the torch path's GPU numerics
+    specifically, or as a workaround if a fused backend is ever the problem.
+    The names are the kernel languages, not the devices ("metal", not "mps").
     The sliced-plan builder (`_ot_1d_coo_batched[_cuda]`) is chosen by device
     either way, independent of `backend`: it's plain torch regardless, and the
-    CUDA-layout variant is still the better choice on a CUDA tensor even when
-    the cost/solve stage is forced to torch.
+    transposed-layout `_cuda` variant is the better choice on any GPU tensor
+    (CUDA, or MPS where it is 1.3-1.4x faster) even when the cost/solve stage
+    is forced to torch.
 
     `variant`: "alternating" (default, unchanged behavior) picks the
-    Gauss-Seidel loop (`sinkslot_alternating_triton`/`_torch`); "symmetric"
-    picks the Jacobi loop (`sinkslot_symmetric_triton`/`_torch`) instead,
+    Gauss-Seidel loop (`sinkslot_alternating_fused`/`_torch`); "symmetric"
+    picks the Jacobi loop (`sinkslot_symmetric_fused`/`_torch`) instead,
     which updates phi and psi simultaneously from the same prior state rather
     than sequentially -- see that function's own docstring for the update
     rule and why its marginal-violation check costs more than alternating's.
@@ -650,11 +611,9 @@ def sinkslot_solve(X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
         a = torch.full((X.shape[0],), 1.0 / X.shape[0], device=X.device, dtype=X.dtype)
     if b is None:
         b = torch.full((Y.shape[0],), 1.0 / Y.shape[0], device=Y.device, dtype=Y.dtype)
-    if backend not in ("auto", "triton", "torch"):
-        raise ValueError(f"backend must be 'auto', 'triton', or 'torch', got {backend!r}")
     if variant not in ("alternating", "symmetric"):
         raise ValueError(f"variant must be 'alternating' or 'symmetric', got {variant!r}")
-    # Reject half precision outright. The Triton path already refuses anything
+    # Reject half precision outright. The fused paths already refuse anything
     # but float32 (see sparse_sqeuclidean_cost), but the pure-torch fallback
     # used to accept float16/bfloat16 silently and return numbers that look
     # plausible and are not: the cost expression itself is dtype-agnostic, but
@@ -675,35 +634,28 @@ def sinkslot_solve(X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
             f"a and b must have equal total mass, got sum(a)={a.sum().item():.6g} "
             f"!= sum(b)={b.sum().item():.6g}"
         )
-    if backend == "triton":
-        if not (_HAS_TRITON and X.is_cuda):
-            raise ValueError("backend='triton' requires Triton installed and X on CUDA")
-        use_triton = True
-    elif backend == "torch":
-        use_triton = False
-    else:
-        use_triton = _HAS_TRITON and X.is_cuda
+    backend = resolve_backend(backend, X.device)
 
     stop = None if stop_mode == "fixed" else SimpleNamespace(
         mode=stop_mode, max_iter=stop_max_iter, tol=stop_tol,
         check_every=stop_check_every)
 
     n, m = X.shape[0], Y.shape[0]
-    ot1d = _ot_1d_coo_batched_cuda if X.is_cuda else _ot_1d_coo_batched
+    ot1d = _ot_1d_coo_batched if X.device.type == "cpu" else _ot_1d_coo_batched_cuda
     rows, cols, S = sot_plan_coo(X, Y, a, b, L=L, seed=seed, chunk=chunk, ot1d=ot1d)
-    cost = sparse_sqeuclidean_cost(X, Y, rows, cols, use_triton=use_triton)
+    cost = sparse_sqeuclidean_cost(X, Y, rows, cols, backend=backend)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
     log_a, log_b = a.log(), b.log()
 
-    if use_triton:
+    if backend != "torch":
         r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n, narrow_key=True)
         c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m, narrow_key=True)
         if variant == "symmetric":
-            phi, psi, it, converged, viol = sinkslot_symmetric_triton(
+            phi, psi, it, converged, viol = sinkslot_symmetric_fused(
                 r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
                 n_iters, stop, eps, alpha)
         else:
-            phi, psi, it, converged, viol = sinkslot_alternating_triton(
+            phi, psi, it, converged, viol = sinkslot_alternating_fused(
                 r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m,
                 n_iters, stop, eps)
     else:
@@ -747,10 +699,7 @@ def sparse_transport_plan(x: Float[torch.Tensor, "n d"], y: Float[torch.Tensor, 
         stop_max_iter=stop_max_iter, stop_tol=stop_tol,
         stop_check_every=stop_check_every, backend=backend,
         variant=variant, alpha=alpha)
-    cost = sparse_sqeuclidean_cost(
-        x, y, rows, cols,
-        use_triton=(backend == "triton") if backend != "auto" else None,
-    )
+    cost = sparse_sqeuclidean_cost(x, y, rows, cols, backend=backend)
     log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
     plan_vals = (phi[rows] + psi[cols] + log_S - cost / eps).exp()
 

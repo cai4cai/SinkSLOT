@@ -62,10 +62,7 @@ class _SLOTCostFn(torch.autograd.Function):
             stop_max_iter=stop_max_iter, stop_tol=stop_tol,
             stop_check_every=stop_check_every, backend=backend,
             variant=variant, alpha=alpha)
-        cost = sparse_sqeuclidean_cost(
-            X, Y, rows, cols,
-            use_triton=(backend == "triton") if backend != "auto" else None,
-        )
+        cost = sparse_sqeuclidean_cost(X, Y, rows, cols, backend=backend)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
         lam = log_S - cost / eps
         # T_vals is only needed for backward's barycentric map, not for the
@@ -98,12 +95,12 @@ class SamplesLoss(torch.nn.Module):
     each `stop_mode` value checks. Early stopping only changes how many
     iterations `forward` runs -- `backward` reuses whatever potentials it
     converged to either way, since the envelope theorem holds at any fixed
-    point regardless of how it was reached. `backend`: "auto" / "triton" /
-    "torch", see `sinkslot_solve`.
+    point regardless of how it was reached. `backend`: "auto" / "torch" /
+    "triton" / "metal", see `sinkslot_solve`.
 
     `variant`: "alternating" (default) uses the Gauss-Seidel solve loop,
     same as every other SinkSLOT entry point so far. "symmetric" uses the
-    Jacobi loop instead -- see `sinkhorn_solvers.sinkslot_symmetric_triton`'s
+    Jacobi loop instead -- see `sinkhorn_solvers.sinkslot_symmetric_fused`'s
     own docstring for the update rule. `alpha` is that update's blend weight
     (`f_new = (1-alpha)*f_old + alpha*f_cand`); unused when
     `variant="alternating"`.

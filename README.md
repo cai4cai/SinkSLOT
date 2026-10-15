@@ -15,10 +15,11 @@ number of random slicing directions.
 The resulting objective, SLOT, is a divergence: SLOT(x, x) = 0, so it
 needs no debiasing.
 
-On CUDA, `backend="auto"` (the default) uses the fused Triton kernels when
-Triton is installed; otherwise, and always on CPU, SinkSLOT automatically
-falls back to plain PyTorch, running the same algorithm just without the
-fused-kernel throughput.
+`backend="auto"` (the default) uses fused kernels where the device has them:
+Triton on CUDA when Triton is installed, and Metal shaders on Apple silicon
+(MPS). Otherwise, and always on CPU, SinkSLOT automatically falls back to
+plain PyTorch, running the same algorithm just without the fused-kernel
+throughput.
 
 ## Install
 
@@ -32,7 +33,10 @@ pip install -e .
 
 **Requirements:** PyTorch >= 2.5. Triton >= 3.1 is optional
 (`pip install -e ".[triton]"`) for the fused Triton/CUDA kernels. Without
-it, SinkSLOT runs the pure-torch fallback automatically.
+it, SinkSLOT runs the pure-torch fallback automatically. On Apple silicon the
+fused Metal kernels need nothing extra: they ship as Metal source compiled at
+runtime by `torch.mps.compile_shader`, and are used whenever the installed
+PyTorch has it (tested with PyTorch 2.14). Older builds fall back to torch.
 
 ## Tensor Contract
 
@@ -56,9 +60,14 @@ call, independent of global PyTorch RNG state or any prior call.
 |---|---|
 | `N != M` | Yes |
 | `float32` | Yes, on every backend |
-| `float64` | Yes on `backend="torch"`. No on `backend="triton"`, raises `ValueError`: the Triton kernels are float32-only |
-| CPU | Yes. `backend="auto"` (the default) resolves to `torch`; Triton requires CUDA |
+| `float64` | Yes on `backend="torch"`. No on `backend="triton"` or `"metal"`, raises `ValueError`: the fused kernels are float32-only (and MPS has no float64) |
+| CPU | Yes. `backend="auto"` (the default) resolves to `torch`; the fused backends need a GPU |
 | CUDA | Yes. `backend="auto"` (the default) picks `triton` when installed, `torch` otherwise |
+| Apple silicon (MPS) | Yes. `backend="auto"` (the default) picks `metal` when `torch.mps.compile_shader` exists, `torch` otherwise |
+
+Backend names are the kernel language, not the device: `"triton"` runs on
+`cuda` tensors and `"metal"` on `mps` tensors. Forcing a fused backend on a
+device it can't run on raises `ValueError` rather than falling back.
 
 ## Basic Usage
 
@@ -163,7 +172,7 @@ SamplesLoss(
     L=64,                    # number of random slicing directions
     seed=0,                  # RNG seed for the slicing directions
     n_iters=200,             # exact iteration count when stop_mode="fixed" (the default)
-    backend="auto",          # "auto" | "triton" | "torch"
+    backend="auto",          # "auto" | "torch" | "triton" (CUDA) | "metal" (MPS)
     variant="alternating",   # "alternating" (Gauss-Seidel) | "symmetric" (Jacobi)
     alpha=0.5,                # Jacobi blend weight, only used when variant="symmetric"
     stop_mode="fixed",       # "fixed" | "marginal" | "potential"
@@ -254,6 +263,32 @@ python scripts/scalability.py --execute    # run them
 Benchmarked against [FlashSinkhorn](https://github.com/ot-triton-lab/flash-sinkhorn),
 [SROT](https://github.com/khainb/SROT), and
 [Spar-Sink](https://github.com/Mengyu8042/Spar-Sink).
+
+### Apple silicon
+
+The published sweeps are CUDA-only. On a Mac, `--fused-vs-torch` times
+SinkSLOT's fused Metal loop against its own pure-torch loop on the same
+support (alternating, `eps=0.1`, ms per iteration, `d=3`; `d=64` is within a
+few percent, since the cost is computed once outside the loop):
+
+```bash
+python -m sinkslot.bench.bench_forward --fused-vs-torch \
+    --sizes 100000,10000,1000 --dims 3 --sinkslot-slices 16,64,256 --n-iters 50
+```
+
+| N | L | nnz | torch (MPS) | Metal | Speedup |
+|---:|---:|---:|---:|---:|---:|
+| 1,000 | 16 | 16k | 0.194 | 0.020 | 9.6x |
+| 1,000 | 64 | 60k | 0.326 | 0.026 | 12.5x |
+| 1,000 | 256 | 209k | 0.665 | 0.038 | 17.7x |
+| 10,000 | 16 | 160k | 0.403 | 0.083 | 4.9x |
+| 10,000 | 64 | 636k | 1.301 | 0.119 | 10.9x |
+| 10,000 | 256 | 2.5M | 5.939 | 0.300 | 19.8x |
+| 100,000 | 16 | 1.6M | 2.615 | 0.692 | 3.8x |
+| 100,000 | 64 | 6.4M | 13.146 | 1.056 | 12.4x |
+| 100,000 | 256 | 25.5M | 68.255 | 3.556 | 19.2x |
+
+Measured on an Apple M2 Pro, PyTorch 2.14.1.
 
 ## Citation
 

@@ -4,8 +4,9 @@ The contract is not the same on both devices, which is worth stating plainly
 because everything else about the two paths is deliberately identical:
 
     float32   accepted everywhere
-    float64   accepted on the pure-torch path; refused on the Triton path,
-              whose cost kernel has a fixed float32 accumulator
+    float64   accepted on the pure-torch path; refused on the fused paths
+              (Triton, Metal), whose cost kernels have a fixed float32
+              accumulator -- and MPS has no float64 at all
     float16   refused everywhere
     bfloat16  refused everywhere
 
@@ -17,7 +18,7 @@ cost expression is genuinely dtype-agnostic -- the failure is downstream, in
 the log-domain iteration, whose exp() overflows a narrow exponent. Nothing
 raised, so the only signal was the wrong answer.
 
-The float64/Triton asymmetry is a real restriction, not an oversight, so
+The float64/fused asymmetry is a real restriction, not an oversight, so
 there is a test asserting it stays an explicit error rather than decaying
 into a silent downcast.
 """
@@ -70,10 +71,9 @@ def test_float32_and_float64_agree_on_cpu():
 
 
 @pytest.mark.parametrize("dtype", HALF)
-def test_half_precision_is_refused_on_cuda_too(dtype):
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
-    x, y = _pair(dtype, device="cuda")
+def test_half_precision_is_refused_on_gpu_too(fused, dtype):
+    device, _ = fused
+    x, y = _pair(dtype, device=device)
     with pytest.raises(ValueError):
         sinkslot_solve(x, y, eps=0.1, L=16, seed=0, n_iters=10)
 
@@ -92,3 +92,12 @@ def test_float64_is_an_explicit_error_on_the_triton_path():
     x, y = _pair(torch.float64, device="cuda")
     with pytest.raises(ValueError, match="float32"):
         sinkslot_solve(x, y, eps=0.1, L=16, seed=0, n_iters=10, backend="triton")
+
+
+def test_float64_is_an_explicit_error_on_the_metal_path():
+    """The Metal counterpart of the test above. MPS cannot hold float64 at
+    all, so a float64 request for the Metal backend can only arrive on a CPU
+    tensor -- and must still raise, not fall back to torch."""
+    x, y = _pair(torch.float64)
+    with pytest.raises(ValueError, match="backend='metal'"):
+        sinkslot_solve(x, y, eps=0.1, L=16, seed=0, n_iters=10, backend="metal")

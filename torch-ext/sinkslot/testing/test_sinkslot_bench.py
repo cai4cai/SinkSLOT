@@ -5,7 +5,8 @@ Three equivalences the module otherwise only asserts in prose:
 * the batched 1-D OT builder against an independent north-west-corner reference,
 * the naive plan builder against the CUDA one, which must agree on the transport
   while remaining separate implementations,
-* the fused Triton Sinkhorn loop against a plain-torch segmented LSE.
+* the fused Sinkhorn loop (every fused backend this machine has) against a
+  plain-torch segmented LSE.
 
 The middle one is regression cover. The naive builder is the SinkSLOT baseline
 and the CUDA one is the treatment; if an edit or a merge ever makes their bodies
@@ -16,8 +17,10 @@ measurement of one path against itself, and every other test still passes.
 import pytest
 import torch
 
-triton = pytest.importorskip("triton")
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+# The plan-builder tests compare the naive and CUDA-layout builders on CUDA,
+# where the latter is the SinkSLOT-CUDA treatment; the loop test runs on every
+# fused backend through the `fused` fixture instead.
+needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
 from sinkslot.solver import (  # noqa: E402
     _ot_1d_coo_batched,
@@ -26,7 +29,7 @@ from sinkslot.solver import (  # noqa: E402
     sparse_sqeuclidean_cost,
     to_csr,
 )
-from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton  # noqa: E402
+from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused  # noqa: E402
 
 
 def _problem(n=512, m=384, d=4, seed=0, device="cuda"):
@@ -63,6 +66,7 @@ def _ot_1d_reference(px, py, a, b):
     return ix[i], iy[j], mass
 
 
+@needs_cuda
 def test_batched_1d_builder_matches_reference():
     """`_ot_1d_coo_batched` vectorises C independent 1-D OT solves."""
     n, m, C = 256, 192, 8
@@ -83,6 +87,7 @@ def test_batched_1d_builder_matches_reference():
         f"max |dP| = {(batched - ref).abs().max():.3e}"
 
 
+@needs_cuda
 def test_naive_and_cuda_builders_are_distinct_implementations():
     """The two plan builders must not collapse into the same code.
 
@@ -108,6 +113,7 @@ def test_naive_and_cuda_builders_are_distinct_implementations():
         "naive path gained the fp64 cumsum -- it is the untouched baseline"
 
 
+@needs_cuda
 def test_naive_and_cuda_builders_agree_on_the_transport():
     """Different supports, same transport.
 
@@ -129,10 +135,10 @@ def test_naive_and_cuda_builders_agree_on_the_transport():
     assert torch.allclose(P0, P1, atol=1e-5), f"max |dP| = {(P0 - P1).abs().max():.3e}"
 
 
-def test_sinkslot_alternating_triton_matches_plain_torch_segmented_lse():
-    """The fused Triton loop against a straightforward scatter-based Sinkhorn."""
+def test_sinkslot_alternating_fused_matches_plain_torch_segmented_lse(fused):
+    """The fused loop against a straightforward scatter-based Sinkhorn."""
     n, m, eps, L, iters = 512, 384, 0.05, 32, 40
-    x, y, a, b = _problem(n, m, d=4)
+    x, y, a, b = _problem(n, m, d=4, device=fused[0])
 
     rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
     cost = sparse_sqeuclidean_cost(x, y, rows, cols)
@@ -141,7 +147,7 @@ def test_sinkslot_alternating_triton_matches_plain_torch_segmented_lse():
 
     r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n)
     c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m)
-    phi, psi, *_ = sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
+    phi, psi, *_ = sinkslot_alternating_fused(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
                            log_a, log_b, n, m, iters)
 
     def seg_lse(vals, idx, size):
@@ -150,7 +156,7 @@ def test_sinkslot_alternating_triton_matches_plain_torch_segmented_lse():
         acc = vals.new_zeros(size).index_add_(0, idx, (vals - mx[idx]).exp())
         return mx + acc.clamp_min(torch.finfo(vals.dtype).tiny).log()
 
-    # Same absorbed convention as sinkslot_alternating_triton: phi = f/eps, psi = g/eps.
+    # Same absorbed convention as sinkslot_alternating_fused: phi = f/eps, psi = g/eps.
     p = torch.zeros(n, device=x.device)
     q = torch.zeros(m, device=x.device)
     for _ in range(iters):

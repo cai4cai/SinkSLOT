@@ -52,6 +52,10 @@ Usage:
 
     # Subprocess mode: still available for maximum isolation if needed
     python -m sinkslot.bench.bench_forward --subprocess --dims 512
+
+    # SinkSLOT fused backend vs its torch path only (CUDA or Apple silicon)
+    python -m sinkslot.bench.bench_forward --fused-vs-torch \\
+        --sizes 50000,10000,1000 --dims 3 --sinkslot-slices 16,64,256 --n-iters 100
 """
 
 from __future__ import annotations
@@ -3523,6 +3527,81 @@ def run_forward_benchmark_subprocess(
     return results
 
 
+def bench_fused_vs_torch(
+    sizes: List[int], slices: List[int], dims: List[int], eps: float, n_iters: int,
+    warmup: int, rep: int, output_dir: Path, device: Optional[str] = None,
+) -> List[dict]:
+    """SinkSLOT's fused backend against its own pure-torch path, on one device.
+
+    The per-backend speedup table in the README: same support, same lam, same
+    loop, only the half-step kernel differs (`sinkslot_alternating_fused` vs
+    `sinkslot_alternating_torch`), timed per iteration over a fixed `n_iters`.
+    The fused backend is whichever `backend="auto"` picks on `device` (Triton
+    on CUDA, Metal on MPS), so this is the one mode of this harness that runs
+    on Apple silicon: wall-clock with a device synchronize, since MPS has no
+    CUDA events and the loop is long enough for the sync to be negligible.
+    """
+    from sinkslot._backends import resolve_backend
+    from sinkslot.solver import (
+        _ot_1d_coo_batched_cuda, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
+    )
+    from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused, sinkslot_alternating_torch
+
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else (
+            "mps" if torch.backends.mps.is_available() else "cpu")
+    backend = resolve_backend("auto", device)
+    if backend == "torch":
+        raise RuntimeError(f"no fused backend available on {device!r}")
+    sync = torch.cuda.synchronize if device == "cuda" else torch.mps.synchronize
+
+    def per_iter_ms(fn):
+        for _ in range(warmup):
+            fn()
+        sync()
+        t0 = time.perf_counter()
+        for _ in range(rep):
+            fn()
+        sync()
+        return (time.perf_counter() - t0) / (rep * n_iters) * 1e3
+
+    rows_out = []
+    print(f"SinkSLOT {backend} vs torch on {device}, eps={eps}, {n_iters} iters/run, ms/iter")
+    print(f"{'n':>7} {'d':>3} {'L':>4} {'nnz':>10} {'torch':>9} {backend:>9} {'speedup':>8}")
+    for d in dims:
+        for n in sorted(sizes, reverse=True):
+            g = torch.Generator(device="cpu").manual_seed(0)
+            x = torch.randn(n, d, generator=g).to(device)
+            y = (torch.randn(n, d, generator=g) + 1.0).to(device)
+            a = torch.full((n,), 1.0 / n, device=device)
+            log_a = a.log()
+            for L in slices:
+                rows, cols, S = sot_plan_coo(x, y, a, a, L=L, seed=0, ot1d=_ot_1d_coo_batched_cuda)
+                cost = sparse_sqeuclidean_cost(x, y, rows, cols, backend=backend)
+                lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
+                csr = to_csr(rows, cols, lam, n, narrow_key=True)[:3]
+                csc = to_csr(cols, rows, lam, n, narrow_key=True)[:3]
+                t_fused = per_iter_ms(lambda: sinkslot_alternating_fused(
+                    *csr, *csc, log_a, log_a, n, n, n_iters))
+                t_torch = per_iter_ms(lambda: sinkslot_alternating_torch(
+                    rows, cols, lam, log_a, log_a, n, n, n_iters))
+                row = dict(device=device, backend=backend, n=n, d=d, L=L, nnz=rows.numel(),
+                           torch_ms_per_iter=t_torch, fused_ms_per_iter=t_fused,
+                           speedup=t_torch / t_fused)
+                rows_out.append(row)
+                print(f"{n:>7} {d:>3} {L:>4} {rows.numel():>10} {t_torch:>9.3f} "
+                      f"{t_fused:>9.3f} {t_torch / t_fused:>7.1f}x", flush=True)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out = output_dir / f"fused_vs_torch_{backend}.csv"
+    with open(out, "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows_out[0]))
+        writer.writeheader()
+        writer.writerows(rows_out)
+    print(f"Saved {out}")
+    return rows_out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Unified forward pass benchmark for FlashSinkhorn paper."
@@ -3642,6 +3721,11 @@ def main() -> None:
         help="Run each size in a separate subprocess (rarely needed with bucketed cache keys)."
     )
     parser.add_argument(
+        "--fused-vs-torch", action="store_true",
+        help="Only time SinkSLOT's fused backend (Triton on CUDA, Metal on MPS) against its "
+             "pure-torch path, across --sizes x --dims x --sinkslot-slices. Runs on Apple silicon.",
+    )
+    parser.add_argument(
         "--single-size", type=int, default=None,
         help=argparse.SUPPRESS,  # Hidden: used internally by --subprocess mode
     )
@@ -3658,6 +3742,16 @@ def main() -> None:
     sparsink_s = [int(v) for v in str(args.sparsink_s).split(",") if v.strip()]
     sinkslot_slices = [int(v) for v in str(args.sinkslot_slices).split(",") if v.strip()]
     sinkslotcuda_slices = [int(v) for v in str(args.sinkslotcuda_slices).split(",") if v.strip()]
+
+    if args.fused_vs_torch:
+        bench_fused_vs_torch(
+            sizes=[int(v) for v in args.sizes.split(",") if v.strip()],
+            slices=sinkslot_slices,
+            dims=[int(v) for v in args.dims.split(",") if v.strip()],
+            eps=args.eps, n_iters=args.n_iters, warmup=args.warmup, rep=args.rep,
+            output_dir=Path(args.output_dir),
+        )
+        return
 
     # =====================================================================
     # Worker mode: benchmark a single (n, d) and emit JSON to stdout
