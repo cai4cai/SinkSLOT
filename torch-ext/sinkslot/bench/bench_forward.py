@@ -86,6 +86,7 @@ from sinkslot.bench.reference_solvers import (  # noqa: F401 - re-exported
     _srot_sinkhorn,
     build_sot_plan,
     build_sparse_kernel,
+    geomloss_multiscale,
     geomloss_online,
 )
 
@@ -1140,6 +1141,56 @@ def bench_geomloss_online(
     return _attach(res, _safe_metrics(lambda: _dense_plan_metrics(None, f, g, x, y, a, b, eps, ref)))
 
 
+def bench_geomloss_multiscale(
+    n: int, m: int, d: int, eps: float, n_iters: int,
+    device: torch.device, warmup: int, rep: int,
+    *,
+    nvtx: bool = False,
+    rmae_check: bool = True,
+    dataset: str = "gaussian",
+    stop: "StopCfg" = None,
+    seed: int = 0,
+    warmup_iters: int = 10,
+) -> TimingResult:
+    """GeomLoss multiscale (KeOps, block-sparse) via reference_solvers.geomloss_multiscale:
+    the two-scale scheme of GeomLoss's sinkhorn_multiscale at a fixed eps, with
+    GeomLoss's default cluster_scale and truncate, and the potential-change check
+    in both stages. d <= 3 only. Damping and stop threshold as bench_geomloss_online.
+    The timed solve includes the clustering. nnz is the number of point pairs the
+    fine stage sums over (every pair when the kernel is not truncated).
+    """
+    method = "geomloss_multiscale"
+    try:
+        from pykeops.torch import generic_logsumexp  # noqa: F401 - needed by keops_lse
+    except ImportError:
+        return _oom_result(method, n, m, d, eps, n_iters, dataset=dataset, seed=seed)
+    if d > 3:
+        raise ValueError(f"{method} supports d <= 3 (pykeops grid_cluster); got d={d}")
+    _set_tf32(False)
+    x, y, a, b = _sample_problem(n, m, d, device, dataset, seed)
+
+    _stop = stop or StopCfg.fixed()
+    if _stop.mode not in ("fixed", "potential"):
+        raise ValueError(f"{method} does not support stop mode {_stop.mode!r}; choices: ('fixed', 'potential')")
+    def solve(cap):
+        st, it_fixed = _capped(_stop, n_iters, cap)
+        if st.mode == "fixed":
+            return geomloss_multiscale(x, y, a, b, eps, it_fixed)
+        return geomloss_multiscale(x, y, a, b, eps, st.max_iter, threshold=st.tol, check_every=st.check_every)
+
+    try:
+        stats, (f, g, iters_run, converged, _, _, info), peak = _time_solve(
+            solve, warmup, warmup_iters, rep, nvtx=nvtx, nvtx_label=f"{method} n={n} d={d} eps={eps}")
+    except torch.cuda.OutOfMemoryError:
+        return _oom_result(method, n, m, d, eps, n_iters, dataset=dataset, seed=seed)
+    res = _ok_result(method, n, m, d, eps, stats, peak, device, stop=_stop, stop_eff=_damped(_stop),
+                     n_iters=n_iters, iters_run=iters_run, converged=converged,
+                     dataset=dataset, tf32=False, seed=seed)
+    res.nnz = int(round(info["kept_fraction"] * n * m))
+
+    ref = _safe_metrics(lambda: {"ref": _exact_ref(rmae_check, n, m, d, seed, x, y, a, b, dataset)}).get("ref")
+    return _attach(res, _safe_metrics(lambda: _dense_plan_metrics(None, f, g, x, y, a, b, eps, ref)))
+
 def bench_geomloss_tensorized(
     n: int, m: int, d: int, eps: float, n_iters: int,
     device: torch.device, warmup: int, rep: int,
@@ -2104,6 +2155,7 @@ def run_forward_benchmark(
     seed: int = 0,
     include_sinkslotcuda_symmetric: bool = False,
     warmup_iters: int = 10,
+    include_geomloss_multiscale: bool = False,
 ) -> List[TimingResult]:
     """Run forward pass benchmark.
 
@@ -2196,6 +2248,17 @@ def run_forward_benchmark(
                 if verbose:
                     status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
                     print(f"  GeomLoss KeOps:        {status}")
+
+            # GeomLoss multiscale (KeOps, block-sparse; d <= 3)
+            if include_geomloss_multiscale and d <= 3:
+                res = bench_geomloss_multiscale(
+                    n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, rmae_check=rmae_check,
+                    dataset=dataset, stop=stop, seed=seed, warmup_iters=warmup_iters,
+                )
+                results.append(res)
+                if verbose:
+                    status = "OOM" if res.oom else f"{res.mean_ms:.3f} +/- {res.std_ms:.3f} ms"
+                    print(f"  GeomLoss multiscale:   {status}")
 
             # GeomLoss tensorized (dense, small sizes only)
             if include_geomloss and include_tensorized and n <= max_dense_size:
@@ -2811,6 +2874,8 @@ def run_forward_benchmark_subprocess(
             cmd.extend(["--srot-slices", args.srot_slices, "--srot-delta", str(args.srot_delta)])
         if args.no_geomloss:
             cmd.append("--no-geomloss")
+        if args.no_geomloss_multiscale:
+            cmd.append("--no-geomloss-multiscale")
         if args.no_ott:
             cmd.append("--no-ott")
         if args.no_rmae_check:
@@ -2938,12 +3003,15 @@ def main() -> None:
         help="SROT: weight of the independent coupling mixed into pi_SOT.",
     )
     parser.add_argument("--no-geomloss", action="store_true", help="Skip GeomLoss benchmarks.")
+    parser.add_argument("--no-geomloss-multiscale", action="store_true",
+                        help="Skip GeomLoss multiscale benchmarks (run only for d <= 3).")
     parser.add_argument("--no-flash-symmetric", action="store_true", help="Skip FlashSinkhorn symmetric backend.")
     parser.add_argument("--no-flash-alternating", action="store_true", help="Skip FlashSinkhorn alternating backend.")
     parser.add_argument(
         "--only",
         choices=("flash_symmetric", "flash_alternating", "flash", "geomloss", "ott", "srot",
-                 "spar_sink", "rand_sink", "sinkslot", "sinkslotcuda", "sinkslotcuda_symmetric"),
+                 "spar_sink", "rand_sink", "sinkslot", "sinkslotcuda", "sinkslotcuda_symmetric",
+                 "geomloss_multiscale"),
         default=None,
         help="Run only one method (useful for Nsight Systems profiling). 'flash' runs both FlashSinkhorn backends.",
     )
@@ -3025,6 +3093,7 @@ def main() -> None:
         include_sinkslot = not args.no_sinkslot
         include_sinkslotcuda = not args.no_sinkslotcuda
         include_sinkslotcuda_symmetric = not args.no_sinkslotcuda_symmetric
+        include_geomloss_multiscale = not args.no_geomloss_multiscale
         include_tensorized = bool(args.tensorized)
 
         if args.only is not None:
@@ -3037,6 +3106,7 @@ def main() -> None:
             include_sinkslot = args.only == "sinkslot"
             include_sinkslotcuda = args.only == "sinkslotcuda"
             include_sinkslotcuda_symmetric = args.only == "sinkslotcuda_symmetric"
+            include_geomloss_multiscale = args.only == "geomloss_multiscale"
             include_tensorized = False
 
         results = run_forward_benchmark(
@@ -3069,6 +3139,7 @@ def main() -> None:
             sinkslot_slices=sinkslot_slices,
             include_sinkslotcuda=include_sinkslotcuda,
             include_sinkslotcuda_symmetric=include_sinkslotcuda_symmetric,
+            include_geomloss_multiscale=include_geomloss_multiscale,
             warmup_iters=args.warmup_iters,
             sinkslotcuda_slices=sinkslotcuda_slices,
             stop=_stop_cfg,
@@ -3149,6 +3220,7 @@ def main() -> None:
     include_sinkslot = not args.no_sinkslot
     include_sinkslotcuda = not args.no_sinkslotcuda
     include_sinkslotcuda_symmetric = not args.no_sinkslotcuda_symmetric
+    include_geomloss_multiscale = not args.no_geomloss_multiscale
     include_tensorized = bool(args.tensorized)
 
     if args.only is not None:
@@ -3161,6 +3233,7 @@ def main() -> None:
         include_sinkslot = args.only == "sinkslot"
         include_sinkslotcuda = args.only == "sinkslotcuda"
         include_sinkslotcuda_symmetric = args.only == "sinkslotcuda_symmetric"
+        include_geomloss_multiscale = args.only == "geomloss_multiscale"
         if include_tensorized:
             print("Warning: Ignoring --tensorized because --only is set.")
             include_tensorized = False
@@ -3225,6 +3298,7 @@ def main() -> None:
             sinkslot_slices=sinkslot_slices,
             include_sinkslotcuda=include_sinkslotcuda,
             include_sinkslotcuda_symmetric=include_sinkslotcuda_symmetric,
+            include_geomloss_multiscale=include_geomloss_multiscale,
             warmup_iters=args.warmup_iters,
             sinkslotcuda_slices=sinkslotcuda_slices,
             stop=_stop_cfg,

@@ -99,6 +99,8 @@ def build_command(
         cmd.append("--no-rmae-check")
     if cfg.no_geomloss:
         cmd.append("--no-geomloss")
+    if cfg.no_geomloss_multiscale:
+        cmd.append("--no-geomloss-multiscale")
     if cfg.no_flash_symmetric:
         cmd.append("--no-flash-symmetric")
     if cfg.no_flash_alternating:
@@ -193,6 +195,8 @@ def _methods(cfg: BenchConfig) -> List[str]:
         names.append("flash_alternating")
     if not cfg.no_geomloss:
         names.append("geomloss")
+    if not cfg.no_geomloss_multiscale:
+        names.append("geomloss_multiscale")
     if not cfg.no_srot:
         names.append("srot")
     if not cfg.no_sinkslot:
@@ -241,6 +245,8 @@ def _units(cfg: BenchConfig) -> Iterator[Unit]:
                     yield Unit(dataset, eps, None, None, d, None, seed, cfg.tf32)
                     continue
                 for method in _methods(cfg):
+                    if method == "geomloss_multiscale" and d is not None and d > 3:
+                        continue  # grid clustering is d <= 3 only
                     tf32_values = cfg.flash_tf32 if method in FLASH_METHODS else [cfg.tf32]
                     if method in SPARSINK_METHODS:
                         # s expands these two only, like L for the sliced methods.

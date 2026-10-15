@@ -94,6 +94,8 @@ class BenchConfig:
             solve on GPU, one per (dataset, n, d, eps), disk-cached across runs; it
             dominates sweep time at large n (~50s at n=4096).
         no_geomloss: Skip the GeomLoss/KeOps baseline.
+        no_geomloss_multiscale: Skip GeomLoss multiscale (block-sparse KeOps, d <= 3
+            only; units with d > 3 are not generated). Skipped by default.
         no_flash_symmetric: Skip FlashSinkhorn's symmetric backend.
         no_flash_alternating: Skip FlashSinkhorn's alternating backend.
         only: Restrict the sweep to a single method: ``"flash_symmetric"``,
@@ -171,6 +173,7 @@ class BenchConfig:
     no_ott: bool = True
     no_rmae_check: bool = False
     no_geomloss: bool = False
+    no_geomloss_multiscale: bool = True
     no_flash_symmetric: bool = False
     no_flash_alternating: bool = False
     only: Optional[str] = None

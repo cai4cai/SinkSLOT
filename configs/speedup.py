@@ -114,6 +114,7 @@ def build_config(median_c: Dict[Tuple[str, int], Optional[float]] = MEDIAN_C) ->
         no_ott=True,
         no_rmae_check=False,
         no_geomloss=False,
+        no_geomloss_multiscale=False,
         no_flash_symmetric=False,
         no_flash_alternating=False,
 
