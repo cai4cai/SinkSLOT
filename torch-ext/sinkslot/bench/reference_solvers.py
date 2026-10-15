@@ -23,6 +23,8 @@ a solver.
 
 from typing import Optional, Tuple
 
+import math
+
 import torch
 
 
@@ -228,6 +230,9 @@ def geomloss_multiscale(
                 if last_change < alpha * threshold:
                     converged, cont = True, i + 1
                     break
+                if not math.isfinite(last_change):
+                    cont = i + 1
+                    break
 
     f_out, g_out = torch.empty_like(f), torch.empty_like(g)
     f_out[perm_x], g_out[perm_y] = f, g
@@ -254,6 +259,17 @@ def kmeans_labels(x: torch.Tensor, k: int, iters: int = 10, seed: int = 0) -> to
         cnt = torch.bincount(lab, minlength=len(c)).clamp_min(1).unsqueeze(1)
         c = torch.zeros_like(c).index_add_(0, lab, x) / cnt
     return torch.unique(torch.cdist(x, c).argmin(1), return_inverse=True)[1]
+
+
+def cluster_side(x: torch.Tensor, labels: torch.Tensor) -> float:
+    """Side of the cube cell whose points have the same RMS distance to their centroid as the
+    clusters of x (labels): RMS * sqrt(12 / d). The cluster_scale of geomloss_multiscale for
+    labels, in place of the grid's cell side."""
+    n_c = int(labels.max()) + 1
+    cnt = torch.bincount(labels, minlength=n_c).clamp_min(1).unsqueeze(1).to(x.dtype)
+    centroids = torch.zeros(n_c, x.shape[1], dtype=x.dtype, device=x.device).index_add_(0, labels, x) / cnt
+    rms = (x - centroids[labels]).pow(2).sum(1).mean().sqrt()
+    return float(rms * (12 / x.shape[1]) ** 0.5)
 
 
 def flash_symmetric_alpha(x, y, a, b, alpha, *, eps, n_iters, allow_tf32, threshold, check_every):

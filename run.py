@@ -103,7 +103,9 @@ def build_command(
     if cfg.no_geomloss_multiscale:
         cmd.append("--no-geomloss-multiscale")
     elif method in (None, "geomloss_multiscale"):
-        cmd += ["--geomloss-truncate", str(cfg.geomloss_truncate)]
+        cmd += ["--geomloss-truncate", str(cfg.geomloss_truncate),
+                "--geomloss-clustering", cfg.geomloss_clustering,
+                "--geomloss-n-clusters", str(cfg.geomloss_n_clusters)]
     if cfg.no_flash_symmetric:
         cmd.append("--no-flash-symmetric")
     if cfg.no_flash_alternating:
@@ -248,7 +250,8 @@ def _units(cfg: BenchConfig) -> Iterator[Unit]:
                     yield Unit(dataset, eps, None, None, d, None, seed, cfg.tf32)
                     continue
                 for method in _methods(cfg):
-                    if method == "geomloss_multiscale" and d is not None and d > 3:
+                    if (method == "geomloss_multiscale" and d is not None and d > 3
+                            and cfg.geomloss_clustering == "grid"):
                         continue  # grid clustering is d <= 3 only
                     tf32_values = cfg.flash_tf32 if method in FLASH_METHODS else [cfg.tf32]
                     if method in SPARSINK_METHODS:

@@ -87,7 +87,9 @@ from sinkslot.bench.reference_solvers import (  # noqa: F401 - re-exported
     build_sot_plan,
     build_sparse_kernel,
     flash_symmetric_alpha,
+    cluster_side,
     geomloss_multiscale,
+    kmeans_labels,
     geomloss_online,
 )
 
@@ -1163,13 +1165,16 @@ def bench_geomloss_multiscale(
     warmup_iters: int = 10,
     truncate: float = 5.0,
     sym_alpha: float = 0.5,
+    clustering: str = "grid",
+    n_clusters: int = 2000,
 ) -> TimingResult:
     """GeomLoss multiscale (KeOps, block-sparse) via reference_solvers.geomloss_multiscale:
     the two-scale scheme of GeomLoss's sinkhorn_multiscale at a fixed eps, with
     GeomLoss's default cluster_scale, kernel truncation margin truncate (in units of
     eps; GeomLoss's default 5), and the potential-change check
     in both stages. d <= 3 only. Damping and stop threshold as bench_geomloss_online.
-    The timed solve includes the clustering. nnz is the number of point pairs the
+    clustering: "grid" (GeomLoss's default) or "kmeans" (n_clusters K-means clusters per
+    cloud, as in Feydy et al. 2019; any d; cluster_scale from reference_solvers.cluster_side). The timed solve includes the clustering. nnz is the number of point pairs the
     fine stage sums over (every pair when the kernel is not truncated); the plan
     metrics are those of the plan on these pairs.
     """
@@ -1178,7 +1183,9 @@ def bench_geomloss_multiscale(
         from pykeops.torch import generic_logsumexp  # noqa: F401 - needed by keops_lse
     except ImportError:
         return _oom_result(method, n, m, d, eps, n_iters, dataset=dataset, seed=seed)
-    if d > 3:
+    if clustering not in ("grid", "kmeans"):
+        raise ValueError(f"{method}: unknown clustering {clustering!r}; choices: ('grid', 'kmeans')")
+    if clustering == "grid" and d > 3:
         raise ValueError(f"{method} supports d <= 3 (pykeops grid_cluster); got d={d}")
     _set_tf32(False)
     x, y, a, b = _sample_problem(n, m, d, device, dataset, seed)
@@ -1189,9 +1196,16 @@ def bench_geomloss_multiscale(
     def solve(cap):
         st, it_fixed = _capped(_stop, n_iters, cap)
         if st.mode == "fixed":
-            return geomloss_multiscale(x, y, a, b, eps, it_fixed, truncate=truncate, alpha=sym_alpha)
+            return geomloss_multiscale(x, y, a, b, eps, it_fixed, truncate=truncate, alpha=sym_alpha,
+                                       **clusters())
         return geomloss_multiscale(x, y, a, b, eps, st.max_iter, threshold=st.tol, check_every=st.check_every,
-                                   truncate=truncate, alpha=sym_alpha)
+                                   truncate=truncate, alpha=sym_alpha, **clusters())
+
+    def clusters():
+        if clustering == "grid":
+            return dict(labels=None)
+        lx, ly = kmeans_labels(x, n_clusters, seed=seed), kmeans_labels(y, n_clusters, seed=seed)
+        return dict(labels=(lx, ly), cluster_scale=max(cluster_side(x, lx), cluster_side(y, ly)))
 
     try:
         stats, (f, g, iters_run, converged, _, _, info), peak = _time_solve(
@@ -2186,6 +2200,8 @@ def run_forward_benchmark(
     include_geomloss_multiscale: bool = False,
     geomloss_truncate: float = 5.0,
     sym_alpha: float = 0.5,
+    geomloss_clustering: str = "grid",
+    geomloss_n_clusters: int = 2000,
 ) -> List[TimingResult]:
     """Run forward pass benchmark.
 
@@ -2280,11 +2296,11 @@ def run_forward_benchmark(
                     print(f"  GeomLoss KeOps:        {status}")
 
             # GeomLoss multiscale (KeOps, block-sparse; d <= 3)
-            if include_geomloss_multiscale and d <= 3:
+            if include_geomloss_multiscale and (d <= 3 or geomloss_clustering == "kmeans"):
                 res = bench_geomloss_multiscale(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, rmae_check=rmae_check,
                     dataset=dataset, stop=stop, seed=seed, warmup_iters=warmup_iters, truncate=geomloss_truncate,
-                    sym_alpha=sym_alpha,
+                    sym_alpha=sym_alpha, clustering=geomloss_clustering, n_clusters=geomloss_n_clusters,
                 )
                 results.append(res)
                 if verbose:
@@ -2907,7 +2923,9 @@ def run_forward_benchmark_subprocess(
             cmd.append("--no-geomloss")
         if args.no_geomloss_multiscale:
             cmd.append("--no-geomloss-multiscale")
-        cmd.extend(["--geomloss-truncate", str(args.geomloss_truncate), "--sym-alpha", str(args.sym_alpha)])
+        cmd.extend(["--geomloss-truncate", str(args.geomloss_truncate), "--sym-alpha", str(args.sym_alpha),
+                    "--geomloss-clustering", args.geomloss_clustering,
+                    "--geomloss-n-clusters", str(args.geomloss_n_clusters)])
         if args.no_ott:
             cmd.append("--no-ott")
         if args.no_rmae_check:
@@ -3040,6 +3058,10 @@ def main() -> None:
     parser.add_argument("--sym-alpha", type=float, default=0.5,
                         help="Damping of the symmetric solvers (FlashSinkhorn symmetric, GeomLoss online and "
                              "multiscale, SinkSLOT-CUDA symmetric); 0.5 is the libraries' default.")
+    parser.add_argument("--geomloss-clustering", choices=("grid", "kmeans"), default="grid",
+                        help="GeomLoss multiscale clustering: GeomLoss's grid (d <= 3) or K-means (any d).")
+    parser.add_argument("--geomloss-n-clusters", type=int, default=2000,
+                        help="GeomLoss multiscale with K-means clustering: clusters per cloud.")
     parser.add_argument("--geomloss-truncate", type=float, default=5.0,
                         help="GeomLoss multiscale: kernel truncation margin, in units of eps (GeomLoss's default 5).")
     parser.add_argument("--no-flash-symmetric", action="store_true", help="Skip FlashSinkhorn symmetric backend.")
@@ -3179,6 +3201,8 @@ def main() -> None:
             include_geomloss_multiscale=include_geomloss_multiscale,
             geomloss_truncate=args.geomloss_truncate,
             sym_alpha=args.sym_alpha,
+            geomloss_clustering=args.geomloss_clustering,
+            geomloss_n_clusters=args.geomloss_n_clusters,
             warmup_iters=args.warmup_iters,
             sinkslotcuda_slices=sinkslotcuda_slices,
             stop=_stop_cfg,
@@ -3340,6 +3364,8 @@ def main() -> None:
             include_geomloss_multiscale=include_geomloss_multiscale,
             geomloss_truncate=args.geomloss_truncate,
             sym_alpha=args.sym_alpha,
+            geomloss_clustering=args.geomloss_clustering,
+            geomloss_n_clusters=args.geomloss_n_clusters,
             warmup_iters=args.warmup_iters,
             sinkslotcuda_slices=sinkslotcuda_slices,
             stop=_stop_cfg,

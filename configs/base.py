@@ -98,6 +98,9 @@ class BenchConfig:
             only; units with d > 3 are not generated). Skipped by default.
         geomloss_truncate: GeomLoss multiscale kernel truncation margin, in units of
             eps (GeomLoss's default 5).
+        geomloss_clustering: GeomLoss multiscale clustering, "grid" (GeomLoss's default,
+            d <= 3) or "kmeans" (geomloss_n_clusters per cloud, any d).
+        geomloss_n_clusters: clusters per cloud for "kmeans".
         sym_alpha: damping of the symmetric solvers (FlashSinkhorn symmetric, GeomLoss
             online and multiscale, SinkSLOT-CUDA symmetric); 0.5 is the libraries' default.
         no_flash_symmetric: Skip FlashSinkhorn's symmetric backend.
@@ -180,6 +183,8 @@ class BenchConfig:
     no_geomloss_multiscale: bool = True
     geomloss_truncate: float = 5.0
     sym_alpha: float = 0.5
+    geomloss_clustering: str = "grid"
+    geomloss_n_clusters: int = 2000
     no_flash_symmetric: bool = False
     no_flash_alternating: bool = False
     only: Optional[str] = None
