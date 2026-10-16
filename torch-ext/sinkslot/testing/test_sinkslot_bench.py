@@ -17,9 +17,9 @@ measurement of one path against itself, and every other test still passes.
 import pytest
 import torch
 
-# The plan-builder tests compare the naive and CUDA-layout builders on CUDA,
-# where the latter is the SinkSLOT-CUDA treatment; the loop test runs on every
-# fused backend through the `fused` fixture instead.
+# The plan-builder tests run on every GPU through the `gpu` fixture (the
+# CUDA-layout builder is what sinkslot_solve uses on any GPU tensor), the loop
+# test on every fused backend through `fused`.
 needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
 from sinkslot.solver import (  # noqa: E402
@@ -42,8 +42,10 @@ def _problem(n=512, m=384, d=4, seed=0, device="cuda"):
 
 
 def _dense(rows, cols, vals, n, m):
-    P = torch.zeros(n, m, device=vals.device, dtype=torch.float64)
-    P.index_put_((rows, cols), vals.double(), accumulate=True)
+    """Densify on CPU in float64, whatever device the plan was built on (MPS
+    has no float64)."""
+    P = torch.zeros(n, m, dtype=torch.float64)
+    P.index_put_((rows.cpu(), cols.cpu()), vals.cpu().double(), accumulate=True)
     return P
 
 
@@ -51,8 +53,9 @@ def _ot_1d_reference(px, py, a, b):
     """North-west corner on the sorted order, in fp64. Independent of the module.
 
     The two cumulative-weight vectors cut [0, 1] into segments; each segment is a
-    single (i, j) pair carrying its own length as mass.
+    single (i, j) pair carrying its own length as mass. Runs on CPU.
     """
+    px, py, a, b = px.cpu(), py.cpu(), a.cpu(), b.cpu()
     ix, iy = torch.argsort(px), torch.argsort(py)
     ca = torch.cumsum(a[ix].double(), 0)
     cb = torch.cumsum(b[iy].double(), 0)
@@ -66,19 +69,20 @@ def _ot_1d_reference(px, py, a, b):
     return ix[i], iy[j], mass
 
 
-@needs_cuda
-def test_batched_1d_builder_matches_reference():
-    """`_ot_1d_coo_batched` vectorises C independent 1-D OT solves."""
+@pytest.mark.parametrize("builder", [_ot_1d_coo_batched, _ot_1d_coo_batched_cuda],
+                         ids=["naive", "cuda-layout"])
+def test_batched_1d_builder_matches_reference(gpu, builder):
+    """Both batched builders vectorise C independent 1-D OT solves."""
     n, m, C = 256, 192, 8
-    _, _, a, b = _problem(n, m, d=2)
+    _, _, a, b = _problem(n, m, d=2, device=gpu)
     g = torch.Generator(device="cpu").manual_seed(1)
-    PX = torch.randn(n, C, generator=g).cuda()
-    PY = torch.randn(m, C, generator=g).cuda()
+    PX = torch.randn(n, C, generator=g).to(gpu)
+    PY = torch.randn(m, C, generator=g).to(gpu)
 
-    rows, cols, vals = _ot_1d_coo_batched(PX, PY, a, b)
+    rows, cols, vals = builder(PX, PY, a, b)
     batched = _dense(rows, cols, vals, n, m)
 
-    ref = torch.zeros(n, m, device="cuda", dtype=torch.float64)
+    ref = torch.zeros(n, m, dtype=torch.float64)
     for c in range(C):
         r, o, v = _ot_1d_reference(PX[:, c], PY[:, c], a, b)
         ref += _dense(r, o, v, n, m)
@@ -113,8 +117,7 @@ def test_naive_and_cuda_builders_are_distinct_implementations():
         "naive path gained the fp64 cumsum -- it is the untouched baseline"
 
 
-@needs_cuda
-def test_naive_and_cuda_builders_agree_on_the_transport():
+def test_naive_and_cuda_builders_agree_on_the_transport(gpu):
     """Different supports, same transport.
 
     The fp32 and fp64 scans disagree on which breakpoints survive `mass > 0`, so
@@ -123,15 +126,15 @@ def test_naive_and_cuda_builders_agree_on_the_transport():
     column to be empty.
     """
     n, m = 512, 384
-    x, y, a, b = _problem(n, m, d=4)
+    x, y, a, b = _problem(n, m, d=4, device=gpu)
 
     r0, c0, v0 = sot_plan_coo(x, y, a, b, L=32, seed=0, ot1d=_ot_1d_coo_batched)
     r1, c1, v1 = sot_plan_coo(x, y, a, b, L=32, seed=0, ot1d=_ot_1d_coo_batched_cuda)
 
     P0, P1 = _dense(r0, c0, v0, n, m), _dense(r1, c1, v1, n, m)
     for P in (P0, P1):
-        assert torch.allclose(P.sum(1).float(), a, atol=1e-5)
-        assert torch.allclose(P.sum(0).float(), b, atol=1e-5)
+        assert torch.allclose(P.sum(1).float(), a.cpu(), atol=1e-5)
+        assert torch.allclose(P.sum(0).float(), b.cpu(), atol=1e-5)
     assert torch.allclose(P0, P1, atol=1e-5), f"max |dP| = {(P0 - P1).abs().max():.3e}"
 
 
