@@ -1,9 +1,13 @@
-"""`stop_mode="marginal"` means the same thing in every implementation.
+"""The stop modes mean the same thing in every implementation.
 
-SinkSLOT, SROT, Spar-Sink and FlashSinkhorn each carry their own Sinkhorn
-loop, and the paper's headline comparisons run all of them under
-`stop_mode="marginal"` at a shared tolerance. That is only a fair comparison
-if "marginal" denotes one rule everywhere:
+SinkSLOT, SROT and Spar-Sink each carry their own Sinkhorn loop. Comparisons
+across them are only fair if each stop mode denotes one rule everywhere.
+
+"potential" (tests at the end of this file): stop once
+max(|f - f_prev|, |g - g_prev|) < tol, with f_prev, g_prev the potentials at
+the previous checkpoint -- FlashSinkhorn's native rule.
+
+"marginal": 
 
     viol = max(max|P1 - a|, max|P^T 1 - b|) <= tol
 
@@ -110,8 +114,7 @@ def _run_sparsink(method="spar_sink", device="cpu", eps=0.05):
     cost = _sqeuclid(x, y)
     # Large enough that every row and column keeps at least one sampled entry:
     # an empty row cannot carry its mass anywhere, so its marginal violation is
-    # bounded below by a_i no matter how converged the solve is, and the run is
-    # reported N/A rather than compared.
+    # bounded below by a_i no matter how converged the solve is.
     rows, cols, log_values = build_sparse_kernel(
         cost, a, b, eps, method=method, sample_size=200_000, seed=0
     )
@@ -205,113 +208,96 @@ def test_every_implementation_agrees_on_the_same_problem():
 
 
 # ---------------------------------------------------------------------------
-# FlashSinkhorn: same rule, but it needs the bench extra and a GPU
+# "potential": the checkpoint-window rule, recomputed from fixed-iteration runs
 # ---------------------------------------------------------------------------
 
+POT_TOL = 1e-6
+POT_CHECK = 5
+POT_EPS = 0.2  # converges well within MAX_ITER on this problem
 
-@pytest.mark.parametrize("backend", ["alternating", "symmetric"])
-def test_flash_sinkhorn_marginal_mode_matches(backend):
-    """The fork's stop_mode="marginal" must mean what everyone else's does.
 
-    Skipped without CUDA/Triton: FlashSinkhorn is Triton-only with no
-    pure-torch fallback, so this leg cannot run in the CPU CI matrix. It is
-    the one implementation living outside this repo, which is exactly why it
-    is worth pinning down here rather than trusting the dependency.
-    """
-    pytest.importorskip("triton")
-    flash_sinkhorn = pytest.importorskip("flash_sinkhorn")
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
+def _pot_stop():
+    return StopCfg(mode="potential", max_iter=MAX_ITER, tol=POT_TOL, check_every=POT_CHECK)
 
-    eps = 0.05
-    x, y, a, b = _problem(device="cuda")
-    # debias/normalize/last_extrapolation off, matching how bench_forward
-    # drives it: with debiasing on, SamplesLoss solves the Sinkhorn-divergence
-    # problem instead, and (f, g) are then not the potentials of the plan whose
-    # marginals this test is about to check.
-    loss_fn = flash_sinkhorn.SamplesLoss(
-        "sinkhorn", backend=backend, use_epsilon_scaling=False, eps=eps,
-        n_iters=MAX_ITER, debias=False, potentials=True, normalize=False,
-        last_extrapolation=False, return_n_iters=True,
-        threshold=TOL, inner_iterations=CHECK_EVERY, stop_mode="marginal",
-        # allow_tf32=False is load-bearing, not tidiness. TF32 carries ~1e-3
-        # relative precision, so with it on (the SamplesLoss default) the
-        # potentials cannot represent a 1e-4 marginal violation at all: the run
-        # still reports converged at the same iteration, but the plan it
-        # returns is off by ~2.4e-3. See
-        # test_flash_marginal_mode_cannot_beat_the_tf32_noise_floor, which pins
-        # that behaviour down deliberately. bench_forward drives every
-        # published comparison with --no-tf32 for the same reason.
-        allow_tf32=False,
-    )
-    f, g, iters = loss_fn(a, x, b, y)
 
-    assert iters < MAX_ITER, f"flash_{backend} never converged"
+def _window(fg_a, fg_b):
+    return max((fg_a[0] - fg_b[0]).abs().max().item(), (fg_a[1] - fg_b[1]).abs().max().item())
 
+
+def _srot_potentials(eps=POT_EPS):
+    x, y, a, b = _problem()
     cost = _sqeuclid(x, y)
-    P = ((f[:, None] + g[None, :] - cost) / eps).double().exp()
-    P = P * a.double()[:, None] * b.double()[None, :]
-    viol = _viol(P.sum(1), P.sum(0), a, b)
-    assert viol <= TOL * SLACK, (
-        f"flash_{backend}: true max marginal violation {viol:.3e} > tol {TOL:.0e}"
-    )
+    pi = build_sot_plan(x, y, a, b, slices=64, seed=0)
+    log_pi = pi.clamp_min(torch.finfo(pi.dtype).tiny).log()
+    args = (cost, log_pi, a.log(), b.log(), eps)
+    f, g, iters, converged, change = _srot_sinkhorn(*args, MAX_ITER, _pot_stop())
+    fixed = lambda k: _srot_sinkhorn(*args, k)[:2]
+    return (f, g), iters, converged, change, fixed
 
 
-def test_flash_marginal_mode_cannot_beat_the_tf32_noise_floor():
-    """TF32 silently caps how tight `stop_mode="marginal"` can actually get.
-
-    Not a test of desired behaviour -- a record of a real trap. TF32 matmuls
-    carry roughly 1e-3 relative precision, which is coarser than the 1e-4
-    tolerance asked for here. The solver still reports convergence, at the very
-    same iteration it would have without TF32, because the proxy it checks is
-    computed in the same arithmetic that is losing the precision. The plan that
-    comes back misses the requested tolerance by well over an order of
-    magnitude.
-
-    Anything comparing methods on a shared marginal tolerance must therefore
-    disable TF32, which is what bench_forward's --no-tf32 does for every
-    published run. If a future FlashSinkhorn learns to reject or warn about
-    this combination, this test will fail -- and that would be an improvement,
-    so update it rather than restoring TF32.
-    """
-    pytest.importorskip("triton")
-    flash_sinkhorn = pytest.importorskip("flash_sinkhorn")
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
-
-    eps = 0.05
-    x, y, a, b = _problem(device="cuda")
+def _sparsink_potentials(eps=POT_EPS):
+    x, y, a, b = _problem()
     cost = _sqeuclid(x, y)
+    rows, cols, lv = build_sparse_kernel(cost, a, b, eps, method="spar_sink", sample_size=200_000, seed=0)
+    args = (rows, cols, lv, a.log(), b.log(), eps)
+    f, g, _empty, iters, converged, change = _sparsink_sinkhorn(*args, MAX_ITER, _pot_stop())
+    fixed = lambda k: _sparsink_sinkhorn(*args, k)[:2]
+    return (f, g), iters, converged, change, fixed
 
-    def solve(allow_tf32):
-        fn = flash_sinkhorn.SamplesLoss(
-            "sinkhorn", backend="alternating", use_epsilon_scaling=False, eps=eps,
-            n_iters=MAX_ITER, debias=False, potentials=True, normalize=False,
-            last_extrapolation=False, return_n_iters=True, threshold=TOL,
-            inner_iterations=CHECK_EVERY, stop_mode="marginal",
-            allow_tf32=allow_tf32,
-        )
-        f, g, iters = fn(a, x, b, y)
-        P = ((f[:, None] + g[None, :] - cost) / eps).double().exp()
-        P = P * a.double()[:, None] * b.double()[None, :]
-        return iters, _viol(P.sum(1), P.sum(0), a, b)
 
-    iters_off, viol_off = solve(False)
-    iters_on, viol_on = solve(True)
+def _sinkslot_potentials(eps=POT_EPS):
+    x, y, a, b = _problem()
+    common = dict(eps=eps, L=64, seed=0)
+    res = sinkslot_solve(x, y, a, b, n_iters=MAX_ITER, stop_mode="potential", stop_max_iter=MAX_ITER,
+                         stop_tol=POT_TOL, stop_check_every=POT_CHECK, **common)
 
-    assert viol_off <= TOL * SLACK, f"fp32 leg should hold tol, got {viol_off:.3e}"
-    assert viol_on > TOL * SLACK, (
-        f"TF32 run met the tolerance ({viol_on:.3e}); if FlashSinkhorn fixed "
-        f"this, delete this test and drop allow_tf32=False above"
-    )
-    # The trap is that the run looks normal: it stops after essentially the
-    # same amount of work (within a check interval or two), so nothing about
-    # the iteration count hints that the result is an order of magnitude worse.
-    assert abs(iters_on - iters_off) <= 3 * CHECK_EVERY, (
-        f"TF32 changed the iteration count materially ({iters_on} vs "
-        f"{iters_off}); the failure would then be visible rather than silent, "
-        f"so this test's premise needs revisiting"
-    )
-    assert viol_on > 10 * viol_off, (
-        f"TF32 leg only degraded from {viol_off:.3e} to {viol_on:.3e}"
-    )
+    def fixed(k):
+        r = sinkslot_solve(x, y, a, b, n_iters=k, **common)
+        return eps * r.phi, eps * r.psi  # f = eps * phi
+
+    return (eps * res.phi, eps * res.psi), res.iters_run, res.converged, res.final_viol, fixed
+
+
+_POT_RUNNERS = {"srot": _srot_potentials, "spar_sink": _sparsink_potentials,
+                "sinkslot": _sinkslot_potentials}
+
+
+@pytest.mark.parametrize("name", sorted(_POT_RUNNERS))
+def test_potential_mode_is_the_checkpoint_window_rule(name):
+    """Stops on a checkpoint, the last window's change is below tol, the one
+    before is not, and the reported change is the last window's."""
+    fg, iters, converged, change, fixed = _POT_RUNNERS[name]()
+    assert converged and iters < MAX_ITER, f"{name} did not converge"
+    assert iters % POT_CHECK == 0
+    last = _window(fixed(iters), fixed(iters - POT_CHECK))
+    prev = _window(fixed(iters - POT_CHECK), fixed(iters - 2 * POT_CHECK))
+    assert last < POT_TOL <= prev, f"{name}: last window {last:.3e}, previous {prev:.3e}"
+    assert change == pytest.approx(last, rel=1e-3, abs=1e-9)
+
+
+def test_unknown_stop_mode_raises():
+    x, y, a, b = _problem()
+    cost = _sqeuclid(x, y)
+    pi = build_sot_plan(x, y, a, b, slices=8, seed=0)
+    with pytest.raises(ValueError):
+        _srot_sinkhorn(cost, pi.log(), a.log(), b.log(), 0.05, 10,
+                       StopCfg(mode="scaling", max_iter=10, check_every=5))
+
+
+def test_sparsink_drops_empty_lines_like_the_authors():
+    """Rows/columns with no sampled entry are dropped and the rest keep their
+    original a_i, b_j. On a connected support with unequal kept masses the
+    potentials drift by eps*log(m_b/m_a) per iteration (each connected component
+    drifts at its own rate otherwise), so "potential" never fires."""
+    eps = 0.05
+    x, y, a, b = _problem()
+    cost = _sqeuclid(x, y)
+    rows, cols, lv = build_sparse_kernel(cost, a, b, eps, method="spar_sink", sample_size=1500, seed=0)
+    f, g, empty, iters, converged, change = _sparsink_sinkhorn(
+        rows, cols, lv, a.log(), b.log(), eps, MAX_ITER, _pot_stop())
+    row_kept = torch.zeros_like(a, dtype=torch.bool).index_fill_(0, rows, True)
+    col_kept = torch.zeros_like(b, dtype=torch.bool).index_fill_(0, cols, True)
+    assert empty == int((~row_kept).sum() + (~col_kept).sum()) > 0
+    assert not converged and iters == MAX_ITER
+    assert change >= POT_TOL
+    assert (f[~row_kept] == 0).all() and (g[~col_kept] == 0).all()

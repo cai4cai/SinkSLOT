@@ -322,6 +322,11 @@ def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, l
     by reconstructing the pre-blend candidate algebraically
     (`cand = 2*new - old`), a shortcut that only holds at alpha=0.5 exactly;
     not used here since `alpha` is a general parameter, not hardcoded.
+
+    With stop.mode == "potential" the check is max(|Δf|, |Δg|) < alpha * stop.tol:
+    a blended update moves the potentials by alpha times the undamped step, so
+    scaling the threshold by alpha makes stop.tol mean the same as in
+    `sinkslot_alternating_triton`.
     """
     r_blk, r_w = launch_cfg(r_idx.numel(), n)
     c_blk, c_w = launch_cfg(c_idx.numel(), m)
@@ -373,7 +378,7 @@ def sinkslot_symmetric_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, l
             if it % stop.check_every == 0:
                 change = eps * max((phi - prev_phi).abs().max().item(),
                                     (psi - prev_psi).abs().max().item())
-                if change < stop.tol:
+                if change < alpha * stop.tol:
                     converged = True
                     break
                 # NOT swap_tensors: unlike alternating's marginal-mode swap (where
@@ -549,7 +554,7 @@ def sinkslot_symmetric_torch(rows, cols, lam, log_a, log_b, n, m, n_iters, stop=
             if it % stop.check_every == 0:
                 change = eps * max((phi - prev_phi).abs().max().item(),
                                     (psi - prev_psi).abs().max().item())
-                if change < stop.tol:
+                if change < alpha * stop.tol:
                     converged = True
                     break
                 prev_phi = phi
