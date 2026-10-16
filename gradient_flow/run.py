@@ -1,10 +1,17 @@
 """Gradient flow, blob -> crescent: SOT / EOT / SROT / SinkSLOT, one compiled figure.
 
-    python -m gradient_flow.run
+    python -m gradient_flow.run [--dtype float64]
 
-Runs on CPU or CUDA. A CUDA GPU with Triton reproduces the reported numbers
-(the fused kernels, see sinkslot/sinkhorn_solvers.py); without one, slot_grad
-falls back to a pure-torch path (same algorithm, much slower) automatically.
+Runs on CUDA, Apple-silicon MPS or CPU. The SinkSLOT arm always runs float32
+on the best device present (`DEVICE`), through the fused kernels where it has
+them (Triton on CUDA, Metal on MPS; see sinkslot/sinkhorn_solvers.py) and the
+pure-torch path otherwise (same algorithm, much slower). A CUDA GPU with
+Triton reproduces the reported numbers.
+
+`--dtype` sets the SOT/EOT/SROT arms' precision, and with it their device:
+float64 (the default, as reported) on CUDA or CPU -- MPS has no float64 --
+or float32 on the best device, MPS included. W2^2 is always evaluated in
+float64 on CPU (`exact_ot_cost`).
 
 Four methods, one figure:
   * SOT (Bonneel et al., 2015): the plain, unregularized sliced W2 distance --
@@ -18,7 +25,7 @@ Four methods, one figure:
     plus the closed-form envelope-theorem gradient
     grad_X SLOT_eps(X,Y) = 2*diag(a)*(X - T_eps(X)) (see sinkslot/gradient.py).
 
-    SOT/EOT/SROT run in float64 (vendor/sinkhorn_methods.py, ported from a
+    SOT/EOT/SROT run in float64 by default (vendor/sinkhorn_methods.py, ported from a
     sibling research repository's own copy, which has no CUDA/Triton
     dependency). SinkSLOT runs in float32 on the Triton path: its fused cost
     kernel accumulates in fp32 regardless of input dtype (see
@@ -37,6 +44,7 @@ lowest -- i.e. best -- W2^2 across the 4 methods is bolded.
 """
 from __future__ import annotations
 
+import argparse
 import time
 from pathlib import Path
 
@@ -54,12 +62,14 @@ from gradient_flow.config import (
 from gradient_flow.vendor.sinkhorn_methods import (
     sinkhorn_divergence_torch_autograd, sr_sinkhorn_divergence_torch_autograd,
 )
+from sinkslot.bench.devices import default_device, describe, to
 from sinkslot.gradient import slot_grad
 
 DATA_DIR = Path(__file__).parent / "data"
 OUT_DIR = Path(__file__).parent / "outputs"
 DTYPE = torch.float64
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Best device for float32 work: what every script's SinkSLOT arm runs on.
+DEVICE = default_device()
 
 
 def load_density(fname):
@@ -88,7 +98,7 @@ def draw_samples(fname, n, rng, dtype=DTYPE, device="cpu"):
     dots = grid[idx].clone()
     dots += (0.5 / h) * torch.randn(dots.shape, generator=rng, dtype=dots.dtype)
     dots *= DATA_SCALE
-    return dots.to(dtype=dtype, device=device)
+    return to(dots, device, dtype)
 
 
 def exact_ot_cost(X, Y):
@@ -105,18 +115,31 @@ def exact_ot_cost(X, Y):
     return float(ot.emd2(a, b, ot.dist(Xc, Yc, metric="sqeuclidean")))
 
 
+def _sot_projections(X):
+    """POT's slicing arguments for `X`'s device: `seed=0` as reported, except on
+    MPS, where POT's torch backend draws with a CPU generator that MPS refuses
+    -- there, the same seed-0 directions are drawn on CPU and passed in, which
+    gives the identical value (checked against seed=0 on CPU)."""
+    if X.device.type != "mps":
+        return dict(n_projections=L, seed=0)
+    cpu = torch.zeros(1, dtype=torch.float64)
+    proj = ot.sliced.get_random_projections(X.shape[1], L, seed=0,
+                                             backend=ot.backend.get_backend(cpu), type_as=cpu)
+    return dict(projections=to(proj, X.device, X.dtype))
+
+
 def run_flow(method, X0, Y, a_t, eps):
     x_i = X0.clone()
     rows = {}
     for step in range(N_STEPS + 1):
         if method == "SinkSLOT":
             x_i_d = x_i.detach()
-            g = slot_grad(x_i_d.float(), Y.float(), a_t.float(), a_t.float(), eps, L,
-                          seed=0, n_iters=MAX_ITER).double()
+            f32 = (to(t, DEVICE, torch.float32) for t in (x_i_d, Y, a_t, a_t))
+            g = to(slot_grad(*f32, eps, L, seed=0, n_iters=MAX_ITER), x_i_d.device, x_i_d.dtype)
         else:
             x_i.requires_grad_(True)
             if method == "SOT":
-                loss = ot.sliced_wasserstein_distance(x_i, Y, n_projections=L, p=2, seed=0)
+                loss = ot.sliced_wasserstein_distance(x_i, Y, p=2, **_sot_projections(x_i))
             elif method == "EOT":
                 loss = sinkhorn_divergence_torch_autograd(x_i, Y, eps, max_iter=MAX_ITER, tol=0.0)
             else:  # SROT
@@ -136,15 +159,18 @@ def run_flow(method, X0, Y, a_t, eps):
 
 
 def main():
-    if DEVICE != "cuda":
-        print("gradient_flow/run.py: no CUDA GPU found, running the SinkSLOT arm on the "
-              "pure-torch fallback (slot_grad's backend='auto') -- much slower than the "
-              "fused Triton kernels the reported numbers use, but the same algorithm.")
+    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p.add_argument("--dtype", choices=("float64", "float32"), default="float64",
+                   help="precision of the SOT/EOT/SROT arms (and so their device)")
+    dtype = getattr(torch, p.parse_args().dtype)
+    device = default_device(dtype)
+    print(f"gradient_flow/run.py: SinkSLOT on {describe(DEVICE)}; "
+          f"SOT/EOT/SROT in {dtype} on {device}")
 
     rng = torch.Generator(device="cpu").manual_seed(1)
-    X0 = draw_samples(DATA_DIR / "density_a.png", N, rng, device=DEVICE)
-    Y = draw_samples(DATA_DIR / "density_b.png", N, rng, device=DEVICE)
-    a_t = torch.full((N,), 1.0 / N, dtype=DTYPE, device=DEVICE)
+    X0 = draw_samples(DATA_DIR / "density_a.png", N, rng, dtype=dtype, device=device)
+    Y = draw_samples(DATA_DIR / "density_b.png", N, rng, dtype=dtype, device=device)
+    a_t = torch.full((N,), 1.0 / N, dtype=dtype, device=device)
     colors = (10 * X0[:, 0]).cos() * (10 * X0[:, 1]).cos()
     colors = colors.detach().cpu()
 

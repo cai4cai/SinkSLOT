@@ -11,11 +11,11 @@ build-backend = "setuptools.build_meta"
 # and keeps its own MIT license in its own repository.
 name = "sinkslot"
 version = "0.1.0"
-description = "SinkSLOT: Sinkhorn via Sparse Lifted Optimal Transport -- a sparse Sinkhorn solver over a sliced-OT reference plan, in PyTorch + Triton."
+description = "SinkSLOT: Sinkhorn via Sparse Lifted Optimal Transport -- a sparse Sinkhorn solver over a sliced-OT reference plan, in PyTorch + Triton (CUDA) or Metal (Apple silicon)."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
-keywords = ["optimal-transport", "sliced-optimal-transport", "sparse-sinkhorn", "sinkhorn", "triton", "pytorch", "gpu"]
+keywords = ["optimal-transport", "sliced-optimal-transport", "sparse-sinkhorn", "sinkhorn", "triton", "metal", "apple-silicon", "pytorch", "gpu"]
 authors = [
   {name = "CAI4CAI research group", email = "contact@cai4cai.uk"},
 ]

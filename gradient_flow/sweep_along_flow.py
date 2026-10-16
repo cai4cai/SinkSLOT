@@ -64,6 +64,7 @@ import torch
 
 from gradient_flow.along_flow import trajectory
 from gradient_flow.config import N, N_STEPS
+from sinkslot.bench.devices import describe
 from gradient_flow.run import DATA_DIR, DEVICE, OUT_DIR, draw_samples
 
 EPS_GRID = [0.003, 0.01, 0.03, 0.1]
@@ -80,15 +81,13 @@ def main():
                    help="skip the <P,C>+eps*KL control arm (halves the cost)")
     args = p.parse_args()
 
-    if DEVICE != "cuda":
-        print("gradient_flow/sweep_along_flow.py: no CUDA GPU found, running on CPU "
-              "(pure torch throughout -- much slower, same algorithm).")
+    print(f"gradient_flow/sweep_along_flow.py: running on {describe(DEVICE)}")
     reg = not args.no_regularized
 
     n = args.n
     rng = torch.Generator(device="cpu").manual_seed(1)
-    X = draw_samples(DATA_DIR / "density_a.png", n, rng, device=DEVICE).float()
-    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device=DEVICE).float()
+    X = draw_samples(DATA_DIR / "density_a.png", n, rng, dtype=torch.float32, device=DEVICE)
+    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, dtype=torch.float32, device=DEVICE)
     a = torch.full((n,), 1.0 / n, dtype=torch.float32, device=DEVICE)
 
     print(f"N={n}  steps={args.steps}  inner iters={args.iters}  "

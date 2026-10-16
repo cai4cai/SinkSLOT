@@ -39,6 +39,9 @@ from sinkslot.bench.plan_diagnostics import (
     plan_diagnostics_dense, plan_diagnostics_dense_rounded,
     sinkslot_plan_diagnostics, sinkslot_plan_diagnostics_rounded,
 )
+from sinkslot.bench.devices import (
+    default_device, describe, methods_for_device, peak_memory, reset_peak_memory, synchronize,
+)
 from sinkslot.bench.reference_solvers import geomloss_online
 
 DEFAULT_PAINTINGS_DIR = Path(__file__).parent / "paintings"
@@ -46,7 +49,7 @@ DEFAULT_PAINTINGS_DIR = Path(__file__).parent / "paintings"
 
 @dataclass
 class StopCfg:
-    """Duck-typed stop config accepted by sinkslot_alternating_triton's
+    """Duck-typed stop config accepted by sinkslot_alternating_fused's
     `stop` argument (mode/max_iter/check_every/tol attributes only)."""
     mode: str = "potential"
     max_iter: int = 8000
@@ -109,11 +112,11 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
     checkpoints = []
 
     if method_key == "sinkslot":
-        from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
+        from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused
         from sinkslot.solver import (
-            _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
+            ot1d_for, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
         )
-        ot1d = _ot_1d_coo_batched_cuda if sc.is_cuda else _ot_1d_coo_batched
+        ot1d = ot1d_for(sc.device)
         n, m = sc.shape[0], tc.shape[0]
         log_a, log_b = sw.log(), tw.log()
 
@@ -128,22 +131,22 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
 
         # Warmup: full pipeline once (plan build + a short solve), not timed.
         _rows, _cols, _S, _cost_mat, _r_ptr, _r_idx, _r_lam, _c_ptr, _c_idx, _c_lam = build_plan()
-        sinkslot_alternating_triton(
+        sinkslot_alternating_fused(
             _r_ptr, _r_idx, _r_lam, _c_ptr, _c_idx, _c_lam, log_a, log_b, n, m, 10, stop=None, eps=eps)
 
-        torch.cuda.synchronize()
+        synchronize(sc.device)
         t_plan0 = time.perf_counter()
         rows, cols, S, cost_mat, r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam = build_plan()
-        torch.cuda.synchronize()
+        synchronize(sc.device)
         plan_dt = time.perf_counter() - t_plan0
 
         for n_iter in TRAJECTORY_CHECKPOINTS:
-            torch.cuda.synchronize()
+            synchronize(sc.device)
             t0 = time.perf_counter()
-            phi, psi, it, converged, change = sinkslot_alternating_triton(
+            phi, psi, it, converged, change = sinkslot_alternating_fused(
                 r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iter,
                 stop=StopCfg(mode="potential", max_iter=n_iter, check_every=check_every, tol=tol), eps=eps)
-            torch.cuda.synchronize()
+            synchronize(sc.device)
             solve_dt = plan_dt + (time.perf_counter() - t0)
             viol_lmax, row_l1, col_l1, mass_l1, _ = sinkslot_plan_diagnostics(
                 phi, psi, rows, cols, S, cost_mat, eps, sw, tw)
@@ -159,11 +162,11 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
         geomloss_online(sc, tc, sw, tw, eps, 10, threshold=tol / 2, check_every=check_every)  # warmup
 
         for n_iter in TRAJECTORY_CHECKPOINTS:
-            torch.cuda.synchronize()
+            synchronize(sc.device)
             t0 = time.perf_counter()
             f, g, total_iters, converged, _, _ = geomloss_online(
                 sc, tc, sw, tw, eps, n_iter, threshold=tol / 2, check_every=check_every)
-            torch.cuda.synchronize()
+            synchronize(sc.device)
             solve_dt = time.perf_counter() - t0
             viol_lmax, row_l1, col_l1, mass_l1, _ = plan_diagnostics_dense(sc, tc, sw, tw, eps, f, g)
             _, _, cost = plan_diagnostics_dense_rounded(sc, tc, sw, tw, eps, f, g)
@@ -187,7 +190,7 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
         sinkhorn_flashstyle_alternating(sc, tc, sw, tw, eps=eps, n_iters=10, allow_tf32=allow_tf32)
 
     for n_iter in TRAJECTORY_CHECKPOINTS:
-        torch.cuda.synchronize()
+        synchronize(sc.device)
         t0 = time.perf_counter()
         if symmetric:
             f, g, n_used = sinkhorn_flashstyle_symmetric(
@@ -201,7 +204,7 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
                 threshold=solve_tol, check_every=check_every, return_n_iters=True)
             total_iters = int(n_used)
         converged = total_iters < n_iter
-        torch.cuda.synchronize()
+        synchronize(sc.device)
         solve_dt = time.perf_counter() - t0
         viol_lmax, row_l1, col_l1, mass_l1, _ = plan_diagnostics_dense(sc, tc, sw, tw, eps, f, g)
         _, _, cost = plan_diagnostics_dense_rounded(sc, tc, sw, tw, eps, f, g)
@@ -213,15 +216,16 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
     return checkpoints
 
 
-def measure(fn):
-    torch.cuda.reset_peak_memory_stats()
-    torch.cuda.synchronize()
+def measure(fn, device):
+    """(fn(), wall time, peak allocated bytes) on `device`. Peak memory is NaN
+    off CUDA, where PyTorch keeps no peak counter (see devices.peak_memory)."""
+    reset_peak_memory(device)
+    synchronize(device)
     t0 = time.perf_counter()
     out = fn()
-    torch.cuda.synchronize()
+    synchronize(device)
     dt = time.perf_counter() - t0
-    peak = torch.cuda.max_memory_allocated()
-    return out, dt, peak
+    return out, dt, peak_memory(device)
 
 
 def _dense_result(name, f, g, dt, peak, it, converged, dual_cost, sc, tc, sw, tw, eps):
@@ -252,13 +256,13 @@ def sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, sy
     (symmetric=True) sparse Sinkhorn. tol/2 corrects the Jacobi backend's
     alpha-damped step, matching FlashSinkhorn-symmetric's own correction.
     """
-    from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton, sinkslot_symmetric_triton
+    from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused, sinkslot_symmetric_fused
     from sinkslot.solver import (
-        _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
+        ot1d_for, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
     )
 
-    ot1d = _ot_1d_coo_batched_cuda if sc.is_cuda else _ot_1d_coo_batched
-    solver = sinkslot_symmetric_triton if symmetric else sinkslot_alternating_triton
+    ot1d = ot1d_for(sc.device)
+    solver = sinkslot_symmetric_fused if symmetric else sinkslot_alternating_fused
     solve_tol = tol / 2 if symmetric else tol
 
     def solve():
@@ -279,7 +283,7 @@ def sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, sy
     # Rounding (issue #57, Altschuler/Weed/Rigollet NeurIPS 2017 Algorithm 2) is
     # deliberately OUTSIDE measure() / not part of `dt`: post-hoc feasibility
     # enforcement on the final plan, not part of the solve being timed.
-    (phi, psi, it, converged, dual_cost, rows, cols, S, cost_mat), dt, peak = measure(solve)
+    (phi, psi, it, converged, dual_cost, rows, cols, S, cost_mat), dt, peak = measure(solve, sc.device)
     name = "SinkSLOT (symmetric)" if symmetric else "SinkSLOT"
     return _sparse_result(name, phi, psi, rows, cols, S, cost_mat, dt, peak, it, converged, dual_cost,
                            sc, tc, eps, sw, tw)
@@ -306,7 +310,7 @@ def flashsinkhorn_row(name, sc, tc, sw, tw, eps, max_iter, tol, check_every, sym
         return f, g, int(n_iters_used)
 
     solve(10, solve_tol)  # warmup: real threshold so the check-every branch runs too
-    (f, g, it), dt, peak = measure(lambda: solve(max_iter, solve_tol))
+    (f, g, it), dt, peak = measure(lambda: solve(max_iter, solve_tol), sc.device)
     dual_cost = float((sw * f).sum() + (tw * g).sum())
     return _dense_result(name, f, g, dt, peak, it, it < max_iter, dual_cost, sc, tc, sw, tw, eps)
 
@@ -317,14 +321,12 @@ def geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
         return geomloss_online(sc, tc, sw, tw, eps, max_iter, threshold=tol / 2, check_every=check_every)
 
     geomloss_online(sc, tc, sw, tw, eps, 10, threshold=tol / 2, check_every=check_every)  # warmup
-    (f, g, it, converged, dual_cost, change), dt, peak = measure(solve)
+    (f, g, it, converged, dual_cost, change), dt, peak = measure(solve, sc.device)
     return _dense_result("GeomLoss (online)", f, g, dt, peak, it, converged, dual_cost, sc, tc, sw, tw, eps)
 
 
 _METHOD_KEYS = ["sinkslot", "sinkslot_sym", "flashsinkhorn_alt", "flashsinkhorn_sym", "geomloss_online",
                 "flashsinkhorn_alt_fp32", "flashsinkhorn_sym_fp32"]
-
-
 def run_pair(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, methods=_METHOD_KEYS):
     rows = []
     if "sinkslot" in methods:
@@ -412,14 +414,17 @@ def parse_args():
                     help="Run just this one ordered pair. Omit (or use --max_pairs) to sweep all pairs.")
     p.add_argument("--max_pairs", type=int, default=0,
                     help="0 = every ordered pair (n*(n-1) for n images); ignored if --pair_idx is given.")
-    p.add_argument("--methods", type=str, nargs="+", default=_METHOD_KEYS, choices=_METHOD_KEYS,
-                    help="Subset of methods to run in this invocation -- run several in parallel "
+    p.add_argument("--methods", type=str, nargs="+", default=None, choices=_METHOD_KEYS,
+                    help="Subset of methods to run in this invocation (default: every method "
+                         "this device can run) -- run several in parallel "
                          "processes (one per method) for wall-clock speed, each writes its own "
                          "output file, then combine with --combine.")
     p.add_argument("--combine", type=str, nargs="+", default=None,
                     help="Instead of running anything, merge these convergence_sweep*.json files "
                          "(e.g. from separate --methods runs) and print/save the aggregate summary.")
-    p.add_argument("--device", type=str, default="cuda")
+    p.add_argument("--device", type=str, default=None,
+                    help="Default: the best device present (CUDA, then MPS, then CPU). Only "
+                         "the SinkSLOT methods run off CUDA.")
     p.add_argument("--num_shards", type=int, default=1,
                     help="Split all_pairs round-robin across this many shards, for further "
                          "parallelizing a single slow --methods entry (e.g. flashsinkhorn_sym_fp32) "
@@ -459,9 +464,9 @@ def main():
         combine_sweeps(args.combine, args.output_dir, args.eps, args.tol)
         return
 
-    if args.device != "cuda" or not torch.cuda.is_available():
-        raise RuntimeError("This script requires a CUDA GPU.")
-    device = torch.device(args.device)
+    device = torch.device(args.device or default_device())
+    args.methods = methods_for_device(device, args.methods, _METHOD_KEYS)
+    print(f"Device: {describe(device)}")
     dtype = torch.float32
     os.makedirs(args.output_dir, exist_ok=True)
 

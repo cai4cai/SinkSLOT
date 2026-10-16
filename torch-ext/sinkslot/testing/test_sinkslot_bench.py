@@ -3,12 +3,14 @@
 Three equivalences the module otherwise only asserts in prose:
 
 * the batched 1-D OT builder against an independent north-west-corner reference,
-* the naive plan builder against the CUDA one, which must agree on the transport
-  while remaining separate implementations,
-* the fused Triton Sinkhorn loop against a plain-torch segmented LSE.
+* the naive plan builder against the transposed one, which must agree on the
+  transport while remaining separate implementations,
+* the fused Sinkhorn loop (every fused backend this machine has) against a
+  plain-torch segmented LSE.
 
 The middle one is regression cover. The naive builder is the SinkSLOT baseline
-and the CUDA one is the treatment; if an edit or a merge ever makes their bodies
+and the transposed one is the SinkSLOT-CUDA treatment; if an edit or a merge
+ever makes their bodies
 the same, the reported SinkSLOT-CUDA setup speedup silently becomes a
 measurement of one path against itself, and every other test still passes.
 """
@@ -16,20 +18,21 @@ measurement of one path against itself, and every other test still passes.
 import pytest
 import torch
 
-triton = pytest.importorskip("triton")
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+# The plan-builder tests run on CPU and every GPU through the `any_device`
+# fixture (both builders are plain torch), the loop test on every fused
+# backend through `fused`.
 
 from sinkslot.solver import (  # noqa: E402
     _ot_1d_coo_batched,
-    _ot_1d_coo_batched_cuda,
+    _ot_1d_coo_batched_transposed,
     sot_plan_coo,
     sparse_sqeuclidean_cost,
     to_csr,
 )
-from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton  # noqa: E402
+from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused  # noqa: E402
 
 
-def _problem(n=512, m=384, d=4, seed=0, device="cuda"):
+def _problem(n=512, m=384, d=4, seed=0, device="cpu"):
     g = torch.Generator(device="cpu").manual_seed(seed)
     x = torch.randn(n, d, generator=g).to(device)
     y = (torch.randn(m, d, generator=g) + 1.5).to(device)
@@ -39,8 +42,10 @@ def _problem(n=512, m=384, d=4, seed=0, device="cuda"):
 
 
 def _dense(rows, cols, vals, n, m):
-    P = torch.zeros(n, m, device=vals.device, dtype=torch.float64)
-    P.index_put_((rows, cols), vals.double(), accumulate=True)
+    """Densify on CPU in float64, whatever device the plan was built on (MPS
+    has no float64)."""
+    P = torch.zeros(n, m, dtype=torch.float64)
+    P.index_put_((rows.cpu(), cols.cpu()), vals.cpu().double(), accumulate=True)
     return P
 
 
@@ -48,8 +53,9 @@ def _ot_1d_reference(px, py, a, b):
     """North-west corner on the sorted order, in fp64. Independent of the module.
 
     The two cumulative-weight vectors cut [0, 1] into segments; each segment is a
-    single (i, j) pair carrying its own length as mass.
+    single (i, j) pair carrying its own length as mass. Runs on CPU.
     """
+    px, py, a, b = px.cpu(), py.cpu(), a.cpu(), b.cpu()
     ix, iy = torch.argsort(px), torch.argsort(py)
     ca = torch.cumsum(a[ix].double(), 0)
     cb = torch.cumsum(b[iy].double(), 0)
@@ -63,18 +69,20 @@ def _ot_1d_reference(px, py, a, b):
     return ix[i], iy[j], mass
 
 
-def test_batched_1d_builder_matches_reference():
-    """`_ot_1d_coo_batched` vectorises C independent 1-D OT solves."""
+@pytest.mark.parametrize("builder", [_ot_1d_coo_batched, _ot_1d_coo_batched_transposed],
+                         ids=["naive", "transposed"])
+def test_batched_1d_builder_matches_reference(any_device, builder):
+    """Both batched builders vectorise C independent 1-D OT solves."""
     n, m, C = 256, 192, 8
-    _, _, a, b = _problem(n, m, d=2)
+    _, _, a, b = _problem(n, m, d=2, device=any_device)
     g = torch.Generator(device="cpu").manual_seed(1)
-    PX = torch.randn(n, C, generator=g).cuda()
-    PY = torch.randn(m, C, generator=g).cuda()
+    PX = torch.randn(n, C, generator=g).to(any_device)
+    PY = torch.randn(m, C, generator=g).to(any_device)
 
-    rows, cols, vals = _ot_1d_coo_batched(PX, PY, a, b)
+    rows, cols, vals = builder(PX, PY, a, b)
     batched = _dense(rows, cols, vals, n, m)
 
-    ref = torch.zeros(n, m, device="cuda", dtype=torch.float64)
+    ref = torch.zeros(n, m, dtype=torch.float64)
     for c in range(C):
         r, o, v = _ot_1d_reference(PX[:, c], PY[:, c], a, b)
         ref += _dense(r, o, v, n, m)
@@ -83,7 +91,7 @@ def test_batched_1d_builder_matches_reference():
         f"max |dP| = {(batched - ref).abs().max():.3e}"
 
 
-def test_naive_and_cuda_builders_are_distinct_implementations():
+def test_naive_and_transposed_builders_are_distinct_implementations():
     """The two plan builders must not collapse into the same code.
 
     Compares source rather than behaviour because behaviour is *supposed* to
@@ -97,42 +105,49 @@ def test_naive_and_cuda_builders_are_distinct_implementations():
         return [ln.strip() for ln in body.splitlines()
                 if ln.strip() and not ln.strip().startswith("#")]
 
-    naive, cuda = code(_ot_1d_coo_batched), code(_ot_1d_coo_batched_cuda)
-    assert naive != cuda, (
-        "the naive and CUDA sliced-plan builders have identical bodies -- the "
-        "SinkSLOT-CUDA setup speedup would be measuring a path against itself"
+    naive, transposed = code(_ot_1d_coo_batched), code(_ot_1d_coo_batched_transposed)
+    assert naive != transposed, (
+        "the naive and transposed sliced-plan builders have identical bodies -- "
+        "the SinkSLOT-CUDA setup speedup would be measuring a path against itself"
     )
-    # The distinguishing feature is where the accuracy/layout work lives.
-    assert "double()" in "".join(cuda), "CUDA path lost its fp64 cumsum"
-    assert "double()" not in "".join(naive), \
-        "naive path gained the fp64 cumsum -- it is the untouched baseline"
+    # The distinguishing feature is the layout: the transposed builder scans the
+    # contiguous last dim of (C, len), the naive one the strided dim 0 of (len, C).
+    naive, transposed = "".join(naive), "".join(transposed)
+    assert "PX.T.contiguous()" in transposed and "cumsum(a[ix], dim=-1)" in transposed, \
+        "transposed builder lost its (C, len) layout"
+    assert "cumsum(a[ix], dim=0)" in naive and ".T.contiguous(), PY" not in naive, \
+        "naive builder gained the transposed layout -- it is the untouched baseline"
+    # Neither upcasts: precision is the same, only the layout differs (363b1ea
+    # dropped the transposed builder's fp64 scan in favour of genuine fp32).
+    assert "double()" not in naive and "double()" not in transposed
 
 
-def test_naive_and_cuda_builders_agree_on_the_transport():
+def test_naive_and_transposed_builders_agree_on_the_transport(any_device):
     """Different supports, same transport.
 
-    The fp32 and fp64 scans disagree on which breakpoints survive `mass > 0`, so
+    The two scans run in different orders and can disagree on which
+    breakpoints survive `mass > 0`, so
     the supports differ slightly, but the plan they define must match and both
     must lie in Gamma(a, b) -- the property the solver relies on for no row or
     column to be empty.
     """
     n, m = 512, 384
-    x, y, a, b = _problem(n, m, d=4)
+    x, y, a, b = _problem(n, m, d=4, device=any_device)
 
     r0, c0, v0 = sot_plan_coo(x, y, a, b, L=32, seed=0, ot1d=_ot_1d_coo_batched)
-    r1, c1, v1 = sot_plan_coo(x, y, a, b, L=32, seed=0, ot1d=_ot_1d_coo_batched_cuda)
+    r1, c1, v1 = sot_plan_coo(x, y, a, b, L=32, seed=0, ot1d=_ot_1d_coo_batched_transposed)
 
     P0, P1 = _dense(r0, c0, v0, n, m), _dense(r1, c1, v1, n, m)
     for P in (P0, P1):
-        assert torch.allclose(P.sum(1).float(), a, atol=1e-5)
-        assert torch.allclose(P.sum(0).float(), b, atol=1e-5)
+        assert torch.allclose(P.sum(1).float(), a.cpu(), atol=1e-5)
+        assert torch.allclose(P.sum(0).float(), b.cpu(), atol=1e-5)
     assert torch.allclose(P0, P1, atol=1e-5), f"max |dP| = {(P0 - P1).abs().max():.3e}"
 
 
-def test_sinkslot_alternating_triton_matches_plain_torch_segmented_lse():
-    """The fused Triton loop against a straightforward scatter-based Sinkhorn."""
+def test_sinkslot_alternating_fused_matches_plain_torch_segmented_lse(fused):
+    """The fused loop against a straightforward scatter-based Sinkhorn."""
     n, m, eps, L, iters = 512, 384, 0.05, 32, 40
-    x, y, a, b = _problem(n, m, d=4)
+    x, y, a, b = _problem(n, m, d=4, device=fused[0])
 
     rows, cols, S = sot_plan_coo(x, y, a, b, L=L, seed=0)
     cost = sparse_sqeuclidean_cost(x, y, rows, cols)
@@ -141,7 +156,7 @@ def test_sinkslot_alternating_triton_matches_plain_torch_segmented_lse():
 
     r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n)
     c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m)
-    phi, psi, *_ = sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
+    phi, psi, *_ = sinkslot_alternating_fused(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
                            log_a, log_b, n, m, iters)
 
     def seg_lse(vals, idx, size):
@@ -150,7 +165,7 @@ def test_sinkslot_alternating_triton_matches_plain_torch_segmented_lse():
         acc = vals.new_zeros(size).index_add_(0, idx, (vals - mx[idx]).exp())
         return mx + acc.clamp_min(torch.finfo(vals.dtype).tiny).log()
 
-    # Same absorbed convention as sinkslot_alternating_triton: phi = f/eps, psi = g/eps.
+    # Same absorbed convention as sinkslot_alternating_fused: phi = f/eps, psi = g/eps.
     p = torch.zeros(n, device=x.device)
     q = torch.zeros(m, device=x.device)
     for _ in range(iters):

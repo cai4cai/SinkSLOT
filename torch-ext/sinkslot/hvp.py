@@ -27,8 +27,9 @@ import torch
 from beartype import beartype
 from jaxtyping import Float, jaxtyped
 
-from .solver import _HAS_TRITON, sot_plan_coo, _ot_1d_coo_batched_cuda, to_csr, sparse_sqeuclidean_cost
-from .sinkhorn_solvers import sinkslot_alternating_triton, sinkslot_alternating_torch
+from ._backends import resolve_backend
+from .solver import sot_plan_coo, _ot_1d_coo_batched_transposed, to_csr, sparse_sqeuclidean_cost
+from .sinkhorn_solvers import sinkslot_alternating_fused, sinkslot_alternating_torch
 
 
 def hvp_x_sqeuclid_from_potentials(X, Y, a, v, rows, cols, T_vals, eps, *,
@@ -139,27 +140,29 @@ def hvp_x_sqeuclid(X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
     slot_grad's: too few inner Sinkhorn iterations leaves phi, psi (and hence
     the linear system's own P, rhs) short of the true fixed point.
 
-    X, Y, a, v expected fp32 (same Triton-kernel constraint as slot_grad).
+    X, Y, a, v expected fp32 (same fused-kernel constraint as slot_grad).
     `a` is used as both marginals, matching slot_grad's own
     `sot_plan_coo(X, Y, a, a, ...)` call (X, Y assumed equal-size, uniform-a,
     as in every caller in this repo).
 
-    `backend`: "auto" (default) / "triton" / "torch", same meaning and same
-    dispatch rule as `sinkslot_solve`'s -- picks Triton
-    (`sinkslot_alternating_triton`) when it's importable and X is CUDA,
-    `sinkslot_alternating_torch` otherwise; "triton" forces it (raising if
-    unavailable), "torch" forces the pure-torch solve regardless of device.
+    `backend`: "auto" (default) / "torch" / "triton" / "metal", same meaning
+    and same dispatch rule as `sinkslot_solve`'s -- picks the fused loop
+    (`sinkslot_alternating_fused`) when X's device has a fused backend
+    available, `sinkslot_alternating_torch` otherwise; "triton"/"metal" force
+    that backend (raising if it can't run on X), "torch" forces the
+    pure-torch solve regardless of device.
     Unlike `sinkslot_solve`, the sliced-support builder here stays
-    `_ot_1d_coo_batched_cuda` for every backend, not device-switched to the
-    naive builder on CPU: it's plain torch underneath (no Triton, no `.cuda()`
-    calls), so it runs anywhere, and its internal fp64 cumsum is exactly the
-    extra precision the existing validation below relies on -- switching to
-    the naive builder would risk a genuinely different support (see its own
-    docstring), not just different rounding. So `backend="torch"` changes
-    only the solve stage's numerics, not the support.
+    `_ot_1d_coo_batched_transposed` for every backend, not device-switched to the
+    naive builder on CPU: it's plain torch underneath (no fused kernels, no
+    device-specific calls), so it runs anywhere, and it is the builder the
+    validation below was run with -- switching to the naive builder scans in
+    a different order, which can round a few breakpoints differently and so
+    give a slightly different support, not just different rounding. So
+    `backend="torch"` changes only the solve stage's numerics, not the
+    support.
 
     Accuracy caveat: the ~2% figure above and the `tau2=3e-7` default were
-    both obtained through the Triton path (`sinkslot_alternating_triton`) on
+    both obtained through the Triton path (`sinkslot_alternating_fused`) on
     two small synthetic problems (testing/test_hvp.py's `_problem()`,
     n<=300, d=3) -- not on any of the paper's five real datasets at their
     actual n=10000 scale, and not on `sinkslot_alternating_torch` at all.
@@ -169,32 +172,20 @@ def hvp_x_sqeuclid(X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
     (via `a`, `T_vals`), so a real distribution shift (dataset or scale)
     could call for a different `tau2` independent of backend too.
     """
-    if backend not in ("auto", "triton", "torch"):
-        raise ValueError(f"backend must be 'auto', 'triton', or 'torch', got {backend!r}")
-    if backend == "triton":
-        if not (_HAS_TRITON and X.is_cuda):
-            raise ValueError("backend='triton' requires Triton installed and X on CUDA")
-        use_triton = True
-    elif backend == "torch":
-        use_triton = False
-    else:
-        use_triton = _HAS_TRITON and X.is_cuda
+    backend = resolve_backend(backend, X.device)
 
     n, d = X.shape
     m = Y.shape[0]
-    rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=seed, ot1d=_ot_1d_coo_batched_cuda)
-    cost = sparse_sqeuclidean_cost(
-        X, Y, rows, cols,
-        use_triton=(backend == "triton") if backend != "auto" else None,
-    )
+    rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=seed, ot1d=_ot_1d_coo_batched_transposed)
+    cost = sparse_sqeuclidean_cost(X, Y, rows, cols, backend=backend)
     log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
     lam = log_S - cost / eps
     log_a = a.log()
 
-    if use_triton:
+    if backend != "torch":
         r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n, narrow_key=True)
         c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m, narrow_key=True)
-        phi, psi, _, _, _ = sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
+        phi, psi, _, _, _ = sinkslot_alternating_fused(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
                                      log_a, log_a, n, m, n_iters)
     else:
         phi, psi, _, _, _ = sinkslot_alternating_torch(rows, cols, lam, log_a, log_a, n, m, n_iters)

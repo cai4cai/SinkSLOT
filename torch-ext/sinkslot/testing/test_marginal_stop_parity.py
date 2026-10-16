@@ -132,6 +132,10 @@ def _run_sinkslot(device="cpu", eps=0.05, variant="alternating"):
         stop_mode="marginal", stop_max_iter=MAX_ITER, stop_tol=TOL,
         stop_check_every=CHECK_EVERY, variant=variant,
     )
+    # The float64 check below runs on CPU: MPS has no float64.
+    x, y, a, b = x.cpu(), y.cpu(), a.cpu(), b.cpu()
+    res = res._replace(phi=res.phi.cpu(), psi=res.psi.cpu(), rows=res.rows.cpu(),
+                       cols=res.cols.cpu(), S=res.S.cpu())
     cost = _sqeuclid(x, y)[res.rows, res.cols]
     log_S = res.S.clamp_min(torch.finfo(res.S.dtype).tiny).log()
     vals = (res.phi[res.rows] + res.psi[res.cols] + log_S - cost / eps).double().exp()
@@ -202,6 +206,19 @@ def test_every_implementation_agrees_on_the_same_problem():
     )
     for name, viol in viols.items():
         assert viol <= TOL * SLACK, f"{name} at {viol:.3e}, tol {TOL:.0e}, all={viols}"
+
+
+@pytest.mark.parametrize("variant", ["alternating", "symmetric"])
+def test_sinkslot_marginal_mode_on_fused_backends(fused, variant):
+    """The same rule, checked the same way, through the fused kernels (Triton
+    on CUDA, Metal on MPS) rather than the CPU torch path the runners above
+    use -- the solver's float32 proxy must still bound the real violation."""
+    row_marg, col_marg, a, b, iters, converged, proxy = _run_sinkslot(
+        device=fused[0], variant=variant)
+    assert converged and iters < MAX_ITER
+    viol = _viol(row_marg, col_marg, a, b)
+    assert viol <= TOL * SLACK, f"{fused[1]}: true max marginal violation {viol:.3e}"
+    assert proxy == pytest.approx(viol, rel=0.25, abs=TOL * 0.5)
 
 
 # ---------------------------------------------------------------------------

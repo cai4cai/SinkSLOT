@@ -52,6 +52,10 @@ Usage:
 
     # Subprocess mode: still available for maximum isolation if needed
     python -m sinkslot.bench.bench_forward --subprocess --dims 512
+
+    # SinkSLOT fused backend vs its torch path only (CUDA or Apple silicon)
+    python -m sinkslot.bench.bench_forward --fused-vs-torch \\
+        --sizes 50000,10000,1000 --dims 3 --sinkslot-slices 16,64,256 --n-iters 100
 """
 
 from __future__ import annotations
@@ -78,6 +82,20 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
+
+from sinkslot.bench.devices import CUDA_ONLY, default_device, empty_cache, fp64_device, synchronize
+from sinkslot.bench.devices import to as _to
+
+
+def _is_oom(err: BaseException) -> bool:
+    """Whether `err` is an out-of-memory failure on any device. CUDA raises
+    `torch.OutOfMemoryError`, but MPS raises a plain `RuntimeError`: "MPS
+    backend out of memory" when the pool is exhausted, or "Invalid buffer size"
+    for a single allocation larger than Metal's maximum buffer -- which CUDA
+    would report as an OOM. The OOM rows a sweep records need all three."""
+    msg = str(err)
+    return (isinstance(err, torch.OutOfMemoryError) or "out of memory" in msg
+            or "Invalid buffer size" in msg)
 
 
 def _preload_cuda_libs() -> None:
@@ -283,7 +301,8 @@ def compute_entropic_ot_reference(
     *, max_iter: int = 20000, tol: float = 1e-6, check_every: int = 10,
     verbose: bool = False,
 ) -> float:
-    """Converged entropic-OT dual objective at regularization `eps`, on GPU in float64.
+    """Converged entropic-OT dual objective at regularization `eps`, on GPU in float64
+    (on CPU when the inputs are on MPS, which has no float64).
 
     Reference for the RMAE metric used by Spar-Sink ("Importance Sparsification for
     Sinkhorn Algorithm", Li/Yu/Li/Meng): each method is compared against a *converged*
@@ -312,10 +331,8 @@ def compute_entropic_ot_reference(
     maximized), so rmae_pct at eps=1e-3 carries a reference uncertainty around 5e-4
     relative -- still three orders below the percent-level signal being measured.
     """
-    xd = x.detach().double()
-    yd = y.detach().double()
-    ad = a.detach().double()
-    bd = b.detach().double()
+    dev64 = fp64_device(x.device)
+    xd, yd, ad, bd = (_to(t.detach(), dev64, torch.float64) for t in (x, y, a, b))
 
     cost = torch.cdist(xd, yd, p=2) ** 2  # ||x - y||^2, matching half_cost=False
     log_a = ad.log()
@@ -361,7 +378,7 @@ def compute_entropic_ot_reference(
     err, used = sweep(eps, max_iter)
     it += used
 
-    if err >= tol:
+    if not err < tol:  # also catches a NaN error, which `err >= tol` lets through
         print(
             f"  [warn] reference Sinkhorn hit max_iter={max_iter} at eps={eps:g} "
             f"with marginal error {err:.3e} > tol={tol:g}; rmae_pct will be unreliable"
@@ -373,6 +390,13 @@ def compute_entropic_ot_reference(
 
 
 _ref_cost_cache: Dict[str, float] = {}
+
+
+def _finite(cache: Dict[str, float]) -> Dict[str, float]:
+    """The cache entries worth persisting: a NaN/inf reference (a diverged solve)
+    stays in memory for this run but is never written, so the next run retries
+    it instead of silently reusing a poisoned value."""
+    return {k: v for k, v in cache.items() if math.isfinite(v)}
 
 _REF_COST_CACHE_PATH = Path.home() / ".cache" / "sinkslot" / "entropic_ot_reference.json"
 
@@ -421,7 +445,7 @@ def _cached_entropic_ot_reference(
     try:
         _REF_COST_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         _REF_COST_CACHE_PATH.write_text(json.dumps(
-            {"version": _REF_COST_CACHE_VERSION, "costs": _ref_cost_cache}
+            {"version": _REF_COST_CACHE_VERSION, "costs": _finite(_ref_cost_cache)}
         ))
     except OSError as e:
         # A read-only or full cache dir shouldn't fail the benchmark -- just recompute.
@@ -683,8 +707,17 @@ def gpu_memory_used_mb(device: torch.device) -> float:
 
     Still run each measurement in its own process (BenchConfig.isolate): compiled kernels
     and context are not freed by empty_cache(), so they accumulate across methods.
+
+    On MPS the counterpart is `torch.mps.driver_allocated_memory()` after
+    `empty_cache()`: everything this process holds through the Metal driver
+    (unified memory, so there is no separate device total to subtract from).
     """
-    torch.cuda.empty_cache()
+    device = torch.device(device)
+    empty_cache(device)
+    if device.type == "mps":
+        return torch.mps.driver_allocated_memory() / 1e6
+    if device.type != "cuda":
+        return float("nan")
     free, total = torch.cuda.mem_get_info(device)
     return (total - free) / 1e6
 
@@ -802,13 +835,13 @@ def build_sot_plan(
 
     Computed in float64 -- cumulative marginals are exactly where float32 accumulates
     error over n terms -- then returned in `x`'s dtype. This is one-off setup, not the
-    timed solve loop, so the precision costs nothing in the comparison.
+    timed solve loop, so the precision costs nothing in the comparison. On MPS
+    (no float64) it is built on CPU and moved back.
     """
     n, d = x.shape
     m = y.shape[0]
-    device = x.device
-    xd, yd = x.double(), y.double()
-    ad, bd = a.double(), b.double()
+    device = fp64_device(x.device)
+    xd, yd, ad, bd = (_to(t, device, torch.float64) for t in (x, y, a, b))
 
     generator = torch.Generator(device=device).manual_seed(seed)
     thetas = torch.randn(slices, d, generator=generator, device=device, dtype=torch.float64)
@@ -836,7 +869,7 @@ def build_sot_plan(
     pi_sot /= slices
     if delta > 0.0:
         pi_sot = (1.0 - delta) * pi_sot + delta * torch.outer(ad, bd)
-    return pi_sot.to(x.dtype)
+    return pi_sot.to(x.device, x.dtype)
 
 
 def _srot_sinkhorn(
@@ -982,7 +1015,7 @@ def compute_srot_reference(
         sweep(stage_eps, max(check_every, 200))
     err, _ = sweep(eps, max_iter)
 
-    if err >= tol:
+    if not err < tol:  # also catches a NaN error, which `err >= tol` lets through
         print(
             f"  [warn] SROT reference hit max_iter={max_iter} at eps={eps:g} with marginal "
             f"error {err:.3e} > tol={tol:g}; rmae_pct will be unreliable"
@@ -1014,7 +1047,7 @@ def _cached_srot_reference(
     try:
         _SROT_REF_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         _SROT_REF_CACHE_PATH.write_text(json.dumps(
-            {"version": _SROT_REF_CACHE_VERSION, "costs": _srot_ref_cache}
+            {"version": _SROT_REF_CACHE_VERSION, "costs": _finite(_srot_ref_cache)}
         ))
     except OSError as e:
         print(f"  [warn] could not write SROT reference cache to {_SROT_REF_CACHE_PATH}: {e}")
@@ -1026,6 +1059,7 @@ def bench_with_stats(
     warmup: int = 10,
     rep: int = 50,
     *,
+    device: torch.device,
     nvtx: bool = False,
     nvtx_label: Optional[str] = None,
 ) -> Tuple[float, float, float, float, float]:
@@ -1035,7 +1069,7 @@ def bench_with_stats(
     """
     for _ in range(warmup):
         fn()
-    torch.cuda.synchronize()
+    synchronize(device)
 
     with _nvtx_range(
         f"{nvtx_label}/timed" if nvtx_label else "timed",
@@ -1043,13 +1077,20 @@ def bench_with_stats(
     ):
         times = []
         for _ in range(rep):
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
-            fn()
-            end.record()
-            torch.cuda.synchronize()
-            times.append(start.elapsed_time(end))
+            if torch.device(device).type == "cuda":
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+                fn()
+                end.record()
+                synchronize(device)
+                times.append(start.elapsed_time(end))
+            else:
+                # No device events off CUDA: wall clock around a synchronize.
+                t0 = time.perf_counter()
+                fn()
+                synchronize(device)
+                times.append((time.perf_counter() - t0) * 1e3)
 
     times_t = torch.tensor(times)
     return (
@@ -1141,8 +1182,10 @@ def bench_flashsinkhorn(
         # window, so the one-time compile overhead doesn't get counted as steady-state
         # memory (matches the GeomLoss/KeOps benchmark's pre-JIT warmup below).
         loss_fn(a, x, b, y)
-        torch.cuda.synchronize()
-    except torch.cuda.OutOfMemoryError:
+        synchronize(device)
+    except RuntimeError as err:
+        if not _is_oom(err):
+            raise
         return TimingResult(method_name, n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
 
     cost_gap_pct = None
@@ -1202,7 +1245,7 @@ def bench_flashsinkhorn(
             run,
             warmup,
             rep,
-            nvtx=nvtx,
+            device=device, nvtx=nvtx,
             nvtx_label=f"{method_name} n={n} d={d} eps={eps} iters={n_iters}",
         )
         gpu_memory_mb = gpu_memory_used_mb(device)
@@ -1211,7 +1254,9 @@ def bench_flashsinkhorn(
             n_iters=n_iters, cost_gap_pct=cost_gap_pct, barycentric_sym=bary,
             iters_run=iters_run, converged=converged, hit_max_iters=hit_max_iters, **feas,
         )
-    except torch.cuda.OutOfMemoryError:
+    except RuntimeError as err:
+        if not _is_oom(err):
+            raise
         return TimingResult(method_name, n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
 
 
@@ -1269,7 +1314,7 @@ def bench_geomloss_online(
             C_xy, C_yx, eps_list,
             rho=None, debias=False, last_extrapolation=False,
         )
-        torch.cuda.synchronize()
+        synchronize(device)
     except Exception:
         return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
 
@@ -1309,7 +1354,7 @@ def bench_geomloss_online(
             run,
             warmup,
             rep,
-            nvtx=nvtx,
+            device=device, nvtx=nvtx,
             nvtx_label=f"geomloss_online n={n} d={d} eps={eps} iters={n_iters}",
         )
         gpu_memory_mb = gpu_memory_used_mb(device)
@@ -1319,7 +1364,9 @@ def bench_geomloss_online(
             iters_run=n_iters, converged=None, hit_max_iters=None,  # always fixed-iteration, no stopping check
             seed=seed, **feas,
         )
-    except torch.cuda.OutOfMemoryError:
+    except RuntimeError as err:
+        if not _is_oom(err):
+            raise
         return TimingResult("geomloss_online", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
                             n_iters=n_iters, seed=seed)
 
@@ -1377,8 +1424,10 @@ def bench_geomloss_tensorized(
             eps, None, a.unsqueeze(0), b.unsqueeze(0), None, None, g_ab, f_ba,
             batch=True, debias=False, potentials=False,
         ).item()
-        torch.cuda.synchronize()
-    except torch.cuda.OutOfMemoryError:
+        synchronize(device)
+    except RuntimeError as err:
+        if not _is_oom(err):
+            raise
         return TimingResult("geomloss_tensorized", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
 
     rmae_pct = None
@@ -1401,7 +1450,7 @@ def bench_geomloss_tensorized(
             run,
             warmup,
             rep,
-            nvtx=nvtx,
+            device=device, nvtx=nvtx,
             nvtx_label=f"geomloss_tensorized n={n} d={d} eps={eps} iters={n_iters}",
         )
         gpu_memory_mb = gpu_memory_used_mb(device)
@@ -1409,7 +1458,9 @@ def bench_geomloss_tensorized(
             "geomloss_tensorized", n, m, d, eps, mean, std, min_t, max_t, median, gpu_memory_mb, oom=False,
             n_iters=n_iters, rmae_pct=rmae_pct,
         )
-    except torch.cuda.OutOfMemoryError:
+    except RuntimeError as err:
+        if not _is_oom(err):
+            raise
         return TimingResult("geomloss_tensorized", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True, n_iters=n_iters)
 
 
@@ -1461,10 +1512,10 @@ def bench_srot(
         # first in a process -- making setup_ms decrease with L instead of increasing with
         # it. bench_with_stats already warms up the solve loop for the same reason.
         build_sot_plan(x, y, a, b, slices=slices, delta=delta)
-        torch.cuda.synchronize()
+        synchronize(device)
         setup_start = time.perf_counter()
         pi_sot = build_sot_plan(x, y, a, b, slices=slices, delta=delta)
-        torch.cuda.synchronize()
+        synchronize(device)
         setup_ms = (time.perf_counter() - setup_start) * 1e3
 
         # float32 to match the other benchmarked methods: flash and GeomLoss both run
@@ -1477,7 +1528,9 @@ def bench_srot(
         log_pi = pi_sot.clamp_min(torch.finfo(pi_sot.dtype).tiny).log()
         log_a = a.log()
         log_b = b.log()
-    except torch.cuda.OutOfMemoryError:
+    except RuntimeError as err:
+        if not _is_oom(err):
+            raise
         return TimingResult(
             "srot", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
             n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices,
@@ -1491,8 +1544,10 @@ def bench_srot(
     try:
         f, g, iters_run, converged, final_viol = _srot_sinkhorn(
             cost, log_pi, log_a, log_b, eps, n_iters, _stop)
-        torch.cuda.synchronize()
-    except torch.cuda.OutOfMemoryError:
+        synchronize(device)
+    except RuntimeError as err:
+        if not _is_oom(err):
+            raise
         return TimingResult(
             "srot", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
             n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices, seed=seed,
@@ -1518,7 +1573,7 @@ def bench_srot(
 
     try:
         mean, std, min_t, max_t, median = bench_with_stats(
-            run, warmup, rep, nvtx=nvtx,
+            run, warmup, rep, device=device, nvtx=nvtx,
             nvtx_label=f"srot n={n} d={d} eps={eps} iters={n_iters} L={slices}",
         )
         gpu_memory_mb = gpu_memory_used_mb(device)
@@ -1530,7 +1585,9 @@ def bench_srot(
             iters_run=iters_run, converged=converged, final_viol=final_viol, seed=seed,
             hit_max_iters=hit_max_iters, **feas,
         )
-    except torch.cuda.OutOfMemoryError:
+    except RuntimeError as err:
+        if not _is_oom(err):
+            raise
         return TimingResult(
             "srot", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
             n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices, seed=seed,
@@ -1790,7 +1847,9 @@ def bench_sparsink(
     try:
         cost = torch.cdist(x, y, p=2) ** 2
         log_a, log_b = a.log(), b.log()
-    except torch.cuda.OutOfMemoryError:
+    except RuntimeError as err:
+        if not _is_oom(err):
+            raise
         return TimingResult(
             method, n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
             n_iters=n_iters, dataset=dataset, tf32=allow_tf32, sample_size=sample_size, seed=seed,
@@ -1804,7 +1863,7 @@ def bench_sparsink(
     # Warm up the sampling path: the first call in a process absorbs one-time CUDA
     # initialisation, which would otherwise land in setup_ms (~40ms against ~0.1ms).
     build_sparse_kernel(cost, a, b, eps, method=method, sample_size=sample_size, seed=0)
-    torch.cuda.synchronize()
+    synchronize(device)
 
     _stop = stop or StopCfg.fixed()
     plan_costs, barys, nnzs, empties = [], [], [], 0
@@ -1812,12 +1871,12 @@ def bench_sparsink(
     iters_list, conv_list, viol_list = [], [], []
     feas_list = []
     for rep_i in range(replicates):
-        torch.cuda.synchronize()
+        synchronize(device)
         t0 = time.perf_counter()
         rows, cols, log_values = build_sparse_kernel(
             cost, a, b, eps, method=method, sample_size=sample_size, seed=rep_i,
         )
-        torch.cuda.synchronize()
+        synchronize(device)
         build_ms.append((time.perf_counter() - t0) * 1e3)
 
         f, g, empty, iters_r, conv_r, viol_r = _sparsink_sinkhorn(
@@ -1864,9 +1923,9 @@ def bench_sparsink(
 
     try:
         run()
-        torch.cuda.synchronize()
+        synchronize(device)
         mean, std, min_t, max_t, median = bench_with_stats(
-            run, warmup, rep, nvtx=nvtx,
+            run, warmup, rep, device=device, nvtx=nvtx,
             nvtx_label=f"{method} n={n} d={d} eps={eps} iters={n_iters} s={sample_size}",
         )
         gpu_memory_mb = gpu_memory_used_mb(device)
@@ -1883,7 +1942,9 @@ def bench_sparsink(
             valid_replicates=len(plan_costs),
             setup_ms=float(sum(build_ms) / len(build_ms)), seed=seed, **feas,
         )
-    except torch.cuda.OutOfMemoryError:
+    except RuntimeError as err:
+        if not _is_oom(err):
+            raise
         return TimingResult(
             method, n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
             n_iters=n_iters, dataset=dataset, tf32=allow_tf32, sample_size=sample_size, seed=seed,
@@ -1936,7 +1997,7 @@ def compute_sinkslot_reference(
     for se in schedule:
         sweep(se, max(check_every, 200))
     err = sweep(eps, max_iter)
-    if err >= tol:
+    if not err < tol:  # also catches a NaN error, which `err >= tol` lets through
         print(f"  [warn] SinkSLOT reference hit max_iter={max_iter} at eps={eps:g} "
               f"with marginal error {err:.3e} > tol={tol:g}; rmae_pct unreliable")
     return float((a * f).sum() + (b * g).sum())
@@ -1967,7 +2028,7 @@ def bench_sinkslot(
     from sinkslot.solver import (
         sot_plan_coo, to_csr,
     )
-    from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
+    from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused
     _set_tf32(allow_tf32)
 
     torch.manual_seed(seed)
@@ -1986,7 +2047,7 @@ def bench_sinkslot(
         lam = log_S - cost / eps
         r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n)
         c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m)
-        torch.cuda.synchronize()
+        synchronize(device)
         t0 = time.perf_counter()
         rows, cols, S = sot_plan_coo(x, y, a, b, L=slices, seed=0)
         cost = (x[rows] - y[cols]).square().sum(1)
@@ -1994,9 +2055,11 @@ def bench_sinkslot(
         lam = log_S - cost / eps
         r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, n)
         c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, m)
-        torch.cuda.synchronize()
+        synchronize(device)
         setup_ms = (time.perf_counter() - t0) * 1e3
-    except torch.cuda.OutOfMemoryError:
+    except RuntimeError as err:
+        if not _is_oom(err):
+            raise
         return TimingResult("sinkslot", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
                             n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices,
                             seed=seed)
@@ -2015,9 +2078,9 @@ def bench_sinkslot(
                               check_every=_stop.check_every)
 
     def run():
-        sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
+        sinkslot_alternating_fused(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
 
-    phi, psi, iters_run, converged, final_viol = sinkslot_alternating_triton(
+    phi, psi, iters_run, converged, final_viol = sinkslot_alternating_fused(
         r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
     cost_gap_pct = None
     bary = None
@@ -2038,9 +2101,9 @@ def bench_sinkslot(
     hit_max_iters = (iters_run >= _stop.max_iter) if _stop.mode != "fixed" else None
 
     try:
-        run(); torch.cuda.synchronize()
+        run(); synchronize(device)
         mean, std, min_t, max_t, median = bench_with_stats(
-            run, warmup, rep, nvtx=nvtx,
+            run, warmup, rep, device=device, nvtx=nvtx,
             nvtx_label=f"sinkslot n={n} d={d} eps={eps} iters={n_iters} L={slices}")
         gpu_memory_mb = gpu_memory_used_mb(device)
         return TimingResult("sinkslot", n, m, d, eps, mean, std, min_t, max_t, median,
@@ -2050,7 +2113,9 @@ def bench_sinkslot(
                             nnz=int(rows.numel()), setup_ms=setup_ms,
                             iters_run=iters_run, converged=converged, final_viol=final_viol,
                             hit_max_iters=hit_max_iters, seed=seed, **feas)
-    except torch.cuda.OutOfMemoryError:
+    except RuntimeError as err:
+        if not _is_oom(err):
+            raise
         return TimingResult("sinkslot", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
                             n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices,
                             seed=seed)
@@ -2075,12 +2140,13 @@ def bench_sinkslotcuda(
 
     * ``sparse_sqeuclidean_cost`` -- fused Triton cost kernel (9-10x on the cost
       stage; no (nnz, d) temporaries).
-    * ``_ot_1d_coo_batched_cuda`` -- transposed (C, n) layout with fp64 cumsum
-      accumulation (49.5x on the dominant stage AND a strictly more accurate plan).
+    * ``_ot_1d_coo_batched_transposed`` -- transposed (C, n) layout, so the
+      cumsum scans a contiguous dimension (49.5x on the dominant stage).
     * ``to_csr(..., narrow_key=True)`` -- int32 CSC sort key (4.96 -> 2.24 ms).
 
-    Because the fp64 scan yields a *different* (more accurate) sliced support than
-    the baseline's fp32 scan, SinkSLOT-CUDA carries its own converged-reference
+    Because the transposed scan runs in a different order from the baseline's,
+    it can round breakpoints differently and yield a slightly *different* sliced
+    support, so SinkSLOT-CUDA carries its own converged-reference
     cache. Its RMAE is therefore measured against its own plan's optimum, exactly
     as SinkSLOT is against the baseline plan. See sinkslot/solver.py.
 
@@ -2088,9 +2154,9 @@ def bench_sinkslotcuda(
     RNG stays at its independent default seed=0, unaffected by this.
     """
     from sinkslot.solver import (
-        sot_plan_coo, to_csr, sparse_sqeuclidean_cost, _ot_1d_coo_batched_cuda,
+        sot_plan_coo, to_csr, sparse_sqeuclidean_cost, _ot_1d_coo_batched_transposed,
     )
-    from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
+    from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused
     _set_tf32(allow_tf32)
 
     torch.manual_seed(seed)
@@ -2102,7 +2168,7 @@ def bench_sinkslotcuda(
     log_a, log_b = a.log(), b.log()
 
     def _setup():
-        rows, cols, S = sot_plan_coo(x, y, a, b, L=slices, seed=0, ot1d=_ot_1d_coo_batched_cuda)
+        rows, cols, S = sot_plan_coo(x, y, a, b, L=slices, seed=0, ot1d=_ot_1d_coo_batched_transposed)
         cost = sparse_sqeuclidean_cost(x, y, rows, cols)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
         lam = log_S - cost / eps
@@ -2113,13 +2179,15 @@ def bench_sinkslotcuda(
     try:
         # Setup: sliced support + CSR/CSC layouts, timed once (warmed).
         _setup()
-        torch.cuda.synchronize()
+        synchronize(device)
         t0 = time.perf_counter()
         (rows, cols, S, cost, log_S,
          r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam) = _setup()
-        torch.cuda.synchronize()
+        synchronize(device)
         setup_ms = (time.perf_counter() - t0) * 1e3
-    except torch.cuda.OutOfMemoryError:
+    except RuntimeError as err:
+        if not _is_oom(err):
+            raise
         return TimingResult("sinkslotcuda", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
                             n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices,
                             seed=seed)
@@ -2134,9 +2202,9 @@ def bench_sinkslotcuda(
                               check_every=_stop.check_every)
 
     def run():
-        sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
+        sinkslot_alternating_fused(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
 
-    phi, psi, iters_run, converged, final_viol = sinkslot_alternating_triton(
+    phi, psi, iters_run, converged, final_viol = sinkslot_alternating_fused(
         r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iters, _sinkslot_stop, eps=eps)
     cost_gap_pct = None
     bary = None
@@ -2157,9 +2225,9 @@ def bench_sinkslotcuda(
     hit_max_iters = (iters_run >= _stop.max_iter) if _stop.mode != "fixed" else None
 
     try:
-        run(); torch.cuda.synchronize()
+        run(); synchronize(device)
         mean, std, min_t, max_t, median = bench_with_stats(
-            run, warmup, rep, nvtx=nvtx,
+            run, warmup, rep, device=device, nvtx=nvtx,
             nvtx_label=f"sinkslotcuda n={n} d={d} eps={eps} iters={n_iters} L={slices}")
         gpu_memory_mb = gpu_memory_used_mb(device)
         return TimingResult("sinkslotcuda", n, m, d, eps, mean, std, min_t, max_t, median,
@@ -2169,7 +2237,9 @@ def bench_sinkslotcuda(
                             nnz=int(rows.numel()), setup_ms=setup_ms,
                             iters_run=iters_run, converged=converged, final_viol=final_viol,
                             hit_max_iters=hit_max_iters, seed=seed, **feas)
-    except torch.cuda.OutOfMemoryError:
+    except RuntimeError as err:
+        if not _is_oom(err):
+            raise
         return TimingResult("sinkslotcuda", n, m, d, eps, float("inf"), 0, 0, 0, 0, 0, oom=True,
                             n_iters=n_iters, dataset=dataset, tf32=allow_tf32, srot_slices=slices,
                             seed=seed)
@@ -2200,7 +2270,7 @@ def _cached_sinkslot_reference(n, m, d, eps, slices, rows, cols, log_S, cost,
     try:
         _SINKSLOT_REF_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         _SINKSLOT_REF_CACHE_PATH.write_text(json.dumps(
-            {"version": _SINKSLOT_REF_CACHE_VERSION, "costs": _sinkslot_ref_cache}))
+            {"version": _SINKSLOT_REF_CACHE_VERSION, "costs": _finite(_sinkslot_ref_cache)}))
     except OSError as e:
         print(f"  [warn] could not write SinkSLOT reference cache: {e}")
     return _sinkslot_ref_cache[key]
@@ -2208,9 +2278,9 @@ def _cached_sinkslot_reference(n, m, d, eps, slices, rows, cols, log_S, cost,
 
 _sinkslot_cuda_ref_cache: Dict[str, float] = {}
 _SINKSLOT_CUDA_REF_CACHE_PATH = Path.home() / ".cache" / "sinkslot" / "sinkslotcuda_reference.json"
-# Separate namespace from the SinkSLOT cache: the CUDA path's fp64 cumsum yields a
-# different (more accurate) sliced support than the baseline's fp32 scan -- the two
-# disagreed on up to 3.8% of the support -- so each converges to its own optimum.
+# Separate namespace from the SinkSLOT cache: the transposed builder scans in a
+# different order from the baseline's, so the two can produce slightly different
+# sliced supports, and each converges to its own optimum.
 _SINKSLOT_CUDA_REF_CACHE_VERSION = 1
 
 
@@ -2234,7 +2304,7 @@ def _cached_sinkslotcuda_reference(n, m, d, eps, slices, rows, cols, log_S, cost
     try:
         _SINKSLOT_CUDA_REF_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         _SINKSLOT_CUDA_REF_CACHE_PATH.write_text(json.dumps(
-            {"version": _SINKSLOT_CUDA_REF_CACHE_VERSION, "costs": _sinkslot_cuda_ref_cache}))
+            {"version": _SINKSLOT_CUDA_REF_CACHE_VERSION, "costs": _finite(_sinkslot_cuda_ref_cache)}))
     except OSError as e:
         print(f"  [warn] could not write SinkSLOT-CUDA reference cache: {e}")
     return _sinkslot_cuda_ref_cache[key]
@@ -2512,19 +2582,19 @@ def measure_jit_overhead(
             )
 
             # Cold start (first call - triggers Triton JIT + autotuning)
-            torch.cuda.synchronize()
+            synchronize(device)
             start = time.perf_counter()
             _ = loss_fn(a, x, b, y)
-            torch.cuda.synchronize()
+            synchronize(device)
             cold_ms = (time.perf_counter() - start) * 1000
 
             # Warm calls (subsequent - uses cached kernels)
             warm_times = []
             for _ in range(warm_reps):
-                torch.cuda.synchronize()
+                synchronize(device)
                 start = time.perf_counter()
                 _ = loss_fn(a, x, b, y)
-                torch.cuda.synchronize()
+                synchronize(device)
                 warm_times.append((time.perf_counter() - start) * 1000)
             warm_ms = sum(warm_times) / len(warm_times)
 
@@ -2554,18 +2624,18 @@ def measure_jit_overhead(
                 allow_tf32=False, autotune=True,
             )
 
-            torch.cuda.synchronize()
+            synchronize(device)
             start = time.perf_counter()
             _ = loss_fn(a, x, b, y)
-            torch.cuda.synchronize()
+            synchronize(device)
             cold_ms = (time.perf_counter() - start) * 1000
 
             warm_times = []
             for _ in range(warm_reps):
-                torch.cuda.synchronize()
+                synchronize(device)
                 start = time.perf_counter()
                 _ = loss_fn(a, x, b, y)
-                torch.cuda.synchronize()
+                synchronize(device)
                 warm_times.append((time.perf_counter() - start) * 1000)
             warm_ms = sum(warm_times) / len(warm_times)
 
@@ -2602,25 +2672,25 @@ def measure_jit_overhead(
             C_yx = (y, x.detach())
 
             # Cold start
-            torch.cuda.synchronize()
+            synchronize(device)
             start = time.perf_counter()
             _ = sinkhorn_loop(
                 softmin, a_log, b_log, None, None, C_xy, C_yx, eps_list,
                 rho=None, debias=False, last_extrapolation=True,
             )
-            torch.cuda.synchronize()
+            synchronize(device)
             cold_ms = (time.perf_counter() - start) * 1000
 
             # Warm calls
             warm_times = []
             for _ in range(warm_reps):
-                torch.cuda.synchronize()
+                synchronize(device)
                 start = time.perf_counter()
                 _ = sinkhorn_loop(
                     softmin, a_log, b_log, None, None, C_xy, C_yx, eps_list,
                     rho=None, debias=False, last_extrapolation=True,
                 )
-                torch.cuda.synchronize()
+                synchronize(device)
                 warm_times.append((time.perf_counter() - start) * 1000)
             warm_ms = sum(warm_times) / len(warm_times)
 
@@ -2768,6 +2838,7 @@ def run_forward_benchmark(
     include_ott: bool = True,
     include_geomloss: bool = True,
     include_tensorized: bool = False,
+    include_geomloss_online: bool = True,
     max_dense_size: int = 8192,
     verbose: bool = True,
     nvtx: bool = False,
@@ -2867,7 +2938,7 @@ def run_forward_benchmark(
                     print(f"  Flash (alternating):   {status}")
 
             # GeomLoss online (KeOps)
-            if include_geomloss:
+            if include_geomloss and include_geomloss_online:
                 res = bench_geomloss_online(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, rmae_check=rmae_check,
                     dataset=dataset, seed=seed,
@@ -2995,7 +3066,7 @@ def run_forward_benchmark(
                         print(f"  OTT-JAX Dense:         {status}")
 
             gc.collect()
-            torch.cuda.empty_cache()
+            empty_cache(device)
 
     return results
 
@@ -3523,6 +3594,82 @@ def run_forward_benchmark_subprocess(
     return results
 
 
+def bench_fused_vs_torch(
+    sizes: List[int], slices: List[int], dims: List[int], eps: float, n_iters: int,
+    warmup: int, rep: int, output_dir: Path, device: Optional[str] = None,
+) -> List[dict]:
+    """SinkSLOT's fused backend against its own pure-torch path, on one device.
+
+    The per-backend speedup table in the README: same support, same lam, same
+    loop, only the half-step kernel differs (`sinkslot_alternating_fused` vs
+    `sinkslot_alternating_torch`), timed per iteration over a fixed `n_iters`.
+    The fused backend is whichever `backend="auto"` picks on `device` (Triton
+    on CUDA, Metal on MPS), so this is the one mode of this harness that runs
+    on Apple silicon: wall-clock with a device synchronize, since MPS has no
+    CUDA events and the loop is long enough for the sync to be negligible.
+    """
+    from sinkslot._backends import resolve_backend
+    from sinkslot.solver import (
+        _ot_1d_coo_batched_transposed, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
+    )
+    from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused, sinkslot_alternating_torch
+
+    if device is None:
+        device = default_device()
+    backend = resolve_backend("auto", device)
+    if backend == "torch":
+        raise RuntimeError(f"no fused backend available on {device!r}")
+
+    def sync():
+        synchronize(device)
+
+    def per_iter_ms(fn):
+        for _ in range(warmup):
+            fn()
+        sync()
+        t0 = time.perf_counter()
+        for _ in range(rep):
+            fn()
+        sync()
+        return (time.perf_counter() - t0) / (rep * n_iters) * 1e3
+
+    rows_out = []
+    print(f"SinkSLOT {backend} vs torch on {device}, eps={eps}, {n_iters} iters/run, ms/iter")
+    print(f"{'n':>7} {'d':>3} {'L':>4} {'nnz':>10} {'torch':>9} {backend:>9} {'speedup':>8}")
+    for d in dims:
+        for n in sorted(sizes, reverse=True):
+            g = torch.Generator(device="cpu").manual_seed(0)
+            x = torch.randn(n, d, generator=g).to(device)
+            y = (torch.randn(n, d, generator=g) + 1.0).to(device)
+            a = torch.full((n,), 1.0 / n, device=device)
+            log_a = a.log()
+            for L in slices:
+                rows, cols, S = sot_plan_coo(x, y, a, a, L=L, seed=0, ot1d=_ot_1d_coo_batched_transposed)
+                cost = sparse_sqeuclidean_cost(x, y, rows, cols, backend=backend)
+                lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
+                csr = to_csr(rows, cols, lam, n, narrow_key=True)[:3]
+                csc = to_csr(cols, rows, lam, n, narrow_key=True)[:3]
+                t_fused = per_iter_ms(lambda: sinkslot_alternating_fused(
+                    *csr, *csc, log_a, log_a, n, n, n_iters))
+                t_torch = per_iter_ms(lambda: sinkslot_alternating_torch(
+                    rows, cols, lam, log_a, log_a, n, n, n_iters))
+                row = dict(device=device, backend=backend, n=n, d=d, L=L, nnz=rows.numel(),
+                           torch_ms_per_iter=t_torch, fused_ms_per_iter=t_fused,
+                           speedup=t_torch / t_fused)
+                rows_out.append(row)
+                print(f"{n:>7} {d:>3} {L:>4} {rows.numel():>10} {t_torch:>9.3f} "
+                      f"{t_fused:>9.3f} {t_torch / t_fused:>7.1f}x", flush=True)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out = output_dir / f"fused_vs_torch_{backend}.csv"
+    with open(out, "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows_out[0]))
+        writer.writeheader()
+        writer.writerows(rows_out)
+    print(f"Saved {out}")
+    return rows_out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Unified forward pass benchmark for FlashSinkhorn paper."
@@ -3642,6 +3789,11 @@ def main() -> None:
         help="Run each size in a separate subprocess (rarely needed with bucketed cache keys)."
     )
     parser.add_argument(
+        "--fused-vs-torch", action="store_true",
+        help="Only time SinkSLOT's fused backend (Triton on CUDA, Metal on MPS) against its "
+             "pure-torch path, across --sizes x --dims x --sinkslot-slices. Runs on Apple silicon.",
+    )
+    parser.add_argument(
         "--single-size", type=int, default=None,
         help=argparse.SUPPRESS,  # Hidden: used internally by --subprocess mode
     )
@@ -3659,18 +3811,26 @@ def main() -> None:
     sinkslot_slices = [int(v) for v in str(args.sinkslot_slices).split(",") if v.strip()]
     sinkslotcuda_slices = [int(v) for v in str(args.sinkslotcuda_slices).split(",") if v.strip()]
 
+    if args.fused_vs_torch:
+        bench_fused_vs_torch(
+            sizes=[int(v) for v in args.sizes.split(",") if v.strip()],
+            slices=sinkslot_slices,
+            dims=[int(v) for v in args.dims.split(",") if v.strip()],
+            eps=args.eps, n_iters=args.n_iters, warmup=args.warmup, rep=args.rep,
+            output_dir=Path(args.output_dir),
+        )
+        return
+
     # =====================================================================
     # Worker mode: benchmark a single (n, d) and emit JSON to stdout
     # =====================================================================
     if args.single_size is not None:
         if args.single_dim is None:
             parser.error("--single-dim is required with --single-size")
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA required for this benchmark.")
-
-        _preload_cuda_libs()
-        _set_tf32(args.tf32)
-        device = torch.device("cuda")
+        device = torch.device(default_device())
+        if device.type == "cuda":
+            _preload_cuda_libs()
+            _set_tf32(args.tf32)
 
         # Determine which methods to benchmark (same logic as normal mode)
         include_flash_symmetric = not args.no_flash_symmetric
@@ -3693,6 +3853,8 @@ def main() -> None:
             include_sinkslot = args.only == "sinkslot"
             include_sinkslotcuda = args.only == "sinkslotcuda"
             include_tensorized = False
+        if device.type != "cuda":
+            include_flash_symmetric = include_flash_alternating = include_ott = False
 
         results = run_forward_benchmark(
             sizes=[args.single_size],
@@ -3707,6 +3869,7 @@ def main() -> None:
             include_ott=include_ott,
             include_geomloss=include_geomloss,
             include_tensorized=include_tensorized,
+            include_geomloss_online=device.type == "cuda",
             max_dense_size=args.max_dense_size,
             verbose=False,
             nvtx=False,
@@ -3733,14 +3896,17 @@ def main() -> None:
             print(timing_result_to_json(r), flush=True)
         return
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA required for this benchmark.")
-
-    _preload_cuda_libs()
-    _set_tf32(args.tf32)
-
-    device = torch.device("cuda")
-    nvtx_enabled = bool(args.nvtx)
+    device = torch.device(default_device())
+    if device.type == "cuda":
+        _preload_cuda_libs()
+        _set_tf32(args.tf32)
+    else:
+        if args.verify or args.measure_jit_overhead:
+            raise SystemExit("--verify and --measure-jit-overhead compare FlashSinkhorn, "
+                             "GeomLoss online and OTT-JAX, which need CUDA")
+        print(f"Running on {device}: skipping CUDA-only methods "
+              f"({'; '.join(CUDA_ONLY.values())}).")
+    nvtx_enabled = bool(args.nvtx) and device.type == "cuda"
     if nvtx_enabled and not _nvtx_available():
         print("Warning: NVTX unavailable; disabling --nvtx.")
         nvtx_enabled = False
@@ -3815,6 +3981,8 @@ def main() -> None:
         if include_tensorized:
             print("Warning: Ignoring --tensorized because --only is set.")
             include_tensorized = False
+    if device.type != "cuda":
+        include_flash_symmetric = include_flash_alternating = include_ott = False
 
     mode_label = "Subprocess Mode" if args.subprocess else "In-Process (bucketed cache keys)"
     print(f"Forward Pass Benchmark ({mode_label})")
@@ -3837,7 +4005,7 @@ def main() -> None:
         print(f"  Only: {args.only}")
     if not args.subprocess:
         print(f"  NVTX ranges: {nvtx_enabled}")
-    print(f"  GPU: {torch.cuda.get_device_name()}")
+    print(f"  Device: {torch.cuda.get_device_name() if device.type == 'cuda' else device}")
 
     if args.subprocess:
         results = run_forward_benchmark_subprocess(
@@ -3859,6 +4027,7 @@ def main() -> None:
             include_ott=include_ott,
             include_geomloss=include_geomloss,
             include_tensorized=include_tensorized,
+            include_geomloss_online=device.type == "cuda",
             max_dense_size=args.max_dense_size,
             verbose=not args.quiet,
             nvtx=nvtx_enabled,
