@@ -448,7 +448,8 @@ def parse_args():
                    help="Damping of the symmetric solvers (FlashSinkhorn symmetric, GeomLoss, SinkSLOT symmetric); "
                         "0.5 is the libraries' default, 0.9 the paper's.")
     p.add_argument("--geomloss_truncate", type=float, default=5.0,
-                   help="GeomLoss multiscale: kernel truncation margin, in units of eps (GeomLoss's default 5).")
+                   help="GeomLoss multiscale: kernel truncation margin, in units of eps (GeomLoss's default 5; "
+                        "the paper uses 1).")
     p.add_argument("--methods", type=str, nargs="+", default=_METHOD_KEYS, choices=_METHOD_KEYS,
                     help="Subset of methods to run in this invocation -- run several in parallel "
                          "processes (one per method) for wall-clock speed, each writes its own "

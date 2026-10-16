@@ -125,3 +125,11 @@ def test_flash_symmetric_alpha_matches_the_library_at_one_half():
     f2, g2, n2 = flash_symmetric_alpha(x, y, a, b, 0.5, **kw)
     assert int(n1) == int(n2)
     assert torch.allclose(f1, f2, atol=1e-5) and torch.allclose(g1, g2, atol=1e-5)
+
+
+def test_multiscale_alpha_reaches_the_same_fixed_point():
+    x, y, a, b = _problem(n=3000, d=2)
+    out = {al: geomloss_multiscale(x, y, a, b, 0.05, 50000, threshold=1e-5, truncate=None, alpha=al) for al in (0.5, 0.9)}
+    (f5, g5, it5, c5, cost5, *_), (f9, g9, it9, c9, cost9, *_) = out[0.5], out[0.9]
+    assert c5 and c9
+    assert abs(cost5 - cost9) < 1e-4 * abs(cost5)
