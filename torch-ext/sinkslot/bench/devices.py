@@ -33,10 +33,13 @@ def fp64_device(device) -> torch.device:
 def to(t: torch.Tensor, device, dtype) -> torch.Tensor:
     """`t` on `device` in `dtype`, in two steps with the cast done on CPU.
 
-    On PyTorch 2.14.1 a single `t.to(device="cpu", dtype=torch.float64)` (or
-    `t.to(cpu_float64_tensor)`) from an MPS tensor returns reinterpreted bytes
-    rather than converted values -- 1/1024 comes back as 0 or 2e-314, with no
-    error. Splitting it fixes that, but the order matters: a CPU float64 tensor
+    On PyTorch 2.14.1 copying an MPS tensor into a CPU float64 tensor in one
+    step never writes the destination, and raises nothing: `cpu_f64.copy_(t)`
+    leaves it unchanged, and `t.to(device="cpu", dtype=torch.float64)` (or
+    `t.to(cpu_float64_tensor)`) returns uninitialised memory -- usually zeros,
+    sometimes arbitrary values. Every source dtype is affected; other
+    destination dtypes, and the reverse direction, are not. Splitting it
+    fixes that, but the order matters: a CPU float64 tensor
     must be cast before it moves to MPS (which cannot hold float64), and an MPS
     tensor must move to CPU before it is cast to float64. Casting on whichever
     side is CPU satisfies both.
