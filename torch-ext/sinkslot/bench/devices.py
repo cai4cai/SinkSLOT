@@ -38,8 +38,11 @@ def to(t: torch.Tensor, device, dtype) -> torch.Tensor:
     leaves it unchanged, and `t.to(device="cpu", dtype=torch.float64)` (or
     `t.to(cpu_float64_tensor)`) returns uninitialised memory -- usually zeros,
     sometimes arbitrary values. Every source dtype is affected; other
-    destination dtypes, and the reverse direction, are not. Splitting it
-    fixes that, but the order matters: a CPU float64 tensor
+    destination dtypes, and the reverse direction, are not. This is PyTorch
+    issue pytorch/pytorch#197715 (a 2.14 regression); the fix,
+    pytorch/pytorch#197722, makes the one-step call raise rather than convert,
+    so the two-step form below stays necessary after it ships. Two steps
+    avoid the bug, but their order matters: a CPU float64 tensor
     must be cast before it moves to MPS (which cannot hold float64), and an MPS
     tensor must move to CPU before it is cast to float64. Casting on whichever
     side is CPU satisfies both.
