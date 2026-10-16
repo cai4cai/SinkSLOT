@@ -2079,12 +2079,13 @@ def bench_sinkslotcuda(
 
     * ``sparse_sqeuclidean_cost`` -- fused Triton cost kernel (9-10x on the cost
       stage; no (nnz, d) temporaries).
-    * ``_ot_1d_coo_batched_cuda`` -- transposed (C, n) layout with fp64 cumsum
-      accumulation (49.5x on the dominant stage AND a strictly more accurate plan).
+    * ``_ot_1d_coo_batched_transposed`` -- transposed (C, n) layout, so the
+      cumsum scans a contiguous dimension (49.5x on the dominant stage).
     * ``to_csr(..., narrow_key=True)`` -- int32 CSC sort key (4.96 -> 2.24 ms).
 
-    Because the fp64 scan yields a *different* (more accurate) sliced support than
-    the baseline's fp32 scan, SinkSLOT-CUDA carries its own converged-reference
+    Because the transposed scan runs in a different order from the baseline's,
+    it can round breakpoints differently and yield a slightly *different* sliced
+    support, so SinkSLOT-CUDA carries its own converged-reference
     cache. Its RMAE is therefore measured against its own plan's optimum, exactly
     as SinkSLOT is against the baseline plan. See sinkslot/solver.py.
 
@@ -2092,7 +2093,7 @@ def bench_sinkslotcuda(
     RNG stays at its independent default seed=0, unaffected by this.
     """
     from sinkslot.solver import (
-        sot_plan_coo, to_csr, sparse_sqeuclidean_cost, _ot_1d_coo_batched_cuda,
+        sot_plan_coo, to_csr, sparse_sqeuclidean_cost, _ot_1d_coo_batched_transposed,
     )
     from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused
     _set_tf32(allow_tf32)
@@ -2106,7 +2107,7 @@ def bench_sinkslotcuda(
     log_a, log_b = a.log(), b.log()
 
     def _setup():
-        rows, cols, S = sot_plan_coo(x, y, a, b, L=slices, seed=0, ot1d=_ot_1d_coo_batched_cuda)
+        rows, cols, S = sot_plan_coo(x, y, a, b, L=slices, seed=0, ot1d=_ot_1d_coo_batched_transposed)
         cost = sparse_sqeuclidean_cost(x, y, rows, cols)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
         lam = log_S - cost / eps
@@ -2212,9 +2213,9 @@ def _cached_sinkslot_reference(n, m, d, eps, slices, rows, cols, log_S, cost,
 
 _sinkslot_cuda_ref_cache: Dict[str, float] = {}
 _SINKSLOT_CUDA_REF_CACHE_PATH = Path.home() / ".cache" / "sinkslot" / "sinkslotcuda_reference.json"
-# Separate namespace from the SinkSLOT cache: the CUDA path's fp64 cumsum yields a
-# different (more accurate) sliced support than the baseline's fp32 scan -- the two
-# disagreed on up to 3.8% of the support -- so each converges to its own optimum.
+# Separate namespace from the SinkSLOT cache: the transposed builder scans in a
+# different order from the baseline's, so the two can produce slightly different
+# sliced supports, and each converges to its own optimum.
 _SINKSLOT_CUDA_REF_CACHE_VERSION = 1
 
 
@@ -3543,7 +3544,7 @@ def bench_fused_vs_torch(
     """
     from sinkslot._backends import resolve_backend
     from sinkslot.solver import (
-        _ot_1d_coo_batched_cuda, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
+        _ot_1d_coo_batched_transposed, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
     )
     from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused, sinkslot_alternating_torch
 
@@ -3576,7 +3577,7 @@ def bench_fused_vs_torch(
             a = torch.full((n,), 1.0 / n, device=device)
             log_a = a.log()
             for L in slices:
-                rows, cols, S = sot_plan_coo(x, y, a, a, L=L, seed=0, ot1d=_ot_1d_coo_batched_cuda)
+                rows, cols, S = sot_plan_coo(x, y, a, a, L=L, seed=0, ot1d=_ot_1d_coo_batched_transposed)
                 cost = sparse_sqeuclidean_cost(x, y, rows, cols, backend=backend)
                 lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
                 csr = to_csr(rows, cols, lam, n, narrow_key=True)[:3]

@@ -5,7 +5,7 @@ This is the paper's own contribution -- a distinct algorithm from FlashSinkhorn
 fused kernel over the full cost matrix).
 
 This module holds the pieces with no FlashSinkhorn equivalent to mirror: the
-sliced-OT support construction (`sot_plan_coo`, `_ot_1d_coo_batched[_cuda]`),
+sliced-OT support construction (`sot_plan_coo`, `_ot_1d_coo_batched[_transposed]`),
 CSR conversion (`to_csr`), and the sparse cost (`sparse_sqeuclidean_cost`).
 The fused kernels themselves live in one module per backend (`_triton.py`,
 `_metal.py`), dispatched through `_backends.py`.
@@ -101,13 +101,17 @@ def _ot_1d_coo_batched(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: t
     return R[keep], Cc[keep], mass[keep]
 
 
-def _ot_1d_coo_batched_cuda(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
-    """CUDA-optimised `_ot_1d_coo_batched`: same plan, transposed layout, fp32 scan.
+def _ot_1d_coo_batched_transposed(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
+    """`_ot_1d_coo_batched` in the transposed (C, len) layout: same plan, faster.
 
-    This is the SinkSLOT-CUDA setup path. Identical construction to the naive
-    version above, restructured for the GPU: everything runs in the
-    TRANSPOSED (C, len) layout, since the cumsum's scan dimension is
-    contiguous that way instead of strided.
+    Identical construction to the naive version above, restructured so that
+    everything runs in the TRANSPOSED (C, len) layout: the cumsum's scan
+    dimension is contiguous that way instead of strided, and the gather
+    indices stay contiguous too. Plain torch, so it runs on any device; it is
+    the builder `sinkslot_solve` uses on every GPU tensor (it is the setup of
+    the paper's SinkSLOT-CUDA variant, and 1.3-1.4x faster than the naive
+    builder on MPS too). No upcast: the scan runs in the input dtype, like the
+    naive builder's.
     """
     n, C = PX.shape
     m = PY.shape[0]
@@ -170,20 +174,17 @@ def sot_plan_coo(
     the key array and the sort workspace inside `unique`.
 
     `ot1d` selects the per-slice 1-D OT builder: the naive `_ot_1d_coo_batched`
-    (the SinkSLOT baseline) or `_ot_1d_coo_batched_cuda` (the SinkSLOT-CUDA fp64
-    path). Only the plan differs; the coalesce is identical.
+    (the SinkSLOT baseline) or `_ot_1d_coo_batched_transposed` (the faster
+    transposed layout, SinkSLOT-CUDA's setup). Only the plan's layout and
+    scan order differ; the coalesce is identical.
 
-    Dtype: with `ot1d=_ot_1d_coo_batched_cuda`, the returned `vals` are always
-    float32, whatever dtype `X`/`Y`/`a`/`b` are (see that function's own
-    docstring) -- passing float64 in does not get you a float64 plan. With the
-    naive `_ot_1d_coo_batched` there's no such ceiling; the output follows the
-    input dtype. Either way, there is no way to get a float64-precision plan
-    on a CUDA tensor: `gradient_flow/finite_diff.py`'s `build_support`, which
-    needs float64 for everything downstream, doesn't try -- it explicitly
-    passes `.float()` inputs to whichever builder the device selects, accepts
-    the float32-quality plan either way, and only upcasts the *returned*
-    tensor to float64 afterward so the rest of its pipeline has a consistent
-    dtype. That's a container cast, not recovered precision.
+    Dtype: both builders follow the input dtype -- float64 in gives a float64
+    plan on CPU (MPS has no float64). `gradient_flow/finite_diff.py`'s
+    `build_support`, which needs float64 for everything downstream, still
+    passes `.float()` inputs to whichever builder the device selects and only
+    upcasts the *returned* tensor to float64 afterward so the rest of its
+    pipeline has a consistent dtype. That's a container cast, not recovered
+    precision.
     """
     n, d = X.shape
     m = Y.shape[0]

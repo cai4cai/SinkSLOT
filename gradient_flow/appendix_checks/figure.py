@@ -50,7 +50,7 @@ def truncation_check(steps, iters, n_):
     falls. Cached to TRUNC because it is the one control not saved by any of the
     sweep scripts.
     """
-    from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo
+    from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_transposed, sot_plan_coo
     from gradient_flow.along_flow import _cosine
     from gradient_flow.estimators import SEED, three_gradients
     from gradient_flow.run import DATA_DIR, DEVICE, draw_samples
@@ -59,7 +59,7 @@ def truncation_check(steps, iters, n_):
     X = draw_samples(DATA_DIR / "density_a.png", n_, rng, device=DEVICE).float()
     Y = draw_samples(DATA_DIR / "density_b.png", n_, rng, device=DEVICE).float()
     a = torch.full((n_,), 1.0 / n_, dtype=torch.float32, device=DEVICE)
-    ot1d = _ot_1d_coo_batched_cuda if DEVICE == "cuda" else _ot_1d_coo_batched
+    ot1d = _ot_1d_coo_batched_transposed if DEVICE == "cuda" else _ot_1d_coo_batched
 
     from gradient_flow.config import LR
     for _ in range(steps):

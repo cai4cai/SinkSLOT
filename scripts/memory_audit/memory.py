@@ -255,13 +255,13 @@ def _probe_sinkslot(cuda_path: bool, args) -> Dict[str, Callable]:
 
     def setup(state):
         from sinkslot.solver import (
-            _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo,
+            _ot_1d_coo_batched, _ot_1d_coo_batched_transposed, sot_plan_coo,
             sparse_sqeuclidean_cost, to_csr,
         )
 
         x, y, a, b = state["xyab"]
         n, m = x.shape[0], y.shape[0]
-        ot1d = _ot_1d_coo_batched_cuda if cuda_path else _ot_1d_coo_batched
+        ot1d = _ot_1d_coo_batched_transposed if cuda_path else _ot_1d_coo_batched
         rows, cols, S = sot_plan_coo(x, y, a, b, L=args.slices, seed=0, ot1d=ot1d)
         if cuda_path:
             cost = sparse_sqeuclidean_cost(x, y, rows, cols)

@@ -72,14 +72,14 @@ import argparse
 
 import torch
 
-from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo
+from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_transposed, sot_plan_coo
 from gradient_flow.config import L, LR, N, N_STEPS
 from gradient_flow.estimators import EPS, SEED, seg_lse
 from gradient_flow.run import DATA_DIR, DEVICE, draw_samples
 
 
 def build_support(X, Y, a, n_proj, seed=SEED):
-    ot1d = _ot_1d_coo_batched_cuda if X.is_cuda else _ot_1d_coo_batched
+    ot1d = _ot_1d_coo_batched_transposed if X.is_cuda else _ot_1d_coo_batched
     rows, cols, S = sot_plan_coo(X.float(), Y.float(), a.float(), a.float(),
                                  L=n_proj, seed=seed, ot1d=ot1d)
     return rows, cols, S.double().clamp_min(1e-300).log()

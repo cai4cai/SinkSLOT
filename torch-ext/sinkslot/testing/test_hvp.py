@@ -25,7 +25,7 @@ tsgu = pytest.importorskip("torchsparsegradutils")
 
 from sinkslot.solver import (  # noqa: E402
     sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
-    _ot_1d_coo_batched_cuda,
+    _ot_1d_coo_batched_transposed,
 )
 from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused  # noqa: E402
 from sinkslot.gradient import sparse_barycentric_map  # noqa: E402
@@ -71,7 +71,7 @@ def test_slot_hvp_matches_frozen_support_finite_difference(fused):
 
     hvp = hvp_x_sqeuclid(X, Y, a, eps, L, seed, n_iters, v)
 
-    rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=seed, ot1d=_ot_1d_coo_batched_cuda)
+    rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=seed, ot1d=_ot_1d_coo_batched_transposed)
     h = 1e-3
     g_plus = _frozen_grad(X + h * v, Y, a, rows, cols, S, eps, n_iters)
     g_minus = _frozen_grad(X - h * v, Y, a, rows, cols, S, eps, n_iters)
@@ -92,7 +92,7 @@ def test_slot_hvp_matches_frozen_support_finite_difference_at_two_step_sizes(fus
     v = v / v.norm()
 
     hvp = hvp_x_sqeuclid(X, Y, a, eps, L, seed, n_iters, v)
-    rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=seed, ot1d=_ot_1d_coo_batched_cuda)
+    rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=seed, ot1d=_ot_1d_coo_batched_transposed)
 
     for h in (1e-3, 3e-4):
         g_plus = _frozen_grad(X + h * v, Y, a, rows, cols, S, eps, n_iters)

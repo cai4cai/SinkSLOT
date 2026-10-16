@@ -43,7 +43,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from sinkslot._backends import fused_backend  # noqa: E402
 from sinkslot.solver import (  # noqa: E402
     _ot_1d_coo_batched,
-    _ot_1d_coo_batched_cuda,
+    _ot_1d_coo_batched_transposed,
     sot_plan_coo,
     sparse_sqeuclidean_cost,
     to_csr,
@@ -77,7 +77,7 @@ def _build_support(X, Y, a, eps, slices, seed):
     on the COO (rows, cols, lam) directly, so there's nothing to hoist there.
     """
     n, m = X.shape[0], Y.shape[0]
-    ot1d = _ot_1d_coo_batched_cuda if X.is_cuda else _ot_1d_coo_batched
+    ot1d = _ot_1d_coo_batched_transposed if X.is_cuda else _ot_1d_coo_batched
     rows, cols, S = sot_plan_coo(X, Y, a, a, L=slices, seed=seed, ot1d=ot1d)
     cost = sparse_sqeuclidean_cost(X, Y, rows, cols)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps

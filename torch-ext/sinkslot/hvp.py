@@ -28,7 +28,7 @@ from beartype import beartype
 from jaxtyping import Float, jaxtyped
 
 from ._backends import resolve_backend
-from .solver import sot_plan_coo, _ot_1d_coo_batched_cuda, to_csr, sparse_sqeuclidean_cost
+from .solver import sot_plan_coo, _ot_1d_coo_batched_transposed, to_csr, sparse_sqeuclidean_cost
 from .sinkhorn_solvers import sinkslot_alternating_fused, sinkslot_alternating_torch
 
 
@@ -152,13 +152,14 @@ def hvp_x_sqeuclid(X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
     that backend (raising if it can't run on X), "torch" forces the
     pure-torch solve regardless of device.
     Unlike `sinkslot_solve`, the sliced-support builder here stays
-    `_ot_1d_coo_batched_cuda` for every backend, not device-switched to the
-    naive builder on CPU: it's plain torch underneath (no fused kernels, no `.cuda()`
-    calls), so it runs anywhere, and its internal fp64 cumsum is exactly the
-    extra precision the existing validation below relies on -- switching to
-    the naive builder would risk a genuinely different support (see its own
-    docstring), not just different rounding. So `backend="torch"` changes
-    only the solve stage's numerics, not the support.
+    `_ot_1d_coo_batched_transposed` for every backend, not device-switched to the
+    naive builder on CPU: it's plain torch underneath (no fused kernels, no
+    device-specific calls), so it runs anywhere, and it is the builder the
+    validation below was run with -- switching to the naive builder scans in
+    a different order, which can round a few breakpoints differently and so
+    give a slightly different support, not just different rounding. So
+    `backend="torch"` changes only the solve stage's numerics, not the
+    support.
 
     Accuracy caveat: the ~2% figure above and the `tau2=3e-7` default were
     both obtained through the Triton path (`sinkslot_alternating_fused`) on
@@ -175,7 +176,7 @@ def hvp_x_sqeuclid(X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
 
     n, d = X.shape
     m = Y.shape[0]
-    rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=seed, ot1d=_ot_1d_coo_batched_cuda)
+    rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=seed, ot1d=_ot_1d_coo_batched_transposed)
     cost = sparse_sqeuclidean_cost(X, Y, rows, cols, backend=backend)
     log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
     lam = log_S - cost / eps

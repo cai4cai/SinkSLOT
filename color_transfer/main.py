@@ -111,9 +111,9 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
     if method_key == "sinkslot":
         from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused
         from sinkslot.solver import (
-            _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
+            _ot_1d_coo_batched, _ot_1d_coo_batched_transposed, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
         )
-        ot1d = _ot_1d_coo_batched_cuda if sc.is_cuda else _ot_1d_coo_batched
+        ot1d = _ot_1d_coo_batched_transposed if sc.is_cuda else _ot_1d_coo_batched
         n, m = sc.shape[0], tc.shape[0]
         log_a, log_b = sw.log(), tw.log()
 
@@ -254,10 +254,10 @@ def sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, sy
     """
     from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused, sinkslot_symmetric_fused
     from sinkslot.solver import (
-        _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
+        _ot_1d_coo_batched, _ot_1d_coo_batched_transposed, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
     )
 
-    ot1d = _ot_1d_coo_batched_cuda if sc.is_cuda else _ot_1d_coo_batched
+    ot1d = _ot_1d_coo_batched_transposed if sc.is_cuda else _ot_1d_coo_batched
     solver = sinkslot_symmetric_fused if symmetric else sinkslot_alternating_fused
     solve_tol = tol / 2 if symmetric else tol
 
