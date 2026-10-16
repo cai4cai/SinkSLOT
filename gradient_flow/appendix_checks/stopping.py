@@ -27,8 +27,9 @@ proxy.
 
 Setup is identical to run.py's (same densities, same rng seed, same N, L, eps),
 and the measurement is taken at the first gradient step, where X is still the
-source blob. fp32 throughout. Runs on CPU or CUDA (see _build_support/_grad_at's
-own dispatch between the fused Triton loop and its pure-torch fallback).
+source blob. fp32 throughout. Runs on CUDA, Apple-silicon MPS or CPU (see
+_build_support/_grad_at's own dispatch between the fused loop -- Triton or
+Metal -- and its pure-torch fallback).
 """
 from __future__ import annotations
 
@@ -42,8 +43,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from sinkslot._backends import fused_backend  # noqa: E402
 from sinkslot.solver import (  # noqa: E402
-    _ot_1d_coo_batched,
-    _ot_1d_coo_batched_transposed,
+    ot1d_for,
     sot_plan_coo,
     sparse_sqeuclidean_cost,
     to_csr,
@@ -54,6 +54,7 @@ from sinkslot.sinkhorn_solvers import (  # noqa: E402
 )
 from sinkslot.gradient import sparse_barycentric_map  # noqa: E402
 from gradient_flow.config import DATA_SCALE, L, N  # noqa: E402
+from sinkslot.bench.devices import describe  # noqa: E402
 from gradient_flow.run import DATA_DIR, DEVICE, OUT_DIR, draw_samples  # noqa: E402
 
 # Geometric-ish ladder: the interesting behaviour is all in the first ~200
@@ -77,7 +78,7 @@ def _build_support(X, Y, a, eps, slices, seed):
     on the COO (rows, cols, lam) directly, so there's nothing to hoist there.
     """
     n, m = X.shape[0], Y.shape[0]
-    ot1d = _ot_1d_coo_batched_transposed if X.is_cuda else _ot_1d_coo_batched
+    ot1d = ot1d_for(X.device)
     rows, cols, S = sot_plan_coo(X, Y, a, a, L=slices, seed=seed, ot1d=ot1d)
     cost = sparse_sqeuclidean_cost(X, Y, rows, cols)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
@@ -119,14 +120,12 @@ def _grad_at(n_iters, X, Y, a, rows, cols, lam, csr, csc):
 
 
 def main():
-    if DEVICE != "cuda":
-        print("gradient_flow/stopping.py: no CUDA GPU found, running on CPU "
-              "(pure torch throughout -- much slower, same algorithm).")
+    print(f"gradient_flow/stopping.py: running on {describe(DEVICE)}")
 
     # Same rng draw order as run.py's main(), so X0/Y are the identical clouds.
     rng = torch.Generator(device="cpu").manual_seed(1)
-    X = draw_samples(DATA_DIR / "density_a.png", N, rng, device=DEVICE).float()
-    Y = draw_samples(DATA_DIR / "density_b.png", N, rng, device=DEVICE).float()
+    X = draw_samples(DATA_DIR / "density_a.png", N, rng, dtype=torch.float32, device=DEVICE)
+    Y = draw_samples(DATA_DIR / "density_b.png", N, rng, dtype=torch.float32, device=DEVICE)
     a = torch.full((N,), 1.0 / N, dtype=torch.float32, device=DEVICE)
 
     rows, cols, lam, csr, csc = _build_support(X, Y, a, EPS, L, SEED)

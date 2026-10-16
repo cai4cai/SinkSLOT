@@ -22,7 +22,8 @@ import os
 import torch
 from PIL import Image
 
-from color_transfer.main import DEFAULT_PAINTINGS_DIR, StopCfg, list_images
+from color_transfer.main import DEFAULT_PAINTINGS_DIR, StopCfg, list_images, methods_for_device
+from sinkslot.bench.devices import default_device, describe
 from sinkslot.bench.reference_solvers import geomloss_online
 
 
@@ -67,9 +68,9 @@ def solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, s
     if method == "sinkslot":
         from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused
         from sinkslot.solver import (
-            _ot_1d_coo_batched, _ot_1d_coo_batched_transposed, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
+            ot1d_for, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
         )
-        ot1d = _ot_1d_coo_batched_transposed if sc.is_cuda else _ot_1d_coo_batched
+        ot1d = ot1d_for(sc.device)
         rows, cols, S = sot_plan_coo(sc, tc, sw, tw, L=sinkslot_L, seed=0, ot1d=ot1d)
         cost = sparse_sqeuclidean_cost(sc, tc, rows, cols)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
@@ -139,6 +140,8 @@ _METHODS = [
     ("flashsinkhorn_symmetric", "flashsinkhorn_symmetric"),
     ("geomloss_online", "geomloss_online"),
 ]
+# FlashSinkhorn is Triton-only and GeomLoss online is KeOps (no MPS support).
+_CUDA_ONLY = {"flashsinkhorn", "flashsinkhorn_symmetric", "geomloss_online"}
 
 
 def parse_args():
@@ -154,7 +157,9 @@ def parse_args():
                     help="One or more ordered pairs, flattened: 'i1 j1 i2 j2 ...' "
                          "(e.g. --pair_idx 2 9 5 7 for two pairs). Each pair gets its own "
                          "set of output images, named by its own source/target stem.")
-    p.add_argument("--device", type=str, default="cuda")
+    p.add_argument("--device", type=str, default=None,
+                    help="Default: the best device present (CUDA, then MPS, then CPU). Only "
+                         "SinkSLOT runs off CUDA.")
     p.add_argument("--methods", type=str, nargs="+", default=None,
                     choices=[stem for stem, _ in _METHODS],
                     help="Subset of methods to run (default: all).")
@@ -163,11 +168,11 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if args.device != "cuda" or not torch.cuda.is_available():
-        raise RuntimeError("This script requires a CUDA GPU.")
     if len(args.pair_idx) % 2 != 0:
         raise ValueError(f"--pair_idx must have an even number of ints, got {args.pair_idx}")
-    device = torch.device(args.device)
+    device = torch.device(args.device or default_device())
+    stems = methods_for_device(device, args.methods, _CUDA_ONLY, [s for s, _ in _METHODS])
+    print(f"Device: {describe(device)}")
     dtype = torch.float32
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -183,8 +188,7 @@ def main():
         save_image(load_as_tensor(source_path), os.path.join(args.output_dir, f"{pair_stem}_source.png"))
         save_image(load_as_tensor(target_path), os.path.join(args.output_dir, f"{pair_stem}_target.png"))
 
-        methods = _METHODS if args.methods is None else [
-            (s, m) for s, m in _METHODS if s in args.methods]
+        methods = [(s, m) for s, m in _METHODS if s in stems]
         for stem, method in methods:
             print(f"  {stem} ...")
             img_tensor = transfer_image(

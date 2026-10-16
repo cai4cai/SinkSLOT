@@ -42,9 +42,10 @@ magnitude and is unaffected.
 import torch
 
 from sinkslot.solver import (
-    _ot_1d_coo_batched, _ot_1d_coo_batched_transposed, sot_plan_coo, sparse_sqeuclidean_cost,
+    ot1d_for, sot_plan_coo, sparse_sqeuclidean_cost,
 )
 from gradient_flow.config import L, N
+from sinkslot.bench.devices import describe, empty_cache
 from gradient_flow.run import DATA_DIR, DEVICE, draw_samples
 
 EPS, SEED = 0.01, 0
@@ -104,15 +105,13 @@ def three_gradients(k, X, Y, a, rows, cols, log_S, n, m, unroll=True, eps=EPS):
 
 
 def main():
-    if DEVICE != "cuda":
-        print("gradient_flow/estimators.py: no CUDA GPU found, running on CPU "
-              "(pure torch throughout -- much slower, same algorithm).")
+    print(f"gradient_flow/estimators.py: running on {describe(DEVICE)}")
     rng = torch.Generator(device="cpu").manual_seed(1)
-    X = draw_samples(DATA_DIR / "density_a.png", N, rng, device=DEVICE).float()
-    Y = draw_samples(DATA_DIR / "density_b.png", N, rng, device=DEVICE).float()
+    X = draw_samples(DATA_DIR / "density_a.png", N, rng, dtype=torch.float32, device=DEVICE)
+    Y = draw_samples(DATA_DIR / "density_b.png", N, rng, dtype=torch.float32, device=DEVICE)
     a = torch.full((N,), 1.0 / N, dtype=torch.float32, device=DEVICE)
 
-    ot1d = _ot_1d_coo_batched_transposed if DEVICE == "cuda" else _ot_1d_coo_batched
+    ot1d = ot1d_for(DEVICE)
     rows, cols, S = sot_plan_coo(X, Y, a, a, L=L, seed=SEED, ot1d=ot1d)
     log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
     print(f"support nnz={rows.numel()}  N={N}  L={L}  eps={EPS}")
@@ -133,8 +132,7 @@ def main():
         best = ["envelope", "detach", "unrolled"][int(torch.tensor(e).argmin())]
         print(f"{k:>5} {e[0]:>11.3e} {e[1]:>11.3e} {e[2]:>11.3e}   {best:>9}")
         del ge, gd, gu
-        if DEVICE == "cuda":
-            torch.cuda.empty_cache()
+        empty_cache(DEVICE)
 
     _plot(grid, curves)
 

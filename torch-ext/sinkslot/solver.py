@@ -151,6 +151,14 @@ def _ot_1d_coo_batched_transposed(PX: torch.Tensor, PY: torch.Tensor, a: torch.T
     return R.reshape(-1)[sel], Cc.reshape(-1)[sel], mass.reshape(-1)[sel]
 
 
+def ot1d_for(device):
+    """The 1-D OT builder to use on `device`: the naive `_ot_1d_coo_batched`
+    on CPU, `_ot_1d_coo_batched_transposed` on any GPU (CUDA or MPS), where
+    its contiguous scans are 1.3-50x faster. The one place that rule lives,
+    shared by `sinkslot_solve` and the experiment scripts."""
+    return _ot_1d_coo_batched if torch.device(device).type == "cpu" else _ot_1d_coo_batched_transposed
+
+
 @jaxtyped(typechecker=beartype)
 def sot_plan_coo(
     X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],

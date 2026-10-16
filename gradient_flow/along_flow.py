@@ -74,9 +74,10 @@ import argparse
 
 import torch
 
-from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_transposed, sot_plan_coo
+from sinkslot.solver import ot1d_for, sot_plan_coo
 from gradient_flow.config import L, LR, N, N_STEPS
 from gradient_flow.estimators import EPS, SEED, solve, three_gradients
+from sinkslot.bench.devices import describe, empty_cache
 from gradient_flow.run import DATA_DIR, DEVICE, draw_samples
 
 
@@ -134,7 +135,7 @@ def trajectory(X, Y, a, n, steps, iters, eps, n_proj, regularized=False, on_step
     for step in range(steps + 1):
         # Support is rebuilt from the current X, as the flow itself does; both
         # estimators then share it, so the step's comparison is like-for-like.
-        ot1d = _ot_1d_coo_batched_transposed if X.is_cuda else _ot_1d_coo_batched
+        ot1d = ot1d_for(X.device)
         rows, cols, S = sot_plan_coo(X, Y, a, a, L=n_proj, seed=seed, ot1d=ot1d)
         log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
 
@@ -163,11 +164,9 @@ def trajectory(X, Y, a, n, steps, iters, eps, n_proj, regularized=False, on_step
 
         if step == steps:
             break
-        was_cuda = X.is_cuda
         X = (X - lr * n * g_env).detach().clone()
         del g_env, g_det, g_full, rows, cols, S, log_S
-        if was_cuda:
-            torch.cuda.empty_cache()
+        empty_cache(X.device)
     return out
 
 
@@ -222,14 +221,12 @@ def main():
                    help="also unroll <P,C> + eps*KL(P||S), which should match g_env")
     args = p.parse_args()
 
-    if DEVICE != "cuda":
-        print("gradient_flow/along_flow.py: no CUDA GPU found, running on CPU "
-              "(pure torch throughout -- much slower, same algorithm).")
+    print(f"gradient_flow/along_flow.py: running on {describe(DEVICE)}")
 
     n = args.n
     rng = torch.Generator(device="cpu").manual_seed(1)
-    X = draw_samples(DATA_DIR / "density_a.png", n, rng, device=DEVICE).float()
-    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device=DEVICE).float()
+    X = draw_samples(DATA_DIR / "density_a.png", n, rng, dtype=torch.float32, device=DEVICE)
+    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, dtype=torch.float32, device=DEVICE)
     a = torch.full((n,), 1.0 / n, dtype=torch.float32, device=DEVICE)
 
     print(f"N={n}  L={L}  eps={EPS}  inner iters={args.iters}  lr={LR}  steps={args.steps}")

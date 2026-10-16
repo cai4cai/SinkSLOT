@@ -1,6 +1,13 @@
 """Does the reference-plan term (II) actually vanish? Finite differences say.
 
-    python -m gradient_flow.finite_diff [--steps 50] [--iters 600]
+    python -m gradient_flow.finite_diff [--steps 50] [--iters 600] [--dtype float64]
+
+`--dtype` picks the precision and, with it, the device and solver: float64
+(the default, which produced the numbers below) runs the pure-torch loop on
+CUDA or CPU -- MPS has no float64; float32 runs on the best device present
+(CUDA, then Apple-silicon MPS, then CPU) through the fused SinkSLOT loop
+where that device has one. Float32 is a fast smoke run, not a substitute: a
+central difference at h=1e-4 loses about four of float32's seven digits.
 
 The paper drops term (II) of
 
@@ -72,53 +79,61 @@ import argparse
 
 import torch
 
-from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_transposed, sot_plan_coo
+from sinkslot._backends import fused_backend
+from sinkslot.bench.devices import default_device, describe
+from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused, sinkslot_alternating_torch
+from sinkslot.solver import ot1d_for, sot_plan_coo, to_csr
 from gradient_flow.config import L, LR, N, N_STEPS
-from gradient_flow.estimators import EPS, SEED, seg_lse
-from gradient_flow.run import DATA_DIR, DEVICE, draw_samples
+from gradient_flow.estimators import EPS, SEED
+from gradient_flow.run import DATA_DIR, draw_samples
 
 
 def build_support(X, Y, a, n_proj, seed=SEED):
-    ot1d = _ot_1d_coo_batched_transposed if X.is_cuda else _ot_1d_coo_batched
+    ot1d = ot1d_for(X.device)
     rows, cols, S = sot_plan_coo(X.float(), Y.float(), a.float(), a.float(),
                                  L=n_proj, seed=seed, ot1d=ot1d)
-    return rows, cols, S.double().clamp_min(1e-300).log()
+    return rows, cols, S.to(X.dtype).clamp_min(torch.finfo(X.dtype).tiny).log()
+
+
+def solve_duals(lam, rows, cols, log_a, n, iters):
+    """`iters` alternating Sinkhorn iterations on the support, absorbed duals.
+
+    The fused loop when `lam` is float32 on a device with a fused backend
+    (Triton on CUDA, Metal on MPS); the pure-torch loop otherwise, which is
+    the only one that runs float64. Same iteration either way.
+    """
+    if lam.dtype == torch.float32 and fused_backend(lam.device) is not None:
+        csr = to_csr(rows, cols, lam, n, narrow_key=True)[:3]
+        csc = to_csr(cols, rows, lam, n, narrow_key=True)[:3]
+        phi, psi, *_ = sinkslot_alternating_fused(*csr, *csc, log_a, log_a, n, n, iters)
+    else:
+        phi, psi, *_ = sinkslot_alternating_torch(rows, cols, lam, log_a, log_a, n, n, iters)
+    return phi, psi
 
 
 def slot_value(X, Y, a, rows, cols, log_S, iters, eps):
-    """SLOT_eps at X on the given support, in float64, from the converged duals.
+    """SLOT_eps at X on the given support, in X's dtype, from the converged duals.
 
     F = <C,P> + eps*KL(P||S) = eps*(<phi,a> + <psi,b>) at the optimum, since
     P = exp(phi_r + psi_c + log S - C/eps) has marginals a and b.
     """
     cost = ((X[rows] - Y[cols]) ** 2).sum(1)
     lam = log_S - cost / eps
-    log_a = a.log()
-    n = X.shape[0]
-    phi = torch.zeros(n, device=X.device, dtype=X.dtype)
-    psi = torch.zeros(n, device=X.device, dtype=X.dtype)
-    for _ in range(iters):
-        phi = log_a - seg_lse(lam + psi[cols], rows, n)
-        psi = log_a - seg_lse(lam + phi[rows], cols, n)
+    phi, psi = solve_duals(lam, rows, cols, a.log(), X.shape[0], iters)
     return eps * float(a @ phi + a @ psi)
 
 
 def envelope_grad(X, Y, a, rows, cols, log_S, iters, eps):
-    """Term (I), closed form, in float64 on the frozen support."""
+    """Term (I), closed form, in X's dtype on the frozen support."""
     cost = ((X[rows] - Y[cols]) ** 2).sum(1)
     lam = log_S - cost / eps
-    log_a = a.log()
     n = X.shape[0]
-    phi = torch.zeros(n, device=X.device, dtype=X.dtype)
-    psi = torch.zeros(n, device=X.device, dtype=X.dtype)
-    for _ in range(iters):
-        phi = log_a - seg_lse(lam + psi[cols], rows, n)
-        psi = log_a - seg_lse(lam + phi[rows], cols, n)
+    phi, psi = solve_duals(lam, rows, cols, a.log(), n, iters)
     P = (phi[rows] + psi[cols] + lam).exp()
     r = torch.zeros(n, device=X.device, dtype=X.dtype).index_add_(0, rows, P)
     Px = torch.zeros(n, 2, device=X.device, dtype=X.dtype).index_add_(
         0, rows, P.unsqueeze(1) * Y[cols])
-    return 2.0 * a[:, None] * (X - Px / r.clamp_min(1e-300).unsqueeze(1))
+    return 2.0 * a[:, None] * (X - Px / r.clamp_min(torch.finfo(X.dtype).tiny).unsqueeze(1))
 
 
 def probe(X, Y, a, v, h, iters, eps, n_proj, seed=SEED, base=None):
@@ -140,7 +155,9 @@ def probe(X, Y, a, v, h, iters, eps, n_proj, seed=SEED, base=None):
     jump = slot_value(X + h * v, Y, a, *r2, iters, eps) - fp
     k1 = rows.to(torch.int64) * X.shape[0] + cols.to(torch.int64)
     k2 = r2[0].to(torch.int64) * X.shape[0] + r2[1].to(torch.int64)
-    moved = 1.0 - float(torch.isin(k2, k1).double().mean())
+    # On CPU: MPS's isin materialises a dense len(k2) x len(k1) comparison
+    # (25 GiB at nnz~80k), where CPU sorts.
+    moved = 1.0 - float(torch.isin(k2.cpu(), k1.cpu()).float().mean())
     return analytic, fd_frozen, jump, moved
 
 
@@ -154,21 +171,24 @@ def main():
     p.add_argument("--dirs", type=int, default=6, help="random directions per point")
     p.add_argument("--at", type=int, nargs="+", default=[0, 10, 25, 40, 50],
                    help="flow steps to probe")
+    p.add_argument("--dtype", choices=("float64", "float32"), default="float64",
+                   help="float64 (reported numbers; CUDA or CPU) or float32 (best device, "
+                        "fused solver where available; a fast but low-precision FD)")
     args = p.parse_args()
+    dtype = getattr(torch, args.dtype)
+    device = default_device(dtype)
 
-    if DEVICE != "cuda":
-        print("gradient_flow/finite_diff.py: no CUDA GPU found, running on CPU "
-              "(pure torch throughout -- much slower, same algorithm).")
+    print(f"gradient_flow/finite_diff.py: running on {describe(device)}")
 
     n = args.n
     rng = torch.Generator(device="cpu").manual_seed(1)
-    X = draw_samples(DATA_DIR / "density_a.png", n, rng, device=DEVICE).double()
-    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device=DEVICE).double()
-    a = torch.full((n,), 1.0 / n, dtype=torch.float64, device=DEVICE)
-    gen = torch.Generator(device=DEVICE).manual_seed(0)
+    X = draw_samples(DATA_DIR / "density_a.png", n, rng, dtype=dtype, device=device)
+    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, dtype=dtype, device=device)
+    a = torch.full((n,), 1.0 / n, dtype=dtype, device=device)
+    gen = torch.Generator(device=device).manual_seed(0)
 
     print(f"N={n}  L={L}  eps={args.eps:g}  iters={args.iters}  h={args.h:g}  "
-          f"dirs={args.dirs}  float64")
+          f"dirs={args.dirs}  {args.dtype}")
     print(f"\n{'step':>5} {'analytic':>12} {'FD frozen':>12} {'FD err':>9} "
           f"{'|jump|/F':>10} {'jump sign':>10} {'entries moved':>14}")
 
@@ -179,7 +199,7 @@ def main():
             an, fd, jp, mv = [], [], [], []
             F = slot_value(X, Y, a, *base, args.iters, args.eps)
             for _ in range(args.dirs):
-                v = torch.randn(n, 2, generator=gen, device=DEVICE, dtype=torch.float64)
+                v = torch.randn(n, 2, generator=gen, device=device, dtype=dtype)
                 v /= v.norm()
                 r = probe(X, Y, a, v, args.h, args.iters, args.eps, L, base=base)
                 for lst, val in zip((an, fd, jp, mv), r):

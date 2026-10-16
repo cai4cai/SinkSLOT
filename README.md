@@ -266,7 +266,25 @@ Benchmarked against [FlashSinkhorn](https://github.com/ot-triton-lab/flash-sinkh
 
 ### Apple silicon
 
-The published sweeps are CUDA-only. On a Mac, `--fused-vs-torch` times
+The published numbers are from CUDA, but the scripts run on a Mac too. They
+pick the best device present (CUDA, then MPS, then CPU) and run SinkSLOT on
+the fused Metal kernels:
+
+- `gradient_flow/` runs end to end. Float64 work (the SOT/EOT/SROT arms of
+  `gradient_flow.run`, `gradient_flow.finite_diff`) stays on CPU, since MPS
+  has no float64; `--dtype float32` moves it to MPS as well, as a faster but
+  lower-precision run.
+- `bench_forward` and `color_transfer/` run every method that has a non-CUDA
+  implementation (SinkSLOT, SinkSLOT-CUDA's setup path, SROT, Spar-Sink /
+  Rand-Sink, GeomLoss tensorized) and skip, with a note, the ones that don't:
+  FlashSinkhorn (Triton), GeomLoss online (KeOps) and OTT-JAX. On MPS,
+  `bench_forward`'s memory column is the Metal driver's allocation after
+  `empty_cache()`, and `color_transfer`'s peak memory reads `nan`: PyTorch
+  keeps no peak counter there.
+- `scripts/memory_audit/` stays CUDA-only: it decomposes CUDA's own memory
+  accounting, which has no MPS counterpart.
+
+`--fused-vs-torch` times
 SinkSLOT's fused Metal loop against its own pure-torch loop on the same
 support (alternating, `eps=0.1`, ms per iteration, `d=3`; `d=64` is within a
 few percent, since the cost is computed once outside the loop):

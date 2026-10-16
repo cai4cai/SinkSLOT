@@ -32,8 +32,7 @@ from jaxtyping import Float, jaxtyped
 
 from ._backends import fused_backend, fused_ops, resolve_backend
 from .solver import (
-    _ot_1d_coo_batched,
-    _ot_1d_coo_batched_transposed,
+    ot1d_for,
     sot_plan_coo,
     to_csr,
     sparse_sqeuclidean_cost,
@@ -563,8 +562,8 @@ def sinkslot_solve(X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
     available; useful for testing the torch path's GPU numerics
     specifically, or as a workaround if a fused backend is ever the problem.
     The names are the kernel languages, not the devices ("metal", not "mps").
-    The sliced-plan builder (`_ot_1d_coo_batched[_transposed]`) is chosen by
-    device either way, independent of `backend`: it's plain torch regardless,
+    The sliced-plan builder (`_ot_1d_coo_batched[_transposed]`, via
+    `ot1d_for`) is chosen by device either way, independent of `backend`: it's plain torch regardless,
     and the `_transposed` layout is the better choice on any GPU tensor
     (CUDA, or MPS where it is 1.3-1.4x faster) even when the cost/solve stage
     is forced to torch.
@@ -634,7 +633,7 @@ def sinkslot_solve(X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
         check_every=stop_check_every)
 
     n, m = X.shape[0], Y.shape[0]
-    ot1d = _ot_1d_coo_batched if X.device.type == "cpu" else _ot_1d_coo_batched_transposed
+    ot1d = ot1d_for(X.device)
     rows, cols, S = sot_plan_coo(X, Y, a, b, L=L, seed=seed, chunk=chunk, ot1d=ot1d)
     cost = sparse_sqeuclidean_cost(X, Y, rows, cols, backend=backend)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
