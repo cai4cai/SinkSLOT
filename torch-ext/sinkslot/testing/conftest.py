@@ -6,9 +6,9 @@ backends this machine can't run. A test that needs the fused kernels takes
 this fixture instead of hardcoding `.cuda()`, so it covers every backend
 without knowing which ones exist.
 
-`gpu` is the same idea for tests that only need a GPU tensor, not a fused
-backend (e.g. the plain-torch plan builders): once per GPU device type,
-skipped where that device isn't present.
+`any_device` is the same idea for plain-torch code that runs everywhere (e.g.
+the sliced-plan builders): CPU, then each GPU device type, skipped where that
+device isn't present -- so the CPU-only CI still exercises it.
 """
 
 import pytest
@@ -42,14 +42,14 @@ def fused(request):
     return request.param
 
 
-GPU_PARAMS = [
+DEVICE_PARAMS = [pytest.param("cpu", id="cpu")] + [
     pytest.param(device, id=device,
                  marks=pytest.mark.skipif(not _PRESENT[device](), reason=f"needs {device}"))
     for device in DEVICE_BACKENDS
 ]
 
 
-@pytest.fixture(params=GPU_PARAMS)
-def gpu(request):
-    """One GPU device type present on this machine ("cuda" or "mps")."""
+@pytest.fixture(params=DEVICE_PARAMS)
+def any_device(request):
+    """One device type present on this machine: "cpu", "cuda" or "mps"."""
     return request.param

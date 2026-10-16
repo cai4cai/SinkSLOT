@@ -86,7 +86,7 @@ def seg_lse_online(indptr, colidx, lam, phi, psi, n, block=None, num_warps=None,
         block, num_warps = launch_cfg(colidx.numel(), n)
     if out is None:
         out = torch.empty(n, dtype=lam.dtype, device=lam.device)
-    return fused_ops(name).seg_lse(indptr, colidx, lam, phi, psi, out, base, block, num_warps)
+    return fused_ops(name).seg_lse(indptr, colidx, lam, phi, psi, n, out, base, block, num_warps)
 
 
 # --------------------------------------------------------------------------

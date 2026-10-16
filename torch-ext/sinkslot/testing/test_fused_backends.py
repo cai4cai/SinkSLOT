@@ -55,6 +55,60 @@ def test_seg_lse_online_matches_coo_reference(fused, m):
     torch.testing.assert_close(sub[1:], (base - want)[1:], rtol=1e-5, atol=1e-5)
 
 
+def _csr(lengths, m, seed=0):
+    """A random CSR problem with the given row lengths, as CPU tensors."""
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    n = len(lengths)
+    lengths = torch.tensor(lengths)
+    rows = torch.repeat_interleave(torch.arange(n), lengths)
+    cols = torch.randint(0, m, (rows.numel(),), generator=g)
+    indptr = torch.zeros(n + 1, dtype=torch.int32)
+    indptr[1:] = lengths.cumsum(0)
+    lam = torch.randn(rows.numel(), generator=g)
+    return indptr, rows, cols, lam, torch.randn(n, generator=g), torch.randn(m, generator=g)
+
+
+def test_seg_lse_online_matches_torch_on_nan_rows(fused):
+    """A row containing a NaN gets the torch path's answer (-inf), not a finite
+    LSE over the remaining entries, which would let a diverged solve look fine."""
+    device, _ = fused
+    indptr, rows, cols, lam, phi, psi = _csr([5, 300, 40], m=50)
+    lam[2] = float("nan")      # row 0, short row
+    lam[5 + 123] = float("nan")  # row 1, spans several simdgroups
+    want = _seg_lse_coo(lam + phi[rows] + psi[cols], rows, 3)
+    on = lambda t: t.to(device)  # noqa: E731
+    got = seg_lse_online(on(indptr), on(cols.to(torch.int16)), on(lam), on(phi), on(psi), 3).cpu()
+    assert (want[:2] == float("-inf")).all(), want
+    torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)
+
+
+def test_seg_lse_online_leaves_the_tail_of_a_longer_out_alone(fused):
+    """Only rows 0..n-1 are computed, even when the reused `out` is longer."""
+    device, _ = fused
+    indptr, rows, cols, lam, phi, psi = _csr([3, 7, 2], m=20)
+    want = _seg_lse_coo(lam + phi[rows] + psi[cols], rows, 3)
+    out = torch.full((8,), 7.0, device=device)
+    on = lambda t: t.to(device)  # noqa: E731
+    seg_lse_online(on(indptr), on(cols.to(torch.int16)), on(lam), on(phi), on(psi), 3, out=out)
+    torch.testing.assert_close(out[:3].cpu(), want, rtol=1e-5, atol=1e-5)
+    assert (out[3:] == 7.0).all()
+
+
+def test_metal_seg_lse_rejects_dtypes_it_would_misread(fused):
+    """The shader reads raw int32/float32 buffers, so int64 indptr or float16
+    values must raise rather than be reinterpreted."""
+    device, backend = fused
+    if backend != "metal":
+        pytest.skip("Triton's loads are dtype-generic")
+    indptr, rows, cols, lam, phi, psi = _csr([3, 4], m=10)
+    on = lambda t: t.to(device)  # noqa: E731
+    idx = on(cols.to(torch.int16))
+    with pytest.raises(ValueError, match="indptr must be int32"):
+        seg_lse_online(on(indptr.long()), idx, on(lam), on(phi), on(psi), 2)
+    with pytest.raises(ValueError, match="float32-only"):
+        seg_lse_online(on(indptr), idx, on(lam).half(), on(phi), on(psi), 2)
+
+
 def test_sparse_sqeuclidean_cost_matches_torch(fused):
     device, backend = fused
     x, y, *_ = _problem(device=device, d=5)

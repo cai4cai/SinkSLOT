@@ -10,9 +10,10 @@ Every fused backend is a module (`_triton.py`, `_metal.py`) exposing the same
 two entry points, so the solver loops and the cost are written once against
 `fused_ops(name)` and never test for a particular backend:
 
-    seg_lse(indptr, colidx, lam, phi, psi, out, base, block, num_warps)
+    seg_lse(indptr, colidx, lam, phi, psi, n, out, base, block, num_warps)
         out[i] = LSE_k(lam[k] + phi[i] + psi[colidx[k]]) over CSR row i,
-        or base[i] - LSE when `base` is not None. Writes into `out`.
+        or base[i] - LSE when `base` is not None, for i < n. Writes into
+        `out`, which may be longer than n.
     sqeuclidean_cost(x, y, rows, cols)
         float32 ||x[rows[k]] - y[cols[k]]||^2, one fused pass.
 

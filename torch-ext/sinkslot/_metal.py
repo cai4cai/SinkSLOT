@@ -20,18 +20,12 @@ _SOURCE = r"""
 #include <metal_stdlib>
 using namespace metal;
 
-// Merge two online-LSE states (m, s): the sum of exp over both, relative to the larger max.
-inline void lse_merge(thread float& m, thread float& s, float m2, float s2) {
-    float mn = max(m, m2);
-    if (mn == -INFINITY) return;
-    s = s * precise::exp(m - mn) + s2 * precise::exp(m2 - mn);
-    m = mn;
-}
-
 // One threadgroup per CSR row: a strided loop keeps a per-thread online (m, s) pair,
 // simd_max/simd_sum combine a simdgroup, and threadgroup memory combines simdgroups.
 // Same rescale as the Triton kernel, s' = s * exp(m - m') + exp(x - m'), but applied per
-// element: exactly one exp per element either way.
+// element: exactly one exp per element either way. A row containing a NaN entry gets
+// LSE = -inf, matching the Triton and torch paths (whose `s > 0` / `acc > 0` guards turn
+// the NaN sum into -inf); the comparisons alone would silently skip the entry instead.
 template <typename IT>
 kernel void seg_lse(
     device const int*   indptr [[buffer(0)]],
@@ -55,9 +49,12 @@ kernel void seg_lse(
     const float p = phi[row];
 
     float m = -INFINITY, s = 0.0f;
+    bool nan_seen = false;
     for (int k = start + (int)tid; k < end; k += (int)tpg.x) {
         float x = lam[k] + p + psi[(int)colidx[k]];
-        if (x > m) {
+        if (isnan(x)) {
+            nan_seen = true;
+        } else if (x > m) {
             s = s * precise::exp(m - x) + 1.0f;
             m = x;
         } else if (x > -INFINITY) {
@@ -67,20 +64,23 @@ kernel void seg_lse(
 
     float gm = simd_max(m);
     float gs = simd_sum(m == -INFINITY ? 0.0f : s * precise::exp(m - gm));
+    bool gnan = simd_any(nan_seen);
 
     threadgroup float tm[32], ts[32];
+    threadgroup bool tn[32];
     if (nsimd > 1) {
-        if (lane == 0) { tm[simd] = gm; ts[simd] = gs; }
+        if (lane == 0) { tm[simd] = gm; ts[simd] = gs; tn[simd] = gnan; }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if (simd != 0) return;
         m = lane < nsimd ? tm[lane] : -INFINITY;
         s = lane < nsimd ? ts[lane] : 0.0f;
         gm = simd_max(m);
         gs = simd_sum(m == -INFINITY ? 0.0f : s * precise::exp(m - gm));
+        gnan = simd_any(lane < nsimd && tn[lane]);
     }
     if (tid != 0) return;
 
-    float lse = gs > 0.0f ? gm + precise::log(gs) : -INFINITY;
+    float lse = (gs > 0.0f && !gnan) ? gm + precise::log(gs) : -INFINITY;
     out[row] = sub ? base[row] - lse : lse;
 }
 
@@ -132,21 +132,34 @@ def _library():
     return torch.mps.compile_shader(_SOURCE)
 
 
-def seg_lse(indptr, colidx, lam, phi, psi, out, base, block, num_warps=None):
-    """Launch `seg_lse` with one `block`-thread threadgroup per row of `out`.
+def seg_lse(indptr, colidx, lam, phi, psi, n, out, base, block, num_warps=None):
+    """Launch `seg_lse` with one `block`-thread threadgroup per row, rows 0..n-1.
 
     `block` is `launch_cfg`'s row-tile width, used here as the threadgroup
     size up to `_MAX_GROUP`; `num_warps` is a Triton knob with no Metal
     counterpart and is ignored.
+
+    The shader reads raw buffers at fixed types, so mismatched dtypes are
+    rejected here rather than silently misread: indptr int32 (what `to_csr`
+    returns), colidx int16 or int32, everything else float32.
     """
     if colidx.dtype not in _SEG_LSE:
         raise ValueError(f"colidx must be int16 or int32, got {colidx.dtype}")
+    if indptr.dtype != torch.int32:
+        raise ValueError(f"indptr must be int32 on the Metal backend, got {indptr.dtype}")
+    floats = {"lam": lam, "phi": phi, "psi": psi, "out": out}
+    if base is not None:
+        floats["base"] = base
+    bad = {k: t.dtype for k, t in floats.items() if t.dtype != torch.float32}
+    if bad:
+        raise ValueError(f"the Metal seg_lse kernel is float32-only, got {bad}")
     kernel = getattr(_library(), _SEG_LSE[colidx.dtype])
     group = min(block, _MAX_GROUP, kernel.max_threads_per_threadgroup)
-    kernel(
-        indptr, colidx, lam, phi, psi, out, base if base is not None else out,
-        int(base is not None), threads=(group, out.numel()), group_size=(group, 1),
-    )
+    if n:
+        kernel(
+            indptr, colidx, lam, phi, psi, out, base if base is not None else out,
+            int(base is not None), threads=(group, n), group_size=(group, 1),
+        )
     return out
 
 

@@ -22,8 +22,8 @@ import os
 import torch
 from PIL import Image
 
-from color_transfer.main import DEFAULT_PAINTINGS_DIR, StopCfg, list_images, methods_for_device
-from sinkslot.bench.devices import default_device, describe
+from color_transfer.main import DEFAULT_PAINTINGS_DIR, StopCfg, list_images
+from sinkslot.bench.devices import default_device, describe, methods_for_device
 from sinkslot.bench.reference_solvers import geomloss_online
 
 
@@ -140,8 +140,6 @@ _METHODS = [
     ("flashsinkhorn_symmetric", "flashsinkhorn_symmetric"),
     ("geomloss_online", "geomloss_online"),
 ]
-# FlashSinkhorn is Triton-only and GeomLoss online is KeOps (no MPS support).
-_CUDA_ONLY = {"flashsinkhorn", "flashsinkhorn_symmetric", "geomloss_online"}
 
 
 def parse_args():
@@ -171,7 +169,7 @@ def main():
     if len(args.pair_idx) % 2 != 0:
         raise ValueError(f"--pair_idx must have an even number of ints, got {args.pair_idx}")
     device = torch.device(args.device or default_device())
-    stems = methods_for_device(device, args.methods, _CUDA_ONLY, [s for s, _ in _METHODS])
+    stems = methods_for_device(device, args.methods, [s for s, _ in _METHODS])
     print(f"Device: {describe(device)}")
     dtype = torch.float32
 

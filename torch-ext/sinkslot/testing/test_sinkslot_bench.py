@@ -18,9 +18,9 @@ measurement of one path against itself, and every other test still passes.
 import pytest
 import torch
 
-# The plan-builder tests run on every GPU through the `gpu` fixture (the
-# transposed builder is what sinkslot_solve uses on any GPU tensor), the loop
-# test on every fused backend through `fused`.
+# The plan-builder tests run on CPU and every GPU through the `any_device`
+# fixture (both builders are plain torch), the loop test on every fused
+# backend through `fused`.
 
 from sinkslot.solver import (  # noqa: E402
     _ot_1d_coo_batched,
@@ -71,13 +71,13 @@ def _ot_1d_reference(px, py, a, b):
 
 @pytest.mark.parametrize("builder", [_ot_1d_coo_batched, _ot_1d_coo_batched_transposed],
                          ids=["naive", "transposed"])
-def test_batched_1d_builder_matches_reference(gpu, builder):
+def test_batched_1d_builder_matches_reference(any_device, builder):
     """Both batched builders vectorise C independent 1-D OT solves."""
     n, m, C = 256, 192, 8
-    _, _, a, b = _problem(n, m, d=2, device=gpu)
+    _, _, a, b = _problem(n, m, d=2, device=any_device)
     g = torch.Generator(device="cpu").manual_seed(1)
-    PX = torch.randn(n, C, generator=g).to(gpu)
-    PY = torch.randn(m, C, generator=g).to(gpu)
+    PX = torch.randn(n, C, generator=g).to(any_device)
+    PY = torch.randn(m, C, generator=g).to(any_device)
 
     rows, cols, vals = builder(PX, PY, a, b)
     batched = _dense(rows, cols, vals, n, m)
@@ -122,7 +122,7 @@ def test_naive_and_transposed_builders_are_distinct_implementations():
     assert "double()" not in naive and "double()" not in transposed
 
 
-def test_naive_and_transposed_builders_agree_on_the_transport(gpu):
+def test_naive_and_transposed_builders_agree_on_the_transport(any_device):
     """Different supports, same transport.
 
     The two scans run in different orders and can disagree on which
@@ -132,7 +132,7 @@ def test_naive_and_transposed_builders_agree_on_the_transport(gpu):
     column to be empty.
     """
     n, m = 512, 384
-    x, y, a, b = _problem(n, m, d=4, device=gpu)
+    x, y, a, b = _problem(n, m, d=4, device=any_device)
 
     r0, c0, v0 = sot_plan_coo(x, y, a, b, L=32, seed=0, ot1d=_ot_1d_coo_batched)
     r1, c1, v1 = sot_plan_coo(x, y, a, b, L=32, seed=0, ot1d=_ot_1d_coo_batched_transposed)

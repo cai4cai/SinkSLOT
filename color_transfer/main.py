@@ -40,7 +40,7 @@ from sinkslot.bench.plan_diagnostics import (
     sinkslot_plan_diagnostics, sinkslot_plan_diagnostics_rounded,
 )
 from sinkslot.bench.devices import (
-    default_device, describe, peak_memory, reset_peak_memory, synchronize,
+    default_device, describe, methods_for_device, peak_memory, reset_peak_memory, synchronize,
 )
 from sinkslot.bench.reference_solvers import geomloss_online
 
@@ -327,31 +327,6 @@ def geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
 
 _METHOD_KEYS = ["sinkslot", "sinkslot_sym", "flashsinkhorn_alt", "flashsinkhorn_sym", "geomloss_online",
                 "flashsinkhorn_alt_fp32", "flashsinkhorn_sym_fp32"]
-# Methods that only run on CUDA: FlashSinkhorn is Triton-only, and GeomLoss's
-# online mode is KeOps, which has no MPS support. SinkSLOT runs anywhere (fused
-# on CUDA and MPS).
-CUDA_ONLY_METHODS = {"flashsinkhorn_alt", "flashsinkhorn_sym", "flashsinkhorn_alt_fp32",
-                     "flashsinkhorn_sym_fp32", "geomloss_online"}
-
-
-def methods_for_device(device, requested, cuda_only, all_methods):
-    """`requested` (or every method in `all_methods` runnable on `device` when
-    None), raising if an explicitly requested method needs CUDA and `device`
-    isn't CUDA. Shared with export_qualitative.py."""
-    if torch.device(device).type == "cuda":
-        return list(all_methods) if requested is None else list(requested)
-    if requested is None:
-        skipped = [m for m in all_methods if m in cuda_only]
-        if skipped:
-            print(f"Skipping CUDA-only methods on {device}: {', '.join(skipped)}")
-        return [m for m in all_methods if m not in cuda_only]
-    bad = [m for m in requested if m in cuda_only]
-    if bad:
-        raise SystemExit(f"{', '.join(bad)} need(s) CUDA (FlashSinkhorn is Triton-only, "
-                         f"GeomLoss online is KeOps); not available on {device}")
-    return list(requested)
-
-
 def run_pair(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, methods=_METHOD_KEYS):
     rows = []
     if "sinkslot" in methods:
@@ -490,7 +465,7 @@ def main():
         return
 
     device = torch.device(args.device or default_device())
-    args.methods = methods_for_device(device, args.methods, CUDA_ONLY_METHODS, _METHOD_KEYS)
+    args.methods = methods_for_device(device, args.methods, _METHOD_KEYS)
     print(f"Device: {describe(device)}")
     dtype = torch.float32
     os.makedirs(args.output_dir, exist_ok=True)

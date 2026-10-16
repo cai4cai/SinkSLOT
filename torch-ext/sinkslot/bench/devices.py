@@ -85,6 +85,39 @@ def peak_memory(device) -> float:
     return float("nan")
 
 
+# Solver families with no implementation off CUDA, keyed by the method-name
+# prefix every script uses for them, with the reason shown when one is skipped.
+# The one place this lives: bench_forward and color_transfer/ all read it.
+CUDA_ONLY = {
+    "flash": "FlashSinkhorn is Triton-only",
+    "geomloss_online": "GeomLoss online is KeOps, which has no MPS support",
+    "ott": "OTT-JAX runs on JAX's own devices, not torch's MPS",
+}
+
+
+def cuda_only_reason(method: str) -> str | None:
+    """Why `method` can only run on CUDA, or None if it runs anywhere."""
+    return next((why for prefix, why in CUDA_ONLY.items() if method.startswith(prefix)), None)
+
+
+def methods_for_device(device, requested, all_methods) -> list:
+    """The methods to run on `device`: `requested`, or when None every method in
+    `all_methods` that `device` can run (printing what was skipped). Raises
+    `SystemExit` if a method requested explicitly needs CUDA and `device` isn't."""
+    if torch.device(device).type == "cuda":
+        return list(all_methods if requested is None else requested)
+    if requested is None:
+        skipped = [m for m in all_methods if cuda_only_reason(m)]
+        if skipped:
+            print(f"Skipping CUDA-only methods on {device}: {', '.join(skipped)}")
+        return [m for m in all_methods if not cuda_only_reason(m)]
+    bad = {m: cuda_only_reason(m) for m in requested if cuda_only_reason(m)}
+    if bad:
+        raise SystemExit("; ".join(f"{m} needs CUDA ({why})" for m, why in bad.items())
+                         + f"; not available on {device}")
+    return list(requested)
+
+
 def describe(device) -> str:
     """One line naming the device and the SinkSLOT backend `backend="auto"` uses on it."""
     backend = resolve_backend("auto", device)

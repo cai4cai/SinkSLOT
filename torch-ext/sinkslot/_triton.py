@@ -65,9 +65,9 @@ def _seg_lse_online_kernel(
     tl.store(out + i, lse)
 
 
-def seg_lse(indptr, colidx, lam, phi, psi, out, base, block, num_warps):
-    """Launch `_seg_lse_online_kernel`, one program per row of `out`."""
-    _seg_lse_online_kernel[(out.numel(),)](
+def seg_lse(indptr, colidx, lam, phi, psi, n, out, base, block, num_warps):
+    """Launch `_seg_lse_online_kernel`, one program per row, rows 0..n-1."""
+    _seg_lse_online_kernel[(n,)](
         indptr, colidx, lam, phi, psi, out, base if base is not None else out,
         SUB=base is not None, BLOCK=block, num_warps=num_warps or 4,
     )
