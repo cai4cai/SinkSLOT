@@ -46,7 +46,7 @@ DEFAULT_PAINTINGS_DIR = Path(__file__).parent / "paintings"
 
 @dataclass
 class StopCfg:
-    """Duck-typed stop config accepted by sinkslot_alternating_triton's
+    """Duck-typed stop config accepted by sinkslot_alternating_fused's
     `stop` argument (mode/max_iter/check_every/tol attributes only)."""
     mode: str = "potential"
     max_iter: int = 8000
@@ -109,7 +109,7 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
     checkpoints = []
 
     if method_key == "sinkslot":
-        from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
+        from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused
         from sinkslot.solver import (
             _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
         )
@@ -128,7 +128,7 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
 
         # Warmup: full pipeline once (plan build + a short solve), not timed.
         _rows, _cols, _S, _cost_mat, _r_ptr, _r_idx, _r_lam, _c_ptr, _c_idx, _c_lam = build_plan()
-        sinkslot_alternating_triton(
+        sinkslot_alternating_fused(
             _r_ptr, _r_idx, _r_lam, _c_ptr, _c_idx, _c_lam, log_a, log_b, n, m, 10, stop=None, eps=eps)
 
         torch.cuda.synchronize()
@@ -140,7 +140,7 @@ def record_trajectory(method_key, sc, tc, sw, tw, eps, tol, check_every, sinkslo
         for n_iter in TRAJECTORY_CHECKPOINTS:
             torch.cuda.synchronize()
             t0 = time.perf_counter()
-            phi, psi, it, converged, change = sinkslot_alternating_triton(
+            phi, psi, it, converged, change = sinkslot_alternating_fused(
                 r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, log_b, n, m, n_iter,
                 stop=StopCfg(mode="potential", max_iter=n_iter, check_every=check_every, tol=tol), eps=eps)
             torch.cuda.synchronize()
@@ -252,13 +252,13 @@ def sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, sy
     (symmetric=True) sparse Sinkhorn. tol/2 corrects the Jacobi backend's
     alpha-damped step, matching FlashSinkhorn-symmetric's own correction.
     """
-    from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton, sinkslot_symmetric_triton
+    from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused, sinkslot_symmetric_fused
     from sinkslot.solver import (
         _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
     )
 
     ot1d = _ot_1d_coo_batched_cuda if sc.is_cuda else _ot_1d_coo_batched
-    solver = sinkslot_symmetric_triton if symmetric else sinkslot_alternating_triton
+    solver = sinkslot_symmetric_fused if symmetric else sinkslot_alternating_fused
     solve_tol = tol / 2 if symmetric else tol
 
     def solve():

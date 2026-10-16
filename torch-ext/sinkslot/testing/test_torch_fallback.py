@@ -49,10 +49,10 @@ def _problem(n=300, m=250, d=3, seed=0):
 
 def test_no_triton_import_required():
     """Importing and using sinkslot must not require Triton to be installed."""
-    from sinkslot import solver
+    from sinkslot import _backends
     # Whatever the environment's Triton availability actually is, the module
     # must have imported successfully to get this far -- that's the assertion.
-    assert hasattr(solver, "_HAS_TRITON")
+    assert hasattr(_backends, "_HAS_TRITON")
 
 
 def test_sparse_sqeuclidean_cost_matches_dense_on_cpu():
@@ -355,7 +355,7 @@ def test_sinkslot_symmetric_torch_fixed_mode_gives_correct_marginals():
 
 def test_sinkslot_symmetric_torch_marginal_mode_converges():
     """Unlike alternating, neither marginal is exact after a symmetric update
-    (see sinkslot_symmetric_triton's own docstring), so this checks BOTH row
+    (see sinkslot_symmetric_fused's own docstring), so this checks BOTH row
     and col marginals directly against the achieved plan, not just the
     solver's own self-reported `viol`.
     """
@@ -567,7 +567,7 @@ def test_samples_loss_forward_matches_primal_slot_eps_at_convergence():
                              backend="torch", stop_mode="marginal",
                              stop_max_iter=20000, stop_tol=1e-10, stop_check_every=5)
     assert result.final_viol < 1e-9, f"not tightly converged: {result.final_viol:.3e}"
-    cost = sparse_sqeuclidean_cost(x, y, result.rows, result.cols, use_triton=False)
+    cost = sparse_sqeuclidean_cost(x, y, result.rows, result.cols, backend="torch")
     log_S = result.S.clamp_min(torch.finfo(result.S.dtype).tiny).log()
     T_vals = (result.phi[result.rows] + result.psi[result.cols] + log_S - cost / eps).exp()
     primal = (T_vals * cost).sum() + eps * (
@@ -600,7 +600,7 @@ def test_samples_loss_and_slot_grad_independent_ab_match_frozen_support_finite_d
 
     phi, psi, rows, cols, S, *_ = sinkslot_solve(
         x, y, a, b, eps, L, seed=0, n_iters=3000, backend="torch")
-    cost = sparse_sqeuclidean_cost(x, y, rows, cols, use_triton=False)
+    cost = sparse_sqeuclidean_cost(x, y, rows, cols, backend="torch")
     log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
     T_vals = (phi[rows] + psi[cols] + log_S - cost / eps).exp()
 

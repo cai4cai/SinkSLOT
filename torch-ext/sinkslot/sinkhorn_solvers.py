@@ -362,13 +362,6 @@ def sinkslot_symmetric_fused(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, log_a, lo
     return phi, psi, it, converged, viol
 
 
-# The loops' names from when Triton was the only fused backend. Still the
-# names the benchmark harness, color_transfer/ and gradient_flow/ import, and
-# still correct there: on a CUDA tensor the fused loop is the Triton loop.
-sinkslot_alternating_triton = sinkslot_alternating_fused
-sinkslot_symmetric_triton = sinkslot_symmetric_fused
-
-
 # --------------------------------------------------------------------------
 # Pure-torch fallback -- no fused kernels, works on any device.
 # --------------------------------------------------------------------------
@@ -378,10 +371,10 @@ def _seg_lse_coo(vals, idx, size):
     """Segmented log-sum-exp over COO-style per-entry indices.
 
     out[i] = logsumexp_{k: idx[k] == i} vals[k]; -inf for an empty group. Same
-    scatter_reduce/index_add pattern as `test_sinkslot_alternating_triton_
+    scatter_reduce/index_add pattern as `test_sinkslot_alternating_fused_
     matches_plain_torch_segmented_lse` in sinkslot/testing/test_sinkslot_bench.py,
-    which validates this matches `_seg_lse_online_kernel`'s fp32 output on the
-    real Triton path.
+    which validates this matches the fused kernels' fp32 output on every
+    fused backend.
     """
     mx = vals.new_full((size,), float("-inf")).scatter_reduce(
         0, idx, vals, reduce="amax", include_self=True)

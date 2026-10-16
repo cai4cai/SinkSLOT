@@ -40,8 +40,8 @@ import torch
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+from sinkslot._backends import fused_backend  # noqa: E402
 from sinkslot.solver import (  # noqa: E402
-    _HAS_TRITON,
     _ot_1d_coo_batched,
     _ot_1d_coo_batched_cuda,
     sot_plan_coo,
@@ -49,7 +49,7 @@ from sinkslot.solver import (  # noqa: E402
     to_csr,
 )
 from sinkslot.sinkhorn_solvers import (  # noqa: E402
-    sinkslot_alternating_triton,
+    sinkslot_alternating_fused,
     sinkslot_alternating_torch,
 )
 from sinkslot.gradient import sparse_barycentric_map  # noqa: E402
@@ -72,7 +72,7 @@ def _build_support(X, Y, a, eps, slices, seed):
     iteration count below solves the *same* problem -- otherwise the curves
     would confound solver progress with a re-randomised support.
 
-    CSR/CSC are only needed for the fused Triton loop (sinkslot_alternating_triton); on the
+    CSR/CSC are only needed for the fused loop (sinkslot_alternating_fused); on the
     pure-torch path (sinkslot_alternating_torch) they're skipped entirely -- it operates
     on the COO (rows, cols, lam) directly, so there's nothing to hoist there.
     """
@@ -81,7 +81,7 @@ def _build_support(X, Y, a, eps, slices, seed):
     rows, cols, S = sot_plan_coo(X, Y, a, a, L=slices, seed=seed, ot1d=ot1d)
     cost = sparse_sqeuclidean_cost(X, Y, rows, cols)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
-    if _HAS_TRITON and X.is_cuda:
+    if fused_backend(X.device) is not None:
         csr = to_csr(rows, cols, lam, n, narrow_key=True)
         csc = to_csr(cols, rows, lam, m, narrow_key=True)
     else:
@@ -92,10 +92,10 @@ def _build_support(X, Y, a, eps, slices, seed):
 def _grad_at(n_iters, X, Y, a, rows, cols, lam, csr, csc):
     """(gradient, max marginal violation) after exactly `n_iters` inner iterations.
 
-    `sinkslot_alternating_triton`/`sinkslot_alternating_torch` both initialise the potentials to zero, so
+    `sinkslot_alternating_fused`/`sinkslot_alternating_torch` both initialise the potentials to zero, so
     running with n_iters=k reproduces the state the solver would be in after
     k iterations -- no need to checkpoint a single long run. Dispatches on
-    whether `_build_support` built CSR/CSC (Triton available and X on CUDA)
+    whether `_build_support` built CSR/CSC (X's device has a fused backend)
     or not (pure-torch path).
     """
     n, m = X.shape[0], Y.shape[0]
@@ -103,7 +103,7 @@ def _grad_at(n_iters, X, Y, a, rows, cols, lam, csr, csc):
     if csr is not None:
         r_ptr, r_idx, r_lam, _ = csr
         c_ptr, c_idx, c_lam, _ = csc
-        phi, psi, _, _, _ = sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
+        phi, psi, _, _, _ = sinkslot_alternating_fused(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
                                     log_a, log_a, n, m, n_iters)
     else:
         phi, psi, _, _, _ = sinkslot_alternating_torch(rows, cols, lam, log_a, log_a, n, m, n_iters)

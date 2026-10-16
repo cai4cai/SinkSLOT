@@ -65,7 +65,7 @@ def _barycentric_sparse(phi, psi, rows, cols, S, cost, tc, eps, n):
 def solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L=100):
     n = sc.shape[0]
     if method == "sinkslot":
-        from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
+        from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused
         from sinkslot.solver import (
             _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo, sparse_sqeuclidean_cost, to_csr,
         )
@@ -76,7 +76,7 @@ def solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, s
         lam = log_S - cost / eps
         r_ptr, r_idx, r_lam, _ = to_csr(rows, cols, lam, sc.shape[0])
         c_ptr, c_idx, c_lam, _ = to_csr(cols, rows, lam, tc.shape[0])
-        phi, psi, it, converged, change = sinkslot_alternating_triton(
+        phi, psi, it, converged, change = sinkslot_alternating_fused(
             r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam, sw.log(), tw.log(),
             sc.shape[0], tc.shape[0], max_iter,
             stop=StopCfg(mode="potential", max_iter=max_iter, check_every=check_every, tol=tol), eps=eps)

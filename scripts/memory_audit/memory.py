@@ -277,11 +277,11 @@ def _probe_sinkslot(cuda_path: bool, args) -> Dict[str, Callable]:
 
     def solve(state):
         from sinkslot.bench.bench_forward import StopCfg
-        from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
+        from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused
 
         n, m = state["nm"]
         log_a, log_b = state["log_ab"]
-        sinkslot_alternating_triton(*state["csr"], log_a, log_b, n, m, args.iters, StopCfg.fixed())
+        sinkslot_alternating_fused(*state["csr"], log_a, log_b, n, m, args.iters, StopCfg.fixed())
 
     return {"imports": imports, "setup": setup, "solve": solve}
 

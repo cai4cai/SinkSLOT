@@ -22,7 +22,7 @@ import torch
 from beartype import beartype
 from jaxtyping import Float, Int, jaxtyped
 
-from ._backends import _HAS_METAL, _HAS_TRITON, fused_ops, resolve_backend  # noqa: F401
+from ._backends import fused_ops, resolve_backend
 
 
 @jaxtyped(typechecker=beartype)
@@ -277,7 +277,7 @@ def to_csr(rows: torch.Tensor, cols: torch.Tensor, vals: torch.Tensor, n: int,
 def sparse_sqeuclidean_cost(
     x: Float[torch.Tensor, "n d"], y: Float[torch.Tensor, "m d"],
     rows: Int[torch.Tensor, "nnz"], cols: Int[torch.Tensor, "nnz"],
-    use_triton=None, backend: str = "auto",
+    backend: str = "auto",
 ) -> Float[torch.Tensor, "nnz"]:
     """Squared-euclidean cost on the sparse support.
 
@@ -294,9 +294,6 @@ def sparse_sqeuclidean_cost(
     force the fallback on a GPU tensor even though a fused backend is
     available, which `sinkslot_solve`'s own `backend="torch"` needs. A fused
     name raises if it can't run on `x`, rather than silently falling back.
-    `use_triton`: the older boolean form of the same override, kept for
-    existing callers -- `True` means `backend="triton"`, `False` means
-    `backend="torch"`; takes precedence over `backend` when not None.
 
     Fused-path notes: materialising the (nnz, d) intermediates costs 832 MB each
     at nnz=26M, d=8, against 104 MB of output. Measured 9-10x faster fused across
@@ -313,8 +310,6 @@ def sparse_sqeuclidean_cost(
     `x`/`y`'s own dtype, since it's the plain `(x[rows]-y[cols]).square().sum(1)`
     expression with nothing fixed-precision underneath.
     """
-    if use_triton is not None:
-        backend = "triton" if use_triton else "torch"
     backend = resolve_backend(backend, x.device)
     if backend == "torch":
         return (x[rows] - y[cols]).square().sum(1)
