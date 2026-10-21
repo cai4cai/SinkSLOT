@@ -114,6 +114,7 @@ def _config(n: int, d: int) -> BenchConfig:
         geomloss_truncate=1.0,
         geomloss_clustering="kmeans",
         geomloss_points_per_cluster=250,
+        geomloss_lift_only=True,
         sym_alpha=0.9,
         no_flash_symmetric=FIGURE_ONLY,
         no_flash_alternating=False,

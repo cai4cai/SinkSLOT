@@ -1166,6 +1166,7 @@ def bench_geomloss_multiscale(
     sym_alpha: float = 0.5,
     clustering: str = "grid",
     points_per_cluster: int = 250,
+    lift_only: bool = False,
 ) -> TimingResult:
     """GeomLoss multiscale (KeOps, block-sparse) via reference_solvers.geomloss_multiscale:
     the two-scale scheme of GeomLoss's sinkhorn_multiscale at a fixed eps, with
@@ -1197,9 +1198,9 @@ def bench_geomloss_multiscale(
         st, it_fixed = _capped(_stop, n_iters, cap)
         if st.mode == "fixed":
             return geomloss_multiscale(x, y, a, b, eps, it_fixed, truncate=truncate, alpha=sym_alpha,
-                                       **clusters())
+                                       lift_only=lift_only, **clusters())
         return geomloss_multiscale(x, y, a, b, eps, st.max_iter, threshold=st.tol, check_every=st.check_every,
-                                   truncate=truncate, alpha=sym_alpha, **clusters())
+                                   truncate=truncate, alpha=sym_alpha, lift_only=lift_only, **clusters())
 
     def clusters():
         if clustering == "grid":
@@ -2202,6 +2203,7 @@ def run_forward_benchmark(
     sym_alpha: float = 0.5,
     geomloss_clustering: str = "grid",
     geomloss_points_per_cluster: int = 250,
+    geomloss_lift_only: bool = False,
 ) -> List[TimingResult]:
     """Run forward pass benchmark.
 
@@ -2301,6 +2303,7 @@ def run_forward_benchmark(
                     n, n, d, eps, n_iters, device, warmup, rep, nvtx=nvtx, rmae_check=rmae_check,
                     dataset=dataset, stop=stop, seed=seed, warmup_iters=warmup_iters, truncate=geomloss_truncate,
                     sym_alpha=sym_alpha, clustering=geomloss_clustering, points_per_cluster=geomloss_points_per_cluster,
+                    lift_only=geomloss_lift_only,
                 )
                 results.append(res)
                 if verbose:
@@ -2925,7 +2928,8 @@ def run_forward_benchmark_subprocess(
             cmd.append("--no-geomloss-multiscale")
         cmd.extend(["--geomloss-truncate", str(args.geomloss_truncate), "--sym-alpha", str(args.sym_alpha),
                     "--geomloss-clustering", args.geomloss_clustering,
-                    "--geomloss-points-per-cluster", str(args.geomloss_points_per_cluster)])
+                    "--geomloss-points-per-cluster", str(args.geomloss_points_per_cluster)]
+                   + (["--geomloss-lift-only"] if args.geomloss_lift_only else []))
         if args.no_ott:
             cmd.append("--no-ott")
         if args.no_rmae_check:
@@ -3063,6 +3067,9 @@ def main() -> None:
     parser.add_argument("--geomloss-points-per-cluster", type=int, default=250,
                         help="GeomLoss multiscale with K-means clustering: points per cluster "
                              "(round(n / it) clusters per cloud; Feydy et al.'s ~250).")
+    parser.add_argument("--geomloss-lift-only", action="store_true",
+                        help="GeomLoss multiscale: when the kernel is not truncated, return the coarse solution "
+                             "lifted to the points with no fine update (GeomLoss's behaviour).")
     parser.add_argument("--geomloss-truncate", type=float, default=5.0,
                         help="GeomLoss multiscale: kernel truncation margin, in units of eps (GeomLoss's default 5).")
     parser.add_argument("--no-flash-symmetric", action="store_true", help="Skip FlashSinkhorn symmetric backend.")
@@ -3204,6 +3211,7 @@ def main() -> None:
             sym_alpha=args.sym_alpha,
             geomloss_clustering=args.geomloss_clustering,
             geomloss_points_per_cluster=args.geomloss_points_per_cluster,
+            geomloss_lift_only=args.geomloss_lift_only,
             warmup_iters=args.warmup_iters,
             sinkslotcuda_slices=sinkslotcuda_slices,
             stop=_stop_cfg,
@@ -3367,6 +3375,7 @@ def main() -> None:
             sym_alpha=args.sym_alpha,
             geomloss_clustering=args.geomloss_clustering,
             geomloss_points_per_cluster=args.geomloss_points_per_cluster,
+            geomloss_lift_only=args.geomloss_lift_only,
             warmup_iters=args.warmup_iters,
             sinkslotcuda_slices=sinkslotcuda_slices,
             stop=_stop_cfg,

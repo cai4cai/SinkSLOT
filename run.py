@@ -106,6 +106,8 @@ def build_command(
         cmd += ["--geomloss-truncate", str(cfg.geomloss_truncate),
                 "--geomloss-clustering", cfg.geomloss_clustering,
                 "--geomloss-points-per-cluster", str(cfg.geomloss_points_per_cluster)]
+        if cfg.geomloss_lift_only:
+            cmd.append("--geomloss-lift-only")
     if cfg.no_flash_symmetric:
         cmd.append("--no-flash-symmetric")
     if cfg.no_flash_alternating:

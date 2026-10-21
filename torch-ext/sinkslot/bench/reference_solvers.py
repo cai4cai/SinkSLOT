@@ -93,6 +93,7 @@ def geomloss_multiscale(
     eps: float, max_iter: int, threshold: Optional[float] = None, check_every: int = 5,
     cluster_scale: Optional[float] = None, truncate: Optional[float] = 5.0,
     labels: Optional[Tuple[torch.Tensor, torch.Tensor]] = None, alpha: float = 0.5,
+    lift_only: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, int, Optional[bool], float, float, dict]:
     """GeomLoss multiscale (KeOps, block-sparse): the two-scale scheme of
     geomloss._legacy.sinkhorn_samples.sinkhorn_multiscale at a fixed eps, with the
@@ -128,6 +129,10 @@ def geomloss_multiscale(
     instead of the grid, as sinkhorn_multiscale's labels_x / labels_y. With labels,
     any d is allowed and the default cluster_scale is Feydy et al.'s cluster size,
     max over the two clouds of cluster_std (geomloss examples/brain_tractograms).
+
+    lift_only: when the kernel is not truncated (clusters no wider than the blur), return the coarse
+    solution lifted to the points with no fine update, as GeomLoss does when its schedule never
+    reaches the cluster scale; the result then is not converged on the points.
 
     Updates (both stages): f <- (1 - alpha) f + alpha * softmin, likewise g (GeomLoss:
     alpha = 0.5). Stop rule (both stages): max(|df|, |dg|) < alpha * threshold between
@@ -195,7 +200,7 @@ def geomloss_multiscale(
         C_xy_c, C_yx_c = cost_matrix(x_c, y_c), cost_matrix(y_c, x_c)
         f_c = sinkhorn_initialization(a_log_c, b_log_c, C_xy_c, softmin_sample, balanced)
         g_c = sinkhorn_initialization(b_log_c, a_log_c, C_yx_c, softmin_sample, balanced)
-        f_c, g_c, coarse_iters, _, _ = damped_loop(
+        f_c, g_c, coarse_iters, coarse_converged, coarse_change = damped_loop(
             lazy_updates(C_xy_c, C_yx_c, a_log_c, b_log_c), f_c, g_c, max_iter)
 
         # Lift to the points: one softmin against the coarse potentials of the other side.
@@ -226,8 +231,13 @@ def geomloss_multiscale(
             updates = lazy_updates(cost_matrix(x, y), cost_matrix(y, x), a_log, b_log)
             kept, support = n * m, None
 
-        f_ba, g_ab, fine_iters, converged, last_change = damped_loop(
-            updates, f_ba, g_ab, max(max_iter - coarse_iters, 0))
+        if lift_only and support is None:
+            # As GeomLoss when its clusters never exceed the blur: the lifted coarse solution is returned,
+            # with no update on the points; converged is the coarse stage's.
+            fine_iters, converged, last_change = 0, coarse_converged, coarse_change
+        else:
+            f_ba, g_ab, fine_iters, converged, last_change = damped_loop(
+                updates, f_ba, g_ab, max(max_iter - coarse_iters, 0))
 
     f, g = torch.empty_like(f_ba), torch.empty_like(g_ab)
     f[perm_x], g[perm_y] = f_ba, g_ab

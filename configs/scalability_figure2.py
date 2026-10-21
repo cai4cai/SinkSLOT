@@ -38,7 +38,7 @@ def _figure_config(n: int, d: int, dsweep: bool) -> BenchConfig:
         no_srot=False, srot_slices=[L_frac],
         no_sparsink=False, no_randsink=True, sparsink_s=[int(round(SPARSINK_K * s0))],
         no_geomloss=False, no_geomloss_multiscale=False, geomloss_clustering="kmeans",
-        geomloss_points_per_cluster=250, geomloss_truncate=1.0,
+        geomloss_points_per_cluster=250, geomloss_lift_only=True, geomloss_truncate=1.0,
         no_rmae_check=not dsweep,
         output_dir=os.environ.get("SCAL_OUTPUT_DIR") or "output/scalability_figure2")
 
