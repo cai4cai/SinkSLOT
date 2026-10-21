@@ -49,14 +49,14 @@ def test_speedup_config_requires_medians():
 def test_speedup_unit_count(cfg):
     units = list(run._units(cfg))
     # 5 seeds x 5 slices x 10 eps x 37 method configurations, plus GeomLoss multiscale
-    # on the four slices with d <= 3: 5 seeds x 4 slices x 10 eps
-    assert len(units) == 9250 + 200
+    # with K-means (any d) at K in {250, 1000, 2500}: 5 seeds x 5 slices x 10 eps x 3
+    assert len(units) == 9250 + 750
     assert len(set(units)) == len(units)
     per_problem = [u for u in units if u.seed == 0 and u.dataset == "half_moon"
                    and u.eps == units[0].eps]
-    assert len(per_problem) == 38
+    assert len(per_problem) == 40
     assert {(u.dataset, u.d) for u in units} == set(speedup.MEDIAN_C)
-    assert all(u.d <= 3 for u in units if u.method == "geomloss_multiscale")
+    assert {u.slices for u in units if u.method == "geomloss_multiscale"} == {250, 1000, 2500}
 
 
 @pytest.mark.parametrize("num_shards", [1, 7, 210])
@@ -110,7 +110,7 @@ def test_dry_run_command_contents(cfg):
 
 def test_resume_skips_done_units(cfg, capsys):
     units = list(run._units(cfg))
-    num_shards = 210
+    num_shards = 211  # coprime with the 40 units per problem
     # A shard holding a GeomLoss, a FlashSinkhorn and a sliced unit.
     shard_idx = next(k for k in range(num_shards)
                      if {"geomloss"} <= {u.method for u in units[k::num_shards]}

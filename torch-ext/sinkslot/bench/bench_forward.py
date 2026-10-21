@@ -1214,6 +1214,8 @@ def bench_geomloss_multiscale(
                      n_iters=n_iters, iters_run=iters_run, converged=converged,
                      dataset=dataset, tf32=False, seed=seed)
     res.nnz = int(round(info["kept_fraction"] * n * m))
+    if clustering == "kmeans":
+        res.srot_slices = n_clusters  # the method's swept parameter column, as L for the sliced methods
 
     ref = _safe_metrics(lambda: {"ref": _exact_ref(rmae_check, n, m, d, seed, x, y, a, b, dataset)}).get("ref")
     if info["support"] is None:

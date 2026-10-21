@@ -12,8 +12,9 @@ s = k * s0(N), k in SPARSINK_K, s0(N) = 1e-3 * N * ln(N)^4.
 eps at each d is the value where FlashSinkhorn-alternating fp32 reaches a ~5%
 cost gap at N=10,000 (scripts/speedup_calibrate_eps.py), so every point sits at
 roughly the same accuracy. The stop rule is the speedup benchmark's:
-max(|df|, |dg|) < 1e-5 * median(C) between checkpoints (tol/2 for the damped
-methods), check_every=5, max_iter=20000 (SCAL_MAX_ITER overrides). No exact-OT
+max(|df|, |dg|) < 1e-5 * median(C) between checkpoints (alpha times that for the
+damped methods), check_every=5, max_iter=500000 (SCAL_MAX_ITER overrides). GeomLoss
+multiscale clusters with K-means (K=250, truncate 1); its grid is limited to d <= 3. No exact-OT
 reference (infeasible at N=50,000), so cost_gap_pct is N/A; runtime, memory and
 the plan cost <C, P> are the outputs.
 
@@ -43,7 +44,7 @@ L_VALUES = [100, 1000, 5000]
 SPARSINK_K = [4, 16, 64]
 SEEDS = [0, 1, 2, 3, 4]
 PART = os.environ.get("SCAL_PART", "")  # "", "small" (N <= 20,000) or "large" (N >= 30,000)
-MAX_ITER = int(os.environ.get("SCAL_MAX_ITER", "20000"))
+MAX_ITER = int(os.environ.get("SCAL_MAX_ITER", "500000"))
 # SCAL_FIGURE_ONLY=1 runs only the methods in the scalability figure: fp32, no symmetric variants.
 FIGURE_ONLY = os.environ.get("SCAL_FIGURE_ONLY", "") == "1"
 
@@ -108,6 +109,10 @@ def _config(n: int, d: int) -> BenchConfig:
         no_ott=True,
         no_rmae_check=True,
         no_geomloss=False,
+        no_geomloss_multiscale=False,
+        geomloss_truncate=1.0,
+        geomloss_clustering="kmeans",
+        geomloss_n_clusters=(250,),
         sym_alpha=0.9,
         no_flash_symmetric=FIGURE_ONLY,
         no_flash_alternating=False,
