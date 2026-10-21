@@ -118,3 +118,16 @@ def test_sparse_transport_plan_differentiable():
     assert xg.grad is not None and torch.isfinite(xg.grad).all()
     assert yg.grad is not None and torch.isfinite(yg.grad).all()
     assert not sparse_transport_plan(xg, yg, **kw).values().requires_grad
+
+
+def test_cost_gradient_has_zero_row_and_column_sums():
+    """Gamma 1 = H's first block row minus the right-hand side, so it vanishes when the adjoint solve is exact."""
+    from sinkslot.plan_grad import adjoint
+
+    x, y, a, b, rows, cols, log_S = _problem(n=40, m=50, d=3, L=8)
+    p = _frozen_plan(rows, cols, log_S)(x, y, a, b)
+    G = torch.randn(len(rows), generator=torch.Generator().manual_seed(5), dtype=DT)
+    _, _, gamma = adjoint(p, G, rows, cols, len(x), len(y), EPS, 1e-13, 500)
+    scale = (p * G.abs()).sum() / EPS
+    assert torch.zeros(len(x), dtype=DT).index_add_(0, rows, gamma).abs().max() < 1e-10 * scale
+    assert torch.zeros(len(y), dtype=DT).index_add_(0, cols, gamma).abs().max() < 1e-10 * scale

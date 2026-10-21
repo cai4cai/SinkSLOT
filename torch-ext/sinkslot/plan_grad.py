@@ -47,46 +47,62 @@ class _SparsePlanFn(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_vals):
-        try:
-            from torchsparsegradutils.utils import minres, MINRESSettings
-        except ImportError as e:
-            raise ImportError("sparse_transport_plan(differentiable=True) needs torchsparsegradutils "
-                              "for its backward (pip install torchsparsegradutils)") from e
-
         x, y, rows, cols, p = ctx.saved_tensors
-        n, m = x.shape[0], y.shape[0]
-        r, c = _row_sum(p, rows, n), _row_sum(p, cols, m)
-        W = grad_vals * p
-        w = torch.cat([_row_sum(W, rows, n), _row_sum(W, cols, m)])
-
-        def col(t, z):  # broadcast a length-(n or m or n+m) vector against z's trailing RHS dims
-            return t.view(-1, *([1] * (z.dim() - 1)))
-
-        def H(z):
-            u, v = z[:n], z[n:]
-            return torch.cat([col(r, z) * u + _row_sum(col(p, z) * v[cols], rows, n),
-                              _row_sum(col(p, z) * u[rows], cols, m) + col(c, z) * v])
-
-        diag = torch.cat([r, c]).clamp_min(torch.finfo(p.dtype).tiny)
-        z = minres(H, w, preconditioner=lambda t: t / col(diag, t), max_iter=ctx.adjoint_max_iter,
-                   settings=MINRESSettings(minres_tolerance=ctx.adjoint_tol))
-        residual = float((H(z) - w).norm() / w.norm().clamp_min(torch.finfo(w.dtype).tiny))
-        if residual > ctx.adjoint_tol:
-            warnings.warn(f"sparse_transport_plan backward: adjoint relative residual {residual:.2e} "
-                          f"> adjoint_tol {ctx.adjoint_tol:.1e}", stacklevel=2)
-        alpha, beta = z[:n], z[n:]
-
-        gamma = -(p / ctx.eps) * (grad_vals - alpha[rows] - beta[cols])
-        grad_x = grad_y = None
-        if ctx.needs_input_grad[0]:
-            grad_x = 2.0 * (_row_sum(gamma, rows, n)[:, None] * x
-                            - _row_sum(gamma[:, None] * y[cols], rows, n))
-        if ctx.needs_input_grad[1]:
-            grad_y = 2.0 * (_row_sum(gamma, cols, m)[:, None] * y
-                            - _row_sum(gamma[:, None] * x[rows], cols, m))
+        alpha, beta, gamma = adjoint(p, grad_vals, rows, cols, x.shape[0], y.shape[0], ctx.eps,
+                                     ctx.adjoint_tol, ctx.adjoint_max_iter)
+        grad_x, grad_y = points_grad(gamma, rows, cols, x, y, ctx.needs_input_grad[0], ctx.needs_input_grad[1])
         grad_a = alpha if ctx.needs_input_grad[2] else None
         grad_b = beta if ctx.needs_input_grad[3] else None
         return grad_x, grad_y, grad_a, grad_b, None, None, None, None, None, None, None, None
+
+
+def adjoint(p, grad_vals, rows, cols, n, m, eps, tol, max_iter):
+    """(alpha, beta, Gamma) for plan values p and upstream gradient grad_vals on (rows, cols).
+
+    Solves H (alpha, beta) = (W 1, W^T 1), W = grad_vals * p, by MINRES with the
+    Jacobi preconditioner diag(P 1, P^T 1)^-1, and returns
+    Gamma = dL/dC = -(1/eps) p (grad_vals - alpha_i - beta_j). Warns if the
+    relative residual exceeds `tol`.
+    """
+    try:
+        from torchsparsegradutils.utils import minres, MINRESSettings
+    except ImportError as e:
+        raise ImportError("sparse_transport_plan(differentiable=True) needs torchsparsegradutils "
+                          "for its backward (pip install torchsparsegradutils)") from e
+
+    r, c = _row_sum(p, rows, n), _row_sum(p, cols, m)
+    W = grad_vals * p
+    w = torch.cat([_row_sum(W, rows, n), _row_sum(W, cols, m)])
+
+    def col(t, z):  # broadcast a length-(n or m or n+m) vector against z's trailing RHS dims
+        return t.view(-1, *([1] * (z.dim() - 1)))
+
+    def H(z):
+        u, v = z[:n], z[n:]
+        return torch.cat([col(r, z) * u + _row_sum(col(p, z) * v[cols], rows, n),
+                          _row_sum(col(p, z) * u[rows], cols, m) + col(c, z) * v])
+
+    diag = torch.cat([r, c]).clamp_min(torch.finfo(p.dtype).tiny)
+    z = minres(H, w, preconditioner=lambda t: t / col(diag, t), max_iter=max_iter,
+               settings=MINRESSettings(minres_tolerance=tol))
+    residual = float((H(z) - w).norm() / w.norm().clamp_min(torch.finfo(w.dtype).tiny))
+    if residual > tol:
+        warnings.warn(f"sparse_transport_plan backward: adjoint relative residual {residual:.2e} "
+                      f"> adjoint_tol {tol:.1e}", stacklevel=3)
+    alpha, beta = z[:n], z[n:]
+    gamma = -(p / eps) * (grad_vals - alpha[rows] - beta[cols])
+    return alpha, beta, gamma
+
+
+def points_grad(gamma, rows, cols, x, y, need_x=True, need_y=True):
+    """dL/dx, dL/dy from Gamma = dL/dC on (rows, cols), for C_ij = ||x_i - y_j||^2."""
+    n, m = x.shape[0], y.shape[0]
+    grad_x = grad_y = None
+    if need_x:
+        grad_x = 2.0 * (_row_sum(gamma, rows, n)[:, None] * x - _row_sum(gamma[:, None] * y[cols], rows, n))
+    if need_y:
+        grad_y = 2.0 * (_row_sum(gamma, cols, m)[:, None] * y - _row_sum(gamma[:, None] * x[rows], cols, m))
+    return grad_x, grad_y
 
 
 def plan_values(x, y, a, b, rows, cols, log_S, phi, psi, eps, adjoint_tol=1e-6, adjoint_max_iter=1000):
