@@ -97,7 +97,7 @@ def test_dry_run_command_contents(cfg):
     expected_tol = speedup.REL_TOL * DUMMY_MEDIANS[(sym.dataset, sym.d)]
     assert float(cmd[cmd.index("--stop-tol") + 1]) == pytest.approx(expected_tol)
     for flag, value in [("--stop-mode", "potential"),
-                        ("--check-every", "5"), ("--max-iter", "20000"),
+                        ("--check-every", "5"), ("--max-iter", "500000"),
                         ("--warmup", "1"), ("--warmup-iters", "10"), ("--rep", "5")]:
         assert cmd[cmd.index(flag) + 1] == value
     assert "--scaling-tol" in cmd and "--potential-tol" not in cmd
