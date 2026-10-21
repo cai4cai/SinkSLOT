@@ -80,10 +80,10 @@ def build_config(median_c: Dict[Tuple[str, int], Optional[float]] = MEDIAN_C) ->
         sizes=[N],
         dims=sorted({d for _, d in median_c}),
         problems=[(dataset, d, eps_grid(*EPS_CROSSINGS[(dataset, d)])) for (dataset, d) in median_c],
-        n_iters=20000,
+        n_iters=500000,
 
         stop_mode="potential",
-        max_iter=20000,
+        max_iter=500000,
         stop_tol=REL_TOL,
         stop_tol_by_problem={key: REL_TOL * median for key, median in median_c.items()},
         check_every=5,
