@@ -126,7 +126,8 @@ def geomloss_multiscale(
     GeomLoss's 5; None keeps every pair) and labels: (label_x, label_y), integer
     cluster labels of the points (e.g. K-means, as in Feydy et al. 2019), used
     instead of the grid, as sinkhorn_multiscale's labels_x / labels_y. With labels,
-    any d is allowed and the kernel is always truncated (when truncate is not None).
+    any d is allowed and the default cluster_scale is Feydy et al.'s cluster size,
+    max over the two clouds of cluster_std (geomloss examples/brain_tractograms).
 
     Updates (both stages): f <- (1 - alpha) f + alpha * softmin, likewise g (GeomLoss:
     alpha = 0.5). Stop rule (both stages): max(|df|, |dg|) < alpha * threshold between
@@ -162,6 +163,8 @@ def geomloss_multiscale(
         [a_c, a], [x_c, x], [ranges_x], perm_x = clusterize(sw, sc, scale=cluster_scale)
         [b_c, b], [y_c, y], [ranges_y], perm_y = clusterize(tw, tc, scale=cluster_scale)
     else:
+        if cluster_scale is None:  # Feydy et al.: the larger of the two clouds' cluster sizes
+            cluster_scale = max(cluster_std(sc, labels[0]), cluster_std(tc, labels[1]))
         [a_c, a], [x_c, x], [ranges_x], perm_x = clusterize(sw, sc, labels=labels[0].int())
         [b_c, b], [y_c, y], [ranges_y], perm_y = clusterize(tw, tc, labels=labels[1].int())
     a_log_c, b_log_c, a_log, b_log = (bk.stable_log(w) for w in (a_c, b_c, a, b))
@@ -199,7 +202,7 @@ def geomloss_multiscale(
         f_ba = softmin_sample(eps, b_log_c, cost_matrix(x, y_c), g_c)
         g_ab = softmin_sample(eps, a_log_c, cost_matrix(y, x_c), f_c)
 
-        if truncate is not None and (labels is not None or cluster_scale ** 2 > eps / 2):
+        if truncate is not None and cluster_scale ** 2 > eps / 2:
             # Legacy kernel truncation and block-sparse softmin (KeOps ranges).
             (_, _, _, _, ranges_xy), (_, _, _, _, ranges_yx) = kernel_truncation(
                 (x_c, y_c, ranges_x, ranges_y, None), (y_c, x_c, ranges_y, ranges_x, None),
@@ -236,32 +239,32 @@ def geomloss_multiscale(
 
 
 def kmeans_labels(x: torch.Tensor, k: int, iters: int = 10, seed: int = 0) -> torch.Tensor:
-    """K-means cluster labels of the points x (Lloyd's algorithm, k-means++-style seeding from a
-    subsample, iters iterations), relabelled to 0..K-1 over the non-empty clusters; for
-    geomloss_multiscale's labels (Feydy et al. 2019 cluster with K-means)."""
+    """K-means cluster labels of the points x, as Feydy et al.'s KMeans (geomloss
+    examples/sinkhorn_multiscale/plot_optimal_transport_cluster.py): k random points as initial
+    centroids (seeded), iters Lloyd iterations with the nearest centroid from KeOps' argmin and the
+    centroids from torch.bincount. Labels are renumbered to 0..K-1 over the non-empty clusters."""
+    from pykeops.torch import generic_argmin
+
+    n, d = x.shape
+    k = min(k, n)
+    nn_search = generic_argmin("SqDist(x,y)", "ind = Vi(1)", f"x = Vi({d})", f"y = Vj({d})")
     g = torch.Generator(device=x.device).manual_seed(seed)
-    k = min(k, len(x))
-    sub = x[torch.randperm(len(x), generator=g, device=x.device)[:min(len(x), 20 * k)]]
-    c = sub[:1]
-    while len(c) < k:  # D^2 seeding, 64 centres at a time
-        d2 = torch.cdist(sub, c).min(1).values ** 2
-        c = torch.cat([c, sub[torch.multinomial(d2 + 1e-12, min(64, k - len(c)), generator=g)]])
+    c = x[torch.randperm(n, generator=g, device=x.device)[:k], :].clone()
     for _ in range(iters):
-        lab = torch.cdist(x, c).argmin(1)
-        cnt = torch.bincount(lab, minlength=len(c)).clamp_min(1).unsqueeze(1)
-        c = torch.zeros_like(c).index_add_(0, lab, x) / cnt
-    return torch.unique(torch.cdist(x, c).argmin(1), return_inverse=True)[1]
+        cl = nn_search(x, c).view(-1).long()
+        ncl = torch.bincount(cl, minlength=k).type(x.dtype)
+        for j in range(d):
+            c[:, j] = torch.bincount(cl, weights=x[:, j], minlength=k) / ncl
+    return torch.unique(cl, return_inverse=True)[1]
 
 
-def cluster_side(x: torch.Tensor, labels: torch.Tensor) -> float:
-    """Side of the cube cell whose points have the same RMS distance to their centroid as the
-    clusters of x (labels): RMS * sqrt(12 / d). The cluster_scale of geomloss_multiscale for
-    labels, in place of the grid's cell side."""
+def cluster_std(x: torch.Tensor, labels: torch.Tensor) -> float:
+    """Feydy et al.'s cluster size: the RMS distance of the points x to the centroid of their
+    cluster (labels)."""
     n_c = int(labels.max()) + 1
     cnt = torch.bincount(labels, minlength=n_c).clamp_min(1).unsqueeze(1).to(x.dtype)
     centroids = torch.zeros(n_c, x.shape[1], dtype=x.dtype, device=x.device).index_add_(0, labels, x) / cnt
-    rms = (x - centroids[labels]).pow(2).sum(1).mean().sqrt()
-    return float(rms * (12 / x.shape[1]) ** 0.5)
+    return float((x - centroids[labels]).pow(2).sum(1).mean().sqrt())
 
 
 def flash_symmetric_alpha(x, y, a, b, alpha, *, eps, n_iters, allow_tf32, threshold, check_every):

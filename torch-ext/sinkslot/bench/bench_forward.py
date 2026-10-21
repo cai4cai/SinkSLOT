@@ -87,7 +87,6 @@ from sinkslot.bench.reference_solvers import (  # noqa: F401 - re-exported
     build_sot_plan,
     build_sparse_kernel,
     flash_symmetric_alpha,
-    cluster_side,
     geomloss_multiscale,
     kmeans_labels,
     geomloss_online,
@@ -1174,7 +1173,7 @@ def bench_geomloss_multiscale(
     eps; GeomLoss's default 5), and the potential-change check
     in both stages. d <= 3 only. Damping and stop threshold as bench_geomloss_online.
     clustering: "grid" (GeomLoss's default) or "kmeans" (n_clusters K-means clusters per
-    cloud, as in Feydy et al. 2019; any d; cluster_scale from reference_solvers.cluster_side). The timed solve includes the clustering. nnz is the number of point pairs the
+    cloud and the cluster size of Feydy et al. 2019 as cluster_scale; any d). The timed solve includes the clustering. nnz is the number of point pairs the
     fine stage sums over (every pair when the kernel is not truncated); the plan
     metrics are those of the plan on these pairs.
     """
@@ -1204,8 +1203,7 @@ def bench_geomloss_multiscale(
     def clusters():
         if clustering == "grid":
             return dict(labels=None)
-        lx, ly = kmeans_labels(x, n_clusters, seed=seed), kmeans_labels(y, n_clusters, seed=seed)
-        return dict(labels=(lx, ly), cluster_scale=max(cluster_side(x, lx), cluster_side(y, ly)))
+        return dict(labels=(kmeans_labels(x, n_clusters, seed=seed), kmeans_labels(y, n_clusters, seed=seed)))
 
     try:
         stats, (f, g, iters_run, converged, _, _, info), peak = _time_solve(
