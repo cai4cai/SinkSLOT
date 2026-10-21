@@ -1228,8 +1228,8 @@ def _kept_plan_metrics(support, f, g, x, y, a, b, eps, ref) -> dict:
     GeomLoss multiscale kernel only (zero elsewhere), the plan its fine stage solves."""
     label_x, label_y, keep = support
     cost = torch.cdist(x, y, p=2) ** 2
-    T = (a.log().unsqueeze(1) + b.log().unsqueeze(0) + (f.unsqueeze(1) + g.unsqueeze(0) - cost) / eps).exp()
-    T = T * keep[label_x][:, label_y]
+    logits = a.log().unsqueeze(1) + b.log().unsqueeze(0) + (f.unsqueeze(1) + g.unsqueeze(0) - cost) / eps
+    T = logits.masked_fill(~keep[label_x][:, label_y], float("-inf")).exp()  # mask before exp: no inf * 0
     return _plan_metrics(T, None, None, cost, x, y, a, b, ref)
 
 def bench_geomloss_tensorized(

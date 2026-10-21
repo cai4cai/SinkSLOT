@@ -25,12 +25,11 @@ def _dense_block(sc, tc, sw, tw, eps, f, g, start, end, support=None):
     support = (label_x, label_y, keep) when given: pair (i, j) is kept iff
     keep[label_x[i], label_y[j]] (GeomLoss multiscale's truncated kernel)."""
     cost_block = squared_distances(sc[start:end], tc)
-    p_block = sw[start:end, None] * tw[None, :] * (
-        (f[start:end, None] + g[None, :] - cost_block) / eps
-    ).exp()
-    if support is not None:
+    logits = (f[start:end, None] + g[None, :] - cost_block) / eps
+    if support is not None:  # dropped pairs are masked before exp: their exponent is unconstrained
         label_x, label_y, keep = support
-        p_block = p_block * keep[label_x[start:end]][:, label_y]
+        logits = logits.masked_fill(~keep[label_x[start:end]][:, label_y], float("-inf"))
+    p_block = sw[start:end, None] * tw[None, :] * logits.exp()
     return cost_block, p_block
 
 
