@@ -93,7 +93,6 @@ def geomloss_multiscale(
     eps: float, max_iter: int, threshold: Optional[float] = None, check_every: int = 5,
     cluster_scale: Optional[float] = None, truncate: Optional[float] = 5.0,
     labels: Optional[Tuple[torch.Tensor, torch.Tensor]] = None, alpha: float = 0.5,
-    lift_only: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, int, Optional[bool], float, float, dict]:
     """GeomLoss multiscale (KeOps, block-sparse): the two-scale scheme of
     geomloss._legacy.sinkhorn_samples.sinkhorn_multiscale at a fixed eps, with the
@@ -113,7 +112,9 @@ def geomloss_multiscale(
     truncates if that happens before the last iteration. At a fixed eps there is
     no schedule: the coarse stage runs to the stop rule (or max_iter), and the
     kernel is truncated when cluster_scale**2 > eps / 2 (GeomLoss's condition
-    for its cost |x-y|**2 / 2), otherwise the fine stage uses every pair.
+    for its cost |x-y|**2 / 2). Otherwise, as GeomLoss when its schedule never
+    reaches the cluster scale, the coarse solution lifted to the points is
+    returned with no update on the points (it is then not converged on the points).
 
     geomloss.ot has no multiscale solver, so the legacy code is used only where
     geomloss.ot has no counterpart: the clustering, the kernel truncation and the
@@ -124,15 +125,11 @@ def geomloss_multiscale(
 
     Parameters besides eps: cluster_scale (default GeomLoss's
     diameter / (sqrt(d) * 2000**(1/d)), about 2000 cells), truncate (default
-    GeomLoss's 5; None keeps every pair) and labels: (label_x, label_y), integer
+    GeomLoss's 5; None: no truncation, hence no fine stage) and labels: (label_x, label_y), integer
     cluster labels of the points (e.g. K-means, as in Feydy et al. 2019), used
     instead of the grid, as sinkhorn_multiscale's labels_x / labels_y. With labels,
     any d is allowed and the default cluster_scale is Feydy et al.'s cluster size,
     max over the two clouds of cluster_std (geomloss examples/brain_tractograms).
-
-    lift_only: when the kernel is not truncated (clusters no wider than the blur), return the coarse
-    solution lifted to the points with no fine update, as GeomLoss does when its schedule never
-    reaches the cluster scale; the result then is not converged on the points.
 
     Updates (both stages): f <- (1 - alpha) f + alpha * softmin, likewise g (GeomLoss:
     alpha = 0.5). Stop rule (both stages): max(|df|, |dg|) < alpha * threshold between
@@ -231,7 +228,7 @@ def geomloss_multiscale(
             updates = lazy_updates(cost_matrix(x, y), cost_matrix(y, x), a_log, b_log)
             kept, support = n * m, None
 
-        if lift_only and support is None:
+        if support is None:
             # As GeomLoss when its clusters never exceed the blur: the lifted coarse solution is returned,
             # with no update on the points; converged is the coarse stage's.
             fine_iters, converged, last_change = 0, coarse_converged, coarse_change

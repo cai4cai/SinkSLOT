@@ -42,15 +42,16 @@ def test_online_matches_geomloss_ot_sinkhorn_loop():
     assert torch.allclose(g, ref.g_ab.view(-1), rtol=0, atol=1e-5)
 
 
-def test_without_truncation_it_reaches_the_online_fixed_point():
+def test_without_truncation_it_returns_the_lifted_coarse_solution():
+    """As GeomLoss: no truncation, no update on the points; the lifted coarse solution approximates the online one."""
     x, y, a, b = _problem()
     eps, tol = 0.05, 1e-6
-    fo, go, _, conv_o, cost_o, _ = geomloss_online(x, y, a, b, eps, 20000, threshold=tol)
-    fm, gm, _, conv_m, cost_m, _, info = geomloss_multiscale(x, y, a, b, eps, 20000, threshold=tol, truncate=None)
+    _, _, _, conv_o, cost_o, _ = geomloss_online(x, y, a, b, eps, 20000, threshold=tol)
+    fm, gm, iters, conv_m, cost_m, _, info = geomloss_multiscale(x, y, a, b, eps, 20000, threshold=tol, truncate=None)
     assert conv_o and conv_m
-    assert info["kept_fraction"] == 1.0
-    assert abs(cost_m - cost_o) <= 1e-4 * abs(cost_o)
-    assert _gap(fo, go, fm, gm) < 1e-3
+    assert info["kept_fraction"] == 1.0 and info["fine_iters"] == 0 and iters == info["coarse_iters"]
+    assert torch.isfinite(fm).all() and torch.isfinite(gm).all()
+    assert abs(cost_m - cost_o) <= 5e-2 * abs(cost_o)
 
 
 def test_truncation_keeps_a_fraction_of_the_pairs():
@@ -133,14 +134,3 @@ def test_multiscale_alpha_reaches_the_same_fixed_point():
     (f5, g5, it5, c5, cost5, *_), (f9, g9, it9, c9, cost9, *_) = out[0.5], out[0.9]
     assert c5 and c9
     assert abs(cost5 - cost9) < 1e-4 * abs(cost5)
-
-
-def test_lift_only_skips_the_fine_stage_when_nothing_is_truncated():
-    x, y, a, b = _problem(n=3000, d=2)
-    # truncate=None: no truncation, so lift_only returns the lifted coarse solution.
-    *_, info_full = geomloss_multiscale(x, y, a, b, 0.05, 50000, threshold=1e-5, truncate=None, alpha=0.9)
-    f, g, it, conv, cost, _, info = geomloss_multiscale(x, y, a, b, 0.05, 50000, threshold=1e-5, truncate=None,
-                                                        alpha=0.9, lift_only=True)
-    assert info["fine_iters"] == 0 and info_full["fine_iters"] > 0
-    assert it == info["coarse_iters"] and conv
-    assert torch.isfinite(f).all() and torch.isfinite(g).all()

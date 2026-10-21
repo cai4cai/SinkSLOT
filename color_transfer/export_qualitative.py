@@ -82,7 +82,7 @@ def _barycentric_sparse(phi, psi, rows, cols, S, cost, tc, eps, n):
 
 
 def solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L=100,
-                      sym_alpha=0.5, geomloss_truncate=5.0, geomloss_points_per_cluster=None, geomloss_lift_only=False):
+                      sym_alpha=0.5, geomloss_truncate=5.0, geomloss_points_per_cluster=None):
     n = sc.shape[0]
     if method == "sinkslot":
         from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
@@ -109,7 +109,7 @@ def solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, s
             kmeans_labels(z, max(1, round(len(z) / geomloss_points_per_cluster))) for z in (sc, tc))
         f, g, it, converged, cost_val, _, info = geomloss_multiscale(
             sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every, truncate=geomloss_truncate,
-            alpha=sym_alpha, labels=labels, lift_only=geomloss_lift_only)
+            alpha=sym_alpha, labels=labels)
         print(f"    geomloss_multiscale: iters={it} converged={converged} cost={cost_val:.6f} "
               f"kept={info['kept_fraction']:.3f}")
         return _barycentric_kept(f, g, sc, tc, sw, tw, eps, info["support"])
@@ -189,8 +189,6 @@ def parse_args():
     p.add_argument("--geomloss_truncate", type=float, default=5.0,
                    help="GeomLoss multiscale: kernel truncation margin, in units of eps (GeomLoss's default 5; "
                         "the paper uses 1).")
-    p.add_argument("--geomloss_lift_only", action="store_true",
-                   help="GeomLoss multiscale: lifted coarse solution when the kernel is not truncated.")
     p.add_argument("--geomloss_points_per_cluster", type=int, default=None,
                    help="GeomLoss multiscale: K-means with round(n / this) clusters per image (the paper: 250); "
                         "default GeomLoss's grid clustering.")
@@ -232,8 +230,7 @@ def main():
                 source_path, target_path, method, args.eps, args.max_iter, args.tol,
                 args.check_every, device, dtype, sinkslot_L=args.sinkslot_L, sym_alpha=args.sym_alpha,
                 geomloss_truncate=args.geomloss_truncate,
-                geomloss_points_per_cluster=args.geomloss_points_per_cluster,
-                geomloss_lift_only=args.geomloss_lift_only)
+                geomloss_points_per_cluster=args.geomloss_points_per_cluster)
             out_path = os.path.join(args.output_dir, f"{pair_stem}_{stem}.png")
             save_image(img_tensor, out_path)
             print(f"    Saved: {out_path}")

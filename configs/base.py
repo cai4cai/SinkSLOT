@@ -101,8 +101,6 @@ class BenchConfig:
         geomloss_clustering: GeomLoss multiscale clustering, "grid" (GeomLoss's default,
             d <= 3) or "kmeans" (round(n / geomloss_points_per_cluster) clusters per cloud, any d).
         geomloss_points_per_cluster: points per K-means cluster (Feydy et al.: about 250).
-        geomloss_lift_only: when the kernel is not truncated, return the lifted coarse solution
-            with no fine update (GeomLoss's behaviour).
         sym_alpha: damping of the symmetric solvers (FlashSinkhorn symmetric, GeomLoss
             online and multiscale, SinkSLOT-CUDA symmetric); 0.5 is the libraries' default.
         no_flash_symmetric: Skip FlashSinkhorn's symmetric backend.
@@ -187,7 +185,6 @@ class BenchConfig:
     sym_alpha: float = 0.5
     geomloss_clustering: str = "grid"
     geomloss_points_per_cluster: int = 250
-    geomloss_lift_only: bool = False
     no_flash_symmetric: bool = False
     no_flash_alternating: bool = False
     only: Optional[str] = None
