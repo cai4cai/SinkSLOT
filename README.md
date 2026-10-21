@@ -153,6 +153,24 @@ Tx, Ty = sparse_barycentric_map(P, x, y)
 # Ty[j]: barycentric image of target point y[j] in the source cloud
 ```
 
+### Differentiable Plan and Attention
+
+`sparse_transport_plan(..., differentiable=True)` returns a plan whose values carry gradients with respect to `x`, `y`, `a` and `b`, by implicit differentiation at the Sinkhorn fixed point (one MINRES solve in the backward, needs `torchsparsegradutils`). The sliced plan P^SOT and its support are held fixed, so the weight gradients are those with P^SOT fixed, defined up to an additive constant shared with opposite signs by `a` and `b`.
+
+For attention, use `sinkslot_attention`, which returns `P @ V` with gradients for `V` as well. Its backward memory is O(|S|); multiplying the sparse plan with `torch.sparse.mm` instead makes autograd build a dense `(n, m)` gradient.
+
+```python
+from sinkslot import sinkslot_attention
+
+q = torch.randn(4096, 64, device=device, requires_grad=True)
+k = torch.randn(4096, 64, device=device, requires_grad=True)
+v = torch.randn(4096, 64, device=device, requires_grad=True)
+out = sinkslot_attention(q, k, v, eps=0.5, L=64, stop_mode="potential", stop_tol=1e-6)  # (4096, 64)
+out.square().sum().backward()
+```
+
+Dot-product logits give the same plan: since ||x - y||^2 = ||x||^2 + ||y||^2 - 2<x, y> and the potentials absorb the row and column terms, the cost -<x, y>/sqrt(d) at temperature eps' and the squared Euclidean cost at `eps = 2 * sqrt(d) * eps'` have the same plan, and the same gradients at convergence. The sliced support depends only on the projections, not on the cost.
+
 ## API Reference
 
 ### SamplesLoss

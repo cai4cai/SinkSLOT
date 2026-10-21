@@ -730,7 +730,7 @@ def sparse_transport_plan(x: Float[torch.Tensor, "n d"], y: Float[torch.Tensor, 
                            n_iters=200, stop_mode="fixed", stop_max_iter=20000,
                            stop_tol=1e-6, stop_check_every=5, backend="auto",
                            variant="alternating", alpha=0.5, differentiable=False,
-                           adjoint_tol=1e-6, adjoint_max_iter=1000) -> torch.Tensor:
+                           adjoint_tol=1e-5, adjoint_max_iter=1000) -> torch.Tensor:
     """SinkSLOT's transport plan as a sparse `(n, m)` COO tensor.
 
     Wraps `sinkslot_solve`, then materialises its solved potentials into
@@ -786,3 +786,37 @@ def sparse_transport_plan(x: Float[torch.Tensor, "n d"], y: Float[torch.Tensor, 
     return torch.sparse_coo_tensor(
         torch.stack([rows, cols]), plan_vals, size=(n, m)
     ).coalesce()
+
+
+@jaxtyped(typechecker=beartype)
+def sinkslot_attention(x: Float[torch.Tensor, "n d"], y: Float[torch.Tensor, "m d"],
+                       V: Float[torch.Tensor, "m k"],
+                       a: Float[torch.Tensor, "n"] | None = None,
+                       b: Float[torch.Tensor, "m"] | None = None, *,
+                       eps=0.05, L=64, seed=0,
+                       n_iters=200, stop_mode="fixed", stop_max_iter=20000,
+                       stop_tol=1e-6, stop_check_every=5, backend="auto",
+                       variant="alternating", alpha=0.5,
+                       adjoint_tol=1e-5, adjoint_max_iter=1000) -> Float[torch.Tensor, "n k"]:
+    """P @ V for SinkSLOT's plan P between x and y, differentiable with respect to x, y, a, b and V.
+
+    Same plan and arguments as `sparse_transport_plan(..., differentiable=True)`,
+    but the backward never forms dL/dP: it computes the adjoint right-hand side
+    from dL/dO, O and V, and dL/dP on the support from <dL/dO_i, V_j>, so its
+    memory is O(|S|) rather than the dense (n, m) gradient that
+    `torch.sparse.mm`'s backward builds for a sparse operand.
+    """
+    from .plan_grad import plan_matmul
+
+    n, m = x.shape[0], y.shape[0]
+    if a is None:
+        a = torch.full((n,), 1.0 / n, device=x.device, dtype=x.dtype)
+    if b is None:
+        b = torch.full((m,), 1.0 / m, device=y.device, dtype=y.dtype)
+    with torch.no_grad():
+        phi, psi, rows, cols, S, *_ = sinkslot_solve(
+            x.detach(), y.detach(), a.detach(), b.detach(), eps, L, seed, n_iters,
+            stop_mode=stop_mode, stop_max_iter=stop_max_iter, stop_tol=stop_tol,
+            stop_check_every=stop_check_every, backend=backend, variant=variant, alpha=alpha)
+    log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
+    return plan_matmul(x, y, a, b, V, rows, cols, log_S, phi, psi, eps, adjoint_tol, adjoint_max_iter)

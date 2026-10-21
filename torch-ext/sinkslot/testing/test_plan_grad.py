@@ -131,3 +131,39 @@ def test_cost_gradient_has_zero_row_and_column_sums():
     scale = (p * G.abs()).sum() / EPS
     assert torch.zeros(len(x), dtype=DT).index_add_(0, rows, gamma).abs().max() < 1e-10 * scale
     assert torch.zeros(len(y), dtype=DT).index_add_(0, cols, gamma).abs().max() < 1e-10 * scale
+
+
+def test_attention_matches_plan_values():
+    """sinkslot_attention's P @ V and gradients equal those of the plan values followed by P @ V."""
+    from sinkslot import sinkslot_attention
+
+    x, y, a, b, *_ = _problem(n=30, m=35, d=2)
+    g = torch.Generator().manual_seed(6)
+    V = torch.randn(len(y), 4, generator=g, dtype=DT)
+    T = torch.randn(len(x), 4, generator=g, dtype=DT)
+    kw = dict(eps=EPS, L=8, stop_mode="potential", stop_tol=1e-13, stop_max_iter=10**5, adjoint_tol=1e-12)
+
+    leaves = [t.clone().requires_grad_() for t in (x, y, a, b, V)]
+    O = sinkslot_attention(leaves[0], leaves[1], leaves[4], leaves[2], leaves[3], **kw)
+    (O - T).square().sum().backward()
+
+    ref = [t.clone().requires_grad_() for t in (x, y, a, b, V)]
+    P = sparse_transport_plan(ref[0], ref[1], ref[2], ref[3], differentiable=True, **kw)
+    r, c = P.indices()
+    O_ref = torch.zeros(len(x), 4, dtype=DT).index_add_(0, r, P.values()[:, None] * ref[4][c])
+    (O_ref - T).square().sum().backward()
+
+    torch.testing.assert_close(O.detach(), O_ref.detach())
+    for got, want in zip(leaves, ref):
+        torch.testing.assert_close(got.grad, want.grad, rtol=1e-7, atol=1e-10)
+
+
+def test_attention_chunking():
+    from sinkslot.plan_grad import _plan_matmul, _sampled_dot
+
+    g = torch.Generator().manual_seed(7)
+    rows, cols = torch.randint(0, 9, (50,), generator=g), torch.randint(0, 11, (50,), generator=g)
+    p, A, B = torch.rand(50, generator=g, dtype=DT), torch.randn(9, 3, generator=g, dtype=DT), \
+        torch.randn(11, 3, generator=g, dtype=DT)
+    torch.testing.assert_close(_plan_matmul(p, rows, cols, 9, B, 7), _plan_matmul(p, rows, cols, 9, B, 2**20))
+    torch.testing.assert_close(_sampled_dot(A, B, rows, cols, 7), (A[rows] * B[cols]).sum(1))
