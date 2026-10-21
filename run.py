@@ -103,10 +103,9 @@ def build_command(
     if cfg.no_geomloss_multiscale:
         cmd.append("--no-geomloss-multiscale")
     elif method in (None, "geomloss_multiscale"):
-        k = slices if method == "geomloss_multiscale" and slices is not None else list(cfg.geomloss_n_clusters)[0]
         cmd += ["--geomloss-truncate", str(cfg.geomloss_truncate),
                 "--geomloss-clustering", cfg.geomloss_clustering,
-                "--geomloss-n-clusters", str(k)]
+                "--geomloss-points-per-cluster", str(cfg.geomloss_points_per_cluster)]
     if cfg.no_flash_symmetric:
         cmd.append("--no-flash-symmetric")
     if cfg.no_flash_alternating:
@@ -255,9 +254,7 @@ def _units(cfg: BenchConfig) -> Iterator[Unit]:
                             and cfg.geomloss_clustering == "grid"):
                         continue  # grid clustering is d <= 3 only
                     tf32_values = cfg.flash_tf32 if method in FLASH_METHODS else [cfg.tf32]
-                    if method == "geomloss_multiscale" and cfg.geomloss_clustering == "kmeans":
-                        param_values = list(cfg.geomloss_n_clusters)  # K, like L
-                    elif method in SPARSINK_METHODS:
+                    if method in SPARSINK_METHODS:
                         # s expands these two only, like L for the sliced methods.
                         param_values: List[Optional[int]] = list(cfg.sparsink_s)
                     elif method in SLICED_METHODS:
@@ -282,8 +279,7 @@ def _unit_tag(unit: Unit) -> str:
     if unit.method is not None:
         tag += f" {unit.method} n={unit.n} d={unit.d}"
     if unit.slices is not None:
-        tag += (f" s={unit.slices}" if unit.method in SPARSINK_METHODS else
-                f" K={unit.slices}" if unit.method == "geomloss_multiscale" else f" L={unit.slices}")
+        tag += (f" s={unit.slices}" if unit.method in SPARSINK_METHODS else f" L={unit.slices}")
     return tag + f" tf32={unit.tf32}"
 
 
@@ -333,7 +329,7 @@ def _load_done(paths: Iterable[Path]) -> _DoneIndex:
 
 
 def _unit_done_key(unit: Unit) -> _DoneKey:
-    L = unit.slices if unit.method in SLICED_METHODS or unit.method == "geomloss_multiscale" else None
+    L = unit.slices if unit.method in SLICED_METHODS else None
     s = unit.slices if unit.method in SPARSINK_METHODS else None
     return (
         unit.dataset, bool(unit.tf32), CSV_METHOD.get(unit.method, unit.method),

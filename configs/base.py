@@ -5,7 +5,7 @@ Edit ``CONFIG`` below to change what ``run.py`` executes, then
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 @dataclass
@@ -99,8 +99,8 @@ class BenchConfig:
         geomloss_truncate: GeomLoss multiscale kernel truncation margin, in units of
             eps (GeomLoss's default 5).
         geomloss_clustering: GeomLoss multiscale clustering, "grid" (GeomLoss's default,
-            d <= 3) or "kmeans" (geomloss_n_clusters per cloud, any d).
-        geomloss_n_clusters: clusters per cloud for "kmeans", swept like L (one unit per value).
+            d <= 3) or "kmeans" (round(n / geomloss_points_per_cluster) clusters per cloud, any d).
+        geomloss_points_per_cluster: points per K-means cluster (Feydy et al.: about 250).
         sym_alpha: damping of the symmetric solvers (FlashSinkhorn symmetric, GeomLoss
             online and multiscale, SinkSLOT-CUDA symmetric); 0.5 is the libraries' default.
         no_flash_symmetric: Skip FlashSinkhorn's symmetric backend.
@@ -184,7 +184,7 @@ class BenchConfig:
     geomloss_truncate: float = 5.0
     sym_alpha: float = 0.5
     geomloss_clustering: str = "grid"
-    geomloss_n_clusters: Sequence[int] = (2000,)
+    geomloss_points_per_cluster: int = 250
     no_flash_symmetric: bool = False
     no_flash_alternating: bool = False
     only: Optional[str] = None

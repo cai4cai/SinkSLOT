@@ -118,7 +118,7 @@ def build_config(median_c: Dict[Tuple[str, int], Optional[float]] = MEDIAN_C) ->
         sym_alpha=0.9,
         geomloss_truncate=1.0,
         geomloss_clustering="kmeans",
-        geomloss_n_clusters=(250, 1000, 2500),
+        geomloss_points_per_cluster=250,
         no_flash_symmetric=False,
         no_flash_alternating=False,
 

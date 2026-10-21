@@ -14,7 +14,8 @@ cost gap at N=10,000 (scripts/speedup_calibrate_eps.py), so every point sits at
 roughly the same accuracy. The stop rule is the speedup benchmark's:
 max(|df|, |dg|) < 1e-5 * median(C) between checkpoints (alpha times that for the
 damped methods), check_every=5, max_iter=500000 (SCAL_MAX_ITER overrides). GeomLoss
-multiscale clusters with K-means (K=250, truncate 1); its grid is limited to d <= 3. No exact-OT
+multiscale clusters with K-means (about 250 points per cluster, truncate 1); its grid is
+limited to d <= 3. No exact-OT
 reference (infeasible at N=50,000), so cost_gap_pct is N/A; runtime, memory and
 the plan cost <C, P> are the outputs.
 
@@ -112,7 +113,7 @@ def _config(n: int, d: int) -> BenchConfig:
         no_geomloss_multiscale=False,
         geomloss_truncate=1.0,
         geomloss_clustering="kmeans",
-        geomloss_n_clusters=(250,),
+        geomloss_points_per_cluster=250,
         sym_alpha=0.9,
         no_flash_symmetric=FIGURE_ONLY,
         no_flash_alternating=False,

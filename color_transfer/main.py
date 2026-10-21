@@ -334,11 +334,14 @@ def geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every):
     return _dense_result("GeomLoss (online)", f, g, dt, peak, it, converged, dual_cost, sc, tc, sw, tw, eps)
 
 
-def geomloss_multiscale_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, truncate=5.0, n_clusters=None):
-    # Grid clustering with GeomLoss's default cluster_scale, or n_clusters K-means clusters per image
-    # (reference_solvers.kmeans_labels, inside the timed solve); nnz = point pairs of the fine stage.
+def geomloss_multiscale_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, truncate=5.0, points_per_cluster=None):
+    # Grid clustering with GeomLoss's default cluster_scale, or K-means with round(n / points_per_cluster)
+    # clusters per image (reference_solvers.kmeans_labels, inside the timed solve); nnz = point pairs of
+    # the fine stage.
     def labels():
-        return None if n_clusters is None else (kmeans_labels(sc, n_clusters), kmeans_labels(tc, n_clusters))
+        if points_per_cluster is None:
+            return None
+        return tuple(kmeans_labels(z, max(1, round(len(z) / points_per_cluster))) for z in (sc, tc))
 
     def solve():
         return geomloss_multiscale(sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every,
@@ -351,7 +354,7 @@ def geomloss_multiscale_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, tru
                         support=info["support"])
     row.update(nnz=int(round(info["kept_fraction"] * len(sc) * len(tc))), kept_fraction=info["kept_fraction"],
                coarse_iters=info["coarse_iters"], fine_iters=info["fine_iters"], clusters=list(info["clusters"]),
-               truncate=truncate, clustering="grid" if n_clusters is None else f"kmeans{n_clusters}")
+               truncate=truncate, clustering="grid" if points_per_cluster is None else f"kmeans, {points_per_cluster} points per cluster")
     return row
 
 
@@ -360,7 +363,7 @@ _METHOD_KEYS = ["sinkslot", "sinkslot_sym", "flashsinkhorn_alt", "flashsinkhorn_
 
 
 def run_pair(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, methods=_METHOD_KEYS, geomloss_truncate=5.0,
-             geomloss_n_clusters=None):
+             geomloss_points_per_cluster=None):
     rows = []
     if "sinkslot" in methods:
         rows.append(sinkslot_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L))
@@ -382,7 +385,7 @@ def run_pair(sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L, method
         rows.append(geomloss_row(sc, tc, sw, tw, eps, max_iter, tol, check_every))
     if "geomloss_multiscale" in methods:
         rows.append(geomloss_multiscale_row(sc, tc, sw, tw, eps, max_iter, tol, check_every, geomloss_truncate,
-                                            geomloss_n_clusters))
+                                            geomloss_points_per_cluster))
     return rows
 
 
@@ -453,8 +456,9 @@ def parse_args():
     p.add_argument("--sym_alpha", type=float, default=0.5,
                    help="Damping of the symmetric solvers (FlashSinkhorn symmetric, GeomLoss, SinkSLOT symmetric); "
                         "0.5 is the libraries' default, 0.9 the paper's.")
-    p.add_argument("--geomloss_n_clusters", type=int, default=None,
-                   help="GeomLoss multiscale: K-means clusters per image (default: GeomLoss's grid clustering).")
+    p.add_argument("--geomloss_points_per_cluster", type=int, default=None,
+                   help="GeomLoss multiscale: K-means with round(n / this) clusters per image (the paper: 250, "
+                        "as Feydy et al.); default GeomLoss's grid clustering.")
     p.add_argument("--geomloss_truncate", type=float, default=5.0,
                    help="GeomLoss multiscale: kernel truncation margin, in units of eps (GeomLoss's default 5; "
                         "the paper uses 1).")
@@ -522,7 +526,7 @@ def main():
         print(f"Pair: {os.path.basename(paths[i])} -> {os.path.basename(paths[j])}  eps={args.eps:g}")
         rows = run_pair(sc, tc, sw, tw, args.eps, args.max_iter, args.tol, args.check_every, args.sinkslot_L,
                           methods=args.methods, geomloss_truncate=args.geomloss_truncate,
-                          geomloss_n_clusters=args.geomloss_n_clusters)
+                          geomloss_points_per_cluster=args.geomloss_points_per_cluster)
         print_table(rows)
         out_path = os.path.join(args.output_dir, "convergence_table.json")
         with open(out_path, "w") as f:
@@ -568,7 +572,7 @@ def main():
         tc, tw = pixels_and_weights(paths[j], device, dtype)
         rows = run_pair(sc, tc, sw, tw, args.eps, args.max_iter, args.tol, args.check_every, args.sinkslot_L,
                           methods=args.methods, geomloss_truncate=args.geomloss_truncate,
-                          geomloss_n_clusters=args.geomloss_n_clusters)
+                          geomloss_points_per_cluster=args.geomloss_points_per_cluster)
         results.append({"pair_idx": [i, j],
                           "pair": [os.path.basename(paths[i]), os.path.basename(paths[j])], "rows": rows})
 
