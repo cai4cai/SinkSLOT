@@ -261,10 +261,8 @@ part of the repository.
 | Convergence and memory tables, Pareto figure | the same runs as Table 1 |
 | Memory figure | the same runs as Figure 2 (`configs/scalability_figure2.py`) |
 
-`configs/scalability.py`, `configs/speedup_cap5e4.py`, `configs/speedup_gauss3_long.py`,
-`configs/speedup_tf32.py` and `configs/speedup_rounded.py` are not needed to reproduce the paper:
-the first is the base of `configs/scalability_figure2.py`, the next three reran subsets of an earlier
-version of `configs/speedup.py` at higher iteration caps, and the last computes rounded-plan cost gaps.
+`configs/scalability.py` and `configs/speedup_rounded.py` are not needed to reproduce the paper:
+the first is the base of `configs/scalability_figure2.py`, and the second computes rounded-plan cost gaps.
 
 ```bash
 python scripts/speedup_prepare.py                                          # once: medians of the cost, caches
