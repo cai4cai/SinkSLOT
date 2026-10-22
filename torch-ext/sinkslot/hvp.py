@@ -152,10 +152,10 @@ def hvp_x_sqeuclid(X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
     Unlike `sinkslot_solve`, the sliced-support builder here stays
     `_ot_1d_coo_batched_cuda` for every backend, not device-switched to the
     naive builder on CPU: it's plain torch underneath (no Triton, no `.cuda()`
-    calls), so it runs anywhere, and its internal fp64 cumsum is exactly the
-    extra precision the existing validation below relies on -- switching to
-    the naive builder would risk a genuinely different support (see its own
-    docstring), not just different rounding. So `backend="torch"` changes
+    calls), so it runs anywhere, and keeping one builder keeps the support the
+    existing validation below relies on -- switching to the naive builder could
+    give a slightly different support (see its own docstring), not just
+    different rounding. So `backend="torch"` changes
     only the solve stage's numerics, not the support.
 
     Accuracy caveat: the ~2% figure above and the `tau2=3e-7` default were
