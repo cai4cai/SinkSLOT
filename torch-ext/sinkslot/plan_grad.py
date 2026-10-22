@@ -60,11 +60,19 @@ def adjoint(p, grad_vals, rows, cols, n, m, eps, tol, max_iter, w=None):
     """(alpha, beta, Gamma) for plan values p and upstream gradient grad_vals on (rows, cols).
 
     Solves H (alpha, beta) = w, w = (W 1, W^T 1) with W = grad_vals * p unless
-    given, by MINRES with the Jacobi preconditioner diag(P 1, P^T 1)^-1, and
+    given, through its Jacobi-scaled Schur complement on the smaller side, and
     returns Gamma = dL/dC = -(1/eps) p (grad_vals - alpha_i - beta_j).
-    MINRES stops on its relative update size, so the solve is refined on the
-    remaining residual up to 3 times until ||H z - w|| / ||w|| <= `tol`; it
-    warns if that is not reached (float32 bottoms out near 1e-6).
+
+    With r = P 1, c = P^T 1 and Pt = diag(r)^-1/2 P diag(c)^-1/2, for m <= n
+    MINRES solves (I - Pt^T Pt) beta' = c^-1/2 * w_t - Pt^T (r^-1/2 * w_s), then
+    alpha' = r^-1/2 * w_s - Pt beta', alpha = r^-1/2 * alpha', beta = c^-1/2 * beta'
+    (sides swapped for n < m). The operator's kernel, the gauge, is u = c^1/2:
+    the right-hand side is projected orthogonally to u and u u^T / ||u||^2 is
+    added to the operator, which makes it positive definite with condition
+    number 1 / (1 - sigma_2^2). MINRES stops on its relative update size, so the
+    solve is refined on the remaining residual up to 3 times until
+    ||H z - w|| / ||w|| <= `tol`; it warns if that is not reached (float32
+    bottoms out near 1e-6).
     """
     try:
         from torchsparsegradutils.utils import minres, MINRESSettings
@@ -85,16 +93,44 @@ def adjoint(p, grad_vals, rows, cols, n, m, eps, tol, max_iter, w=None):
         return torch.cat([col(r, z) * u + _row_sum(col(p, z) * v[cols], rows, n),
                           _row_sum(col(p, z) * u[rows], cols, m) + col(c, z) * v])
 
-    diag = torch.cat([r, c]).clamp_min(torch.finfo(p.dtype).tiny)
-    w_norm = w.norm().clamp_min(torch.finfo(w.dtype).tiny)
+    tiny = torch.finfo(p.dtype).tiny
+    ds, dt = r.clamp_min(tiny).rsqrt(), c.clamp_min(tiny).rsqrt()
+    pt = p * ds[rows] * dt[cols]  # Jacobi-scaled plan values
+    if m <= n:  # unknowns on the target side
+        s_idx, b_idx, d_small, d_big, n_small, n_big = cols, rows, dt, ds, m, n
+    else:
+        s_idx, b_idx, d_small, d_big, n_small, n_big = rows, cols, ds, dt, n, m
+    u = d_small.reciprocal()  # kernel: (P^T 1)^1/2 or (P 1)^1/2
+    u = u / u.norm()
+
+    def to_big(x):  # Pt x, x on the small side
+        return _row_sum(col(pt, x) * x[s_idx], b_idx, n_big)
+
+    def to_small(y):  # Pt^T y, y on the big side
+        return _row_sum(col(pt, y) * y[b_idx], s_idx, n_small)
+
+    def schur(x):  # (I - Pt^T Pt + u u^T) x
+        return x - to_small(to_big(x)) + col(u, x) * (col(u, x) * x).sum(0, keepdim=True)
+
+    def solve(rhs):  # H z = rhs through the Schur complement
+        w_s, w_t = rhs[:n], rhs[n:]
+        w_small, w_big = (w_t, w_s) if m <= n else (w_s, w_t)
+        w_small, w_big = d_small * w_small, d_big * w_big
+        b = w_small - to_small(w_big)
+        b = b - u * (u @ b)
+        x_small = minres(schur, b, max_iter=max_iter, settings=MINRESSettings(minres_tolerance=tol))
+        x_big = w_big - to_big(x_small)
+        x_small, x_big = d_small * x_small, d_big * x_big
+        return torch.cat([x_big, x_small]) if m <= n else torch.cat([x_small, x_big])
+
+    w_norm = w.norm().clamp_min(tiny)
     z = torch.zeros_like(w)
     for _ in range(4):  # MINRES, then up to 3 refinements on the remaining residual
         res = w - H(z)
         residual = float(res.norm() / w_norm)
         if residual <= tol:
             break
-        z = z + minres(H, res, preconditioner=lambda t: t / col(diag, t), max_iter=max_iter,
-                       settings=MINRESSettings(minres_tolerance=tol))
+        z = z + solve(res)
     residual = float((w - H(z)).norm() / w_norm)
     if residual > tol:
         warnings.warn(f"sparse_transport_plan backward: adjoint relative residual {residual:.2e} "

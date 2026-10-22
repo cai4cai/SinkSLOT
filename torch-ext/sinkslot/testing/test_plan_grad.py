@@ -45,8 +45,10 @@ def _frozen_plan(rows, cols, log_S):
     return vals
 
 
-def test_gradcheck_points():
-    x, y, a, b, rows, cols, log_S = _problem()
+@pytest.mark.parametrize("n, m", [(6, 7), (8, 5)])
+def test_gradcheck_points(n, m):
+    """Both sides of the Schur complement: unknowns on the targets (m <= n) and on the sources."""
+    x, y, a, b, rows, cols, log_S = _problem(n=n, m=m)
     vals = _frozen_plan(rows, cols, log_S)
     xg, yg = x.clone().requires_grad_(), y.clone().requires_grad_()
     assert torch.autograd.gradcheck(lambda X, Y: vals(X, Y, a, b), (xg, yg), atol=1e-6, rtol=1e-5)
