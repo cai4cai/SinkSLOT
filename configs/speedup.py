@@ -20,9 +20,7 @@ multiscale with K-means clustering (about 250 points per cluster, truncate 1);
 Spar-Sink (one kernel draw) over s = k * s0(n), s0(n) = 1e-3 * n * ln(n)^4,
 k in {1, 2, 4, ..., 128}. Every other method runs in strict FP32.
 
-Each run also records the cost gap of its plan rounded onto the transport
-polytope (rounded_cost_gap_pct), outside the timed region. SPEEDUP_OUTPUT_DIR
-overrides the output directory.
+SPEEDUP_OUTPUT_DIR overrides the output directory.
 
 Run with:
 
