@@ -2,7 +2,7 @@
 N-sweep at d = 64 (N in N_SWEEP) and the d-sweep at N = 10,000 (d in D_SWEEP), 5 seeds.
 
 Paper: main-text Figure 2 (runtime) and the appendix memory figure (peak memory of the same runs).
-GeomLoss online is run but not plotted.
+GeomLoss online is run but not plotted. FIGURE2_OUTPUT_DIR overrides the output directory.
 
 Methods and parameters, as in the figure:
   SinkSLOT-CUDA alternating at L = 0.1 N and L = 1000; SROT at L = 0.1 N; Spar-Sink at k = 512
@@ -43,7 +43,7 @@ def _figure_config(n: int, d: int, dsweep: bool) -> BenchConfig:
         no_geomloss=False, no_geomloss_multiscale=False, geomloss_clustering="kmeans",
         geomloss_points_per_cluster=250, geomloss_truncate=1.0,
         no_rmae_check=not dsweep,
-        output_dir=os.environ.get("SCAL_OUTPUT_DIR") or "output/scalability_figure2")
+        output_dir=os.environ.get("FIGURE2_OUTPUT_DIR") or "output/scalability_figure2")
 
 
 def build_configs() -> List[BenchConfig]:

@@ -3,9 +3,8 @@
 Not used by the paper directly: its scalability figure is configs/scalability_figure2.py, which
 builds on the grids and settings defined here.
 
-Experiment 1: d=3,  N in N_SWEEP.
-Experiment 2: d=64, N in N_SWEEP.
-Experiment 3: N=10,000, d in D_SWEEP.
+Experiment 1: d=64, N in N_SWEEP.
+Experiment 2: N=10,000, d in D_SWEEP.
 
 Every method of configs/speedup.py runs at each point, 5 seeds: FlashSinkhorn
 alternating and symmetric (fp32 and TF32), GeomLoss online, SROT, SinkSLOT-CUDA
@@ -17,8 +16,8 @@ cost gap at N=10,000 (scripts/speedup_calibrate_eps.py), so every point sits at
 roughly the same accuracy. The stop rule is the speedup benchmark's:
 max(|df|, |dg|) < 1e-5 * median(C) between checkpoints (alpha times that for the
 damped methods), check_every=5, max_iter=500000 (SCAL_MAX_ITER overrides). GeomLoss
-multiscale clusters with K-means (about 250 points per cluster, truncate 1); its grid is
-limited to d <= 3. No exact-OT
+multiscale clusters with K-means (about 250 points per cluster, truncate 1), since its
+default grid clustering is limited to d <= 3. No exact-OT
 reference (infeasible at N=50,000), so cost_gap_pct is N/A; runtime, memory and
 the plan cost <C, P> are the outputs.
 
@@ -55,7 +54,6 @@ FIGURE_ONLY = os.environ.get("SCAL_FIGURE_ONLY", "") == "1"
 # d -> (median(C) at N=10,000 seed 0, eps at a ~5% cost gap), from
 # scripts/speedup_calibrate_eps.py.
 CALIBRATION: Dict[int, Tuple[float, float]] = {
-    3: (4.734315872192383, 0.005918),
     4: (6.690551280975342, 0.01952),
     8: (14.674134254455566, 0.1599),
     16: (30.619638442993164, 0.5804),
@@ -131,10 +129,10 @@ def _config(n: int, d: int) -> BenchConfig:
 
 
 def build_configs() -> List[BenchConfig]:
-    missing = sorted({3, 64, *D_SWEEP} - set(CALIBRATION))
+    missing = sorted({64, *D_SWEEP} - set(CALIBRATION))
     if missing:
         raise ValueError(f"configs/scalability.py: CALIBRATION has no entry for d={missing}.")
-    points = [(n, d) for d in (3, 64) for n in N_SWEEP]
+    points = [(n, 64) for n in N_SWEEP]
     points += [(N_DSWEEP, d) for d in D_SWEEP if (N_DSWEEP, d) not in points]
     if PART == "small":
         points = [(n, d) for n, d in points if n <= 20000]

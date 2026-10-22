@@ -1,5 +1,7 @@
 """Reference (baseline) solvers ported from their authors' code, each with the
-shared stop modes added in: GeomLoss online, SROT and Spar-Sink.
+shared stop modes added in: GeomLoss online and multiscale (with Feydy et al.'s
+K-means, kmeans_labels, and cluster size, cluster_std), FlashSinkhorn symmetric
+at a general damping (flash_symmetric_alpha), SROT and Spar-Sink.
 
 Stop modes (StopCfg.mode), shared across every benchmarked method:
   "fixed"      run exactly n_iters.
@@ -16,9 +18,8 @@ cost = <a,f> + <b,g> at convergence, free from the dual potentials already
 in hand -- not expected to match other methods' own cost bit-for-bit
 (different reference measures/update schemes), just a sanity signal.
 
-Post-hoc plan diagnostics (marginal violation, true cost, rounding to the
-transport polytope) live in plan_diagnostics.py instead: measurement, not
-a solver.
+Post-hoc plan diagnostics (marginal violation, true cost) live in
+plan_diagnostics.py instead: measurement, not a solver.
 """
 
 from typing import Optional, Tuple
@@ -99,7 +100,8 @@ def geomloss_multiscale(
     stop rule of geomloss_online.
 
       1. clusterize: both clouds are binned on a grid of cell size cluster_scale
-         (pykeops grid_cluster, d <= 3), with cluster weights summed and centroids
+         (pykeops grid_cluster, d <= 3), or grouped by the given labels (any d),
+         with cluster weights summed and centroids
          at the cells' centres of mass; the points are sorted so each cluster is
          contiguous.
       2. coarse stage: damped symmetric updates on the centroids.
@@ -114,7 +116,8 @@ def geomloss_multiscale(
     kernel is truncated when cluster_scale**2 > eps / 2 (GeomLoss's condition
     for its cost |x-y|**2 / 2). Otherwise, as GeomLoss when its schedule never
     reaches the cluster scale, the coarse solution lifted to the points is
-    returned with no update on the points (it is then not converged on the points).
+    returned with no update on the points; converged then refers to the coarse
+    stage, and the lifted plan need not satisfy the marginals on the points.
 
     geomloss.ot has no multiscale solver: the clustering, the kernel truncation and
     every softmin (coarse updates, lift, fine updates) are GeomLoss's multiscale code
@@ -125,7 +128,8 @@ def geomloss_multiscale(
 
     Parameters besides eps: cluster_scale (default GeomLoss's
     diameter / (sqrt(d) * 2000**(1/d)), about 2000 cells), truncate (default
-    GeomLoss's 5; None: no truncation, hence no fine stage) and labels: (label_x, label_y), integer
+    GeomLoss's 5; None keeps every pair, so the fine stage runs on the full kernel, as in
+    GeomLoss) and labels: (label_x, label_y), integer
     cluster labels of the points (e.g. K-means, as in Feydy et al. 2019), used
     instead of the grid, as sinkhorn_multiscale's labels_x / labels_y. With labels,
     any d is allowed and the default cluster_scale is Feydy et al.'s cluster size,
@@ -209,7 +213,8 @@ def geomloss_multiscale(
         f_ba = softmin(eps, (x, y_c, None, None, None), b_log_c + g_c / eps)
         g_ab = softmin(eps, (y, x_c, None, None, None), a_log_c + f_c / eps)
 
-        if truncate is not None and cluster_scale ** 2 > eps / 2:
+        jump = cluster_scale ** 2 > eps / 2
+        if jump and truncate is not None:
             # Legacy kernel truncation and block-sparse softmin (KeOps ranges).
             (_, _, _, _, ranges_xy), (_, _, _, _, ranges_yx) = kernel_truncation(
                 (x_c, y_c, ranges_x, ranges_y, None), (y_c, x_c, ranges_y, ranges_x, None),
@@ -227,11 +232,13 @@ def geomloss_multiscale(
             label_y[perm_y] = torch.repeat_interleave(torch.arange(len(y_c), device=sc.device), size_y.long())
             support = (label_x, label_y, keep)
         else:
+            # truncate=None: every pair is kept, as kernel_truncation does without a margin.
+            updates = updates_between(x, y, a_log, b_log)
             kept, support = n * m, None
 
-        if support is None:
+        if not jump:
             # As GeomLoss when its clusters never exceed the blur: the lifted coarse solution is returned,
-            # with no update on the points; converged is the coarse stage's.
+            # with no update on the points; converged refers to the coarse stage.
             fine_iters, converged, last_change = 0, coarse_converged, coarse_change
         else:
             f_ba, g_ab, fine_iters, converged, last_change = damped_loop(
@@ -280,8 +287,9 @@ def flash_symmetric_alpha(x, y, a, b, alpha, *, eps, n_iters, allow_tf32, thresh
     epsilon scaling or last extrapolation) with the damping of its symmetric step (0.5 in the
     library) set to alpha: same kernel (flashsinkhorn_symmetric_step), initial alpha=1 step and
     stop check (max(|df|, |dg|) < threshold between checkpoints, the first checkpoint only
-    stores). Returns (f, g, n_iters_used), n_iters_used counting the initial step as the
-    library does."""
+    stores). Callers pass threshold = alpha * tol, the damped stop rule; the GeomLoss solvers
+    instead apply alpha to their threshold themselves. Returns (f, g, n_iters_used),
+    n_iters_used counting the initial step as the library does."""
     from flash_sinkhorn.kernels._common import log_weights
     from flash_sinkhorn.kernels.sinkhorn_flashstyle_sqeuclid import flashsinkhorn_symmetric_step
 

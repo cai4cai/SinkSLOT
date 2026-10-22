@@ -1124,10 +1124,9 @@ def bench_geomloss_multiscale(
 ) -> TimingResult:
     """GeomLoss multiscale (KeOps, block-sparse) via reference_solvers.geomloss_multiscale:
     the two-scale scheme of GeomLoss's sinkhorn_multiscale at a fixed eps, with
-    GeomLoss's default cluster_scale, kernel truncation margin truncate (in units of
-    eps; GeomLoss's default 5), and the potential-change check
-    in both stages. d <= 3 only. Damping and stop threshold as bench_geomloss_online.
-    clustering: "grid" (GeomLoss's default) or "kmeans" (round(n / points_per_cluster) K-means
+    kernel truncation margin truncate (in units of eps; GeomLoss's default 5) and the
+    potential-change check in both stages. Damping and stop threshold as bench_geomloss_online.
+    clustering: "grid" (GeomLoss's default, with its default cluster_scale; d <= 3) or "kmeans" (round(n / points_per_cluster) K-means
     clusters per cloud, about 250 points each as in Feydy et al. 2019, and their cluster size as
     cluster_scale; any d). The timed solve includes the clustering. nnz is the number of point pairs the
     fine stage sums over (every pair when the kernel is not truncated); the plan
