@@ -5,11 +5,12 @@ Every test here except one is deliberately unmarked -- no
 because the whole point of this module is that it runs on a plain CPU machine
 with no Triton installed, which every other test file in this directory
 assumes it doesn't have to handle. The one exception,
-`test_sinkslot_solve_all_three_settings_agree_on_cuda`, genuinely needs a GPU:
-it's specifically checking the torch backend's numerics ON a CUDA tensor
-(distinct from Triton, and distinct from the torch backend on a CPU tensor,
-which the rest of this file already covers) -- there's no way to attempt that
-without one.
+`test_sinkslot_solve_all_three_settings_agree_on_gpu`, genuinely needs a GPU:
+it's specifically checking the torch backend's numerics ON a GPU tensor
+(distinct from the fused kernels, and distinct from the torch backend on a
+CPU tensor, which the rest of this file already covers) -- there's no way to
+attempt that without one. It runs once per fused backend (Triton on CUDA,
+Metal on MPS) via the `fused` fixture in conftest.py.
 """
 
 from dataclasses import dataclass
@@ -48,10 +49,10 @@ def _problem(n=300, m=250, d=3, seed=0):
 
 def test_no_triton_import_required():
     """Importing and using sinkslot must not require Triton to be installed."""
-    from sinkslot import solver
+    from sinkslot import _backends
     # Whatever the environment's Triton availability actually is, the module
     # must have imported successfully to get this far -- that's the assertion.
-    assert hasattr(solver, "_HAS_TRITON")
+    assert hasattr(_backends, "_HAS_TRITON")
 
 
 def test_sparse_sqeuclidean_cost_matches_dense_on_cpu():
@@ -235,7 +236,7 @@ def test_sparse_barycentric_map_sparse_tensor_form_matches_explicit_coo():
 
 def test_sinkslot_solve_backend_override_on_cpu():
     """backend='torch' and backend='auto' must agree on CPU (both pick torch),
-    backend='triton' must raise cleanly (no CUDA here), and a bogus backend
+    backend='triton'/'metal' must raise cleanly (no GPU here), and a bogus backend
     string must raise too -- the API surface this issue actually asks for.
     """
     n, m, eps, L = 300, 250, 0.05, 40
@@ -249,6 +250,8 @@ def test_sinkslot_solve_backend_override_on_cpu():
 
     with pytest.raises(ValueError, match="backend='triton'"):
         sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=200, backend="triton")
+    with pytest.raises(ValueError, match="backend='metal'"):
+        sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=200, backend="metal")
     with pytest.raises(ValueError, match="backend must be"):
         sinkslot_solve(x, y, a, b, eps, L, seed=0, n_iters=200, backend="bogus")
 
@@ -352,7 +355,7 @@ def test_sinkslot_symmetric_torch_fixed_mode_gives_correct_marginals():
 
 def test_sinkslot_symmetric_torch_marginal_mode_converges():
     """Unlike alternating, neither marginal is exact after a symmetric update
-    (see sinkslot_symmetric_triton's own docstring), so this checks BOTH row
+    (see sinkslot_symmetric_fused's own docstring), so this checks BOTH row
     and col marginals directly against the achieved plan, not just the
     solver's own self-reported `viol`.
     """
@@ -418,45 +421,45 @@ def test_sinkslot_symmetric_converges_to_the_same_plan_as_alternating():
     assert relerr < 1e-3, f"alternating and symmetric converged to different plans: {relerr:.3e}"
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_sinkslot_solve_all_three_settings_agree_on_cuda(monkeypatch):
-    """Triton, pure-torch-on-CPU, and pure-torch-on-CUDA
-    must all solve the same problem and agree. Triton and torch-on-CPU are
-    covered elsewhere; this is the one that needs a GPU to even attempt --
-    backend='torch' forced on a CUDA tensor, previously never exercised
-    (sinkslot_solve's own auto-dispatch always preferred Triton whenever it
-    was available on a CUDA tensor, so the torch path had only ever run on
-    CPU tensors before this test).
+def test_sinkslot_solve_all_three_settings_agree_on_gpu(fused, monkeypatch):
+    """The fused backend, pure-torch-on-CPU, and pure-torch-on-GPU
+    must all solve the same problem and agree. The fused path and torch-on-CPU
+    are covered elsewhere; this is the one that needs a GPU to even attempt --
+    backend='torch' forced on a GPU tensor, previously never exercised
+    (sinkslot_solve's own auto-dispatch always prefers the fused kernels
+    whenever they're available on a GPU tensor, so the torch path had only
+    ever run on CPU tensors before this test).
     """
+    device, backend = fused
     n, m, eps, L = 300, 250, 0.05, 40
     x, y, a, b = _problem(n, m)
-    x, y, a, b = x.cuda(), y.cuda(), a.cuda(), b.cuda()
+    x, y, a, b = x.to(device), y.to(device), a.to(device), b.to(device)
     stop_kwargs = dict(stop_mode="marginal", stop_max_iter=20000)
 
-    phi_triton, psi_triton, *_, conv_t, viol_t = sinkslot_solve(
-        x, y, a, b, eps, L, seed=0, n_iters=20000, **stop_kwargs, backend="triton")
+    phi_fused, psi_fused, *_, conv_t, viol_t = sinkslot_solve(
+        x, y, a, b, eps, L, seed=0, n_iters=20000, **stop_kwargs, backend=backend)
     phi_torch, psi_torch, *_, conv_g, viol_g = sinkslot_solve(
         x, y, a, b, eps, L, seed=0, n_iters=20000, **stop_kwargs, backend="torch")
     import sinkslot.sinkhorn_solvers as solvers
-    triton_calls = []
-    triton_loop = solvers.sinkslot_alternating_triton
-    monkeypatch.setattr(solvers, "sinkslot_alternating_triton",
-                        lambda *args, **kw: triton_calls.append(1) or triton_loop(*args, **kw))
+    fused_calls = []
+    fused_loop = solvers.sinkslot_alternating_fused
+    monkeypatch.setattr(solvers, "sinkslot_alternating_fused",
+                        lambda *args, **kw: fused_calls.append(1) or fused_loop(*args, **kw))
     phi_auto, psi_auto, *_ = sinkslot_solve(
         x, y, a, b, eps, L, seed=0, n_iters=20000, **stop_kwargs, backend="auto")
 
     assert conv_t and viol_t <= 1e-6
     assert conv_g and viol_g <= 1e-6
-    # auto must pick triton when both are available on a CUDA tensor. Two Triton
-    # solves are not bitwise identical run to run, so the values are compared closely
-    # rather than exactly.
-    assert triton_calls, "backend='auto' did not use the Triton loop on a CUDA tensor"
-    torch.testing.assert_close(phi_auto, phi_triton, rtol=0, atol=1e-4)
-    torch.testing.assert_close(psi_auto, psi_triton, rtol=0, atol=1e-4)
+    # auto must pick the fused backend when it's available on a GPU tensor. Two
+    # fused solves are not bitwise identical run to run, so the values are
+    # compared closely rather than exactly.
+    assert fused_calls, f"backend='auto' did not use the fused loop on a {device} tensor"
+    torch.testing.assert_close(phi_auto, phi_fused, rtol=0, atol=1e-4)
+    torch.testing.assert_close(psi_auto, psi_fused, rtol=0, atol=1e-4)
 
-    dphi = float((phi_triton - phi_torch).abs().max())
-    dpsi = float((psi_triton - psi_torch).abs().max())
-    assert dphi < 1e-3 and dpsi < 1e-3, f"triton vs torch-on-cuda disagree: {dphi:.2e}, {dpsi:.2e}"
+    dphi = float((phi_fused - phi_torch).abs().max())
+    dpsi = float((psi_fused - psi_torch).abs().max())
+    assert dphi < 1e-3 and dpsi < 1e-3, f"{backend} vs torch-on-{device} disagree: {dphi:.2e}, {dpsi:.2e}"
 
 
 def test_seg_lse_coo_matches_brute_force():
@@ -574,7 +577,7 @@ def test_samples_loss_forward_matches_primal_slot_eps_at_convergence():
                              backend="torch", stop_mode="marginal",
                              stop_max_iter=20000, stop_tol=1e-10, stop_check_every=5)
     assert result.final_viol < 1e-9, f"not tightly converged: {result.final_viol:.3e}"
-    cost = sparse_sqeuclidean_cost(x, y, result.rows, result.cols, use_triton=False)
+    cost = sparse_sqeuclidean_cost(x, y, result.rows, result.cols, backend="torch")
     log_S = result.S.clamp_min(torch.finfo(result.S.dtype).tiny).log()
     T_vals = (result.phi[result.rows] + result.psi[result.cols] + log_S - cost / eps).exp()
     primal = (T_vals * cost).sum() + eps * (
@@ -607,7 +610,7 @@ def test_samples_loss_and_slot_grad_independent_ab_match_frozen_support_finite_d
 
     phi, psi, rows, cols, S, *_ = sinkslot_solve(
         x, y, a, b, eps, L, seed=0, n_iters=3000, backend="torch")
-    cost = sparse_sqeuclidean_cost(x, y, rows, cols, use_triton=False)
+    cost = sparse_sqeuclidean_cost(x, y, rows, cols, backend="torch")
     log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
     T_vals = (phi[rows] + psi[cols] + log_S - cost / eps).exp()
 

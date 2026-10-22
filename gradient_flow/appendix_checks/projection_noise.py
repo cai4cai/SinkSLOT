@@ -60,6 +60,7 @@ import torch
 
 from gradient_flow.along_flow import trajectory
 from gradient_flow.config import N, N_STEPS
+from sinkslot.bench.devices import describe
 from gradient_flow.run import DATA_DIR, DEVICE, OUT_DIR, draw_samples
 
 L_GRID = [10, 30, 100, 300]
@@ -79,14 +80,12 @@ def main():
     p.add_argument("--n", type=int, default=N)
     args = p.parse_args()
 
-    if DEVICE != "cuda":
-        print("gradient_flow/projection_noise.py: no CUDA GPU found, running on CPU "
-              "(pure torch throughout -- much slower, same algorithm).")
+    print(f"gradient_flow/projection_noise.py: running on {describe(DEVICE)}")
 
     n = args.n
     rng = torch.Generator(device="cpu").manual_seed(1)
-    X = draw_samples(DATA_DIR / "density_a.png", n, rng, device=DEVICE).float()
-    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device=DEVICE).float()
+    X = draw_samples(DATA_DIR / "density_a.png", n, rng, dtype=torch.float32, device=DEVICE)
+    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, dtype=torch.float32, device=DEVICE)
     a = torch.full((n,), 1.0 / n, dtype=torch.float32, device=DEVICE)
 
     print(f"N={n}  eps={EPS}  steps={args.steps}  iters={args.iters}  seeds={SEEDS}")
