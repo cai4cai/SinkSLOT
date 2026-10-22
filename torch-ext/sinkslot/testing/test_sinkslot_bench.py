@@ -102,17 +102,17 @@ def test_naive_and_cuda_builders_are_distinct_implementations():
         "the naive and CUDA sliced-plan builders have identical bodies -- the "
         "SinkSLOT-CUDA setup speedup would be measuring a path against itself"
     )
-    # The distinguishing feature is where the accuracy/layout work lives.
-    assert "double()" in "".join(cuda), "CUDA path lost its fp64 cumsum"
-    assert "double()" not in "".join(naive), \
-        "naive path gained the fp64 cumsum -- it is the untouched baseline"
+    # The distinguishing feature is the layout: the CUDA path transposes to (C, len)
+    # and scans along the contiguous last dimension; the naive path scans dim 0.
+    assert "torch.cumsum(a[ix], dim=-1)" in "".join(cuda), "CUDA path lost its transposed scan"
+    assert "torch.cumsum(a[ix], dim=0)" in "".join(naive), "naive path no longer scans dim 0"
 
 
 def test_naive_and_cuda_builders_agree_on_the_transport():
     """Different supports, same transport.
 
-    The fp32 and fp64 scans disagree on which breakpoints survive `mass > 0`, so
-    the supports differ slightly, but the plan they define must match and both
+    The two layouts can round the scans differently, so the breakpoints that survive
+    `mass > 0`, and hence the supports, may differ slightly, but the plan they define must match and both
     must lie in Gamma(a, b) -- the property the solver relies on for no row or
     column to be empty.
     """
