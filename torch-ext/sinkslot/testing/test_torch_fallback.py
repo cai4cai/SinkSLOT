@@ -419,7 +419,7 @@ def test_sinkslot_symmetric_converges_to_the_same_plan_as_alternating():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-def test_sinkslot_solve_all_three_settings_agree_on_cuda():
+def test_sinkslot_solve_all_three_settings_agree_on_cuda(monkeypatch):
     """Triton, pure-torch-on-CPU, and pure-torch-on-CUDA
     must all solve the same problem and agree. Triton and torch-on-CPU are
     covered elsewhere; this is the one that needs a GPU to even attempt --
@@ -437,13 +437,22 @@ def test_sinkslot_solve_all_three_settings_agree_on_cuda():
         x, y, a, b, eps, L, seed=0, n_iters=20000, **stop_kwargs, backend="triton")
     phi_torch, psi_torch, *_, conv_g, viol_g = sinkslot_solve(
         x, y, a, b, eps, L, seed=0, n_iters=20000, **stop_kwargs, backend="torch")
+    import sinkslot.sinkhorn_solvers as solvers
+    triton_calls = []
+    triton_loop = solvers.sinkslot_alternating_triton
+    monkeypatch.setattr(solvers, "sinkslot_alternating_triton",
+                        lambda *args, **kw: triton_calls.append(1) or triton_loop(*args, **kw))
     phi_auto, psi_auto, *_ = sinkslot_solve(
         x, y, a, b, eps, L, seed=0, n_iters=20000, **stop_kwargs, backend="auto")
 
     assert conv_t and viol_t <= 1e-6
     assert conv_g and viol_g <= 1e-6
-    # auto must pick triton when both are available on a CUDA tensor.
-    assert torch.equal(phi_auto, phi_triton) and torch.equal(psi_auto, psi_triton)
+    # auto must pick triton when both are available on a CUDA tensor. Two Triton
+    # solves are not bitwise identical run to run, so the values are compared closely
+    # rather than exactly.
+    assert triton_calls, "backend='auto' did not use the Triton loop on a CUDA tensor"
+    torch.testing.assert_close(phi_auto, phi_triton, rtol=0, atol=1e-4)
+    torch.testing.assert_close(psi_auto, psi_triton, rtol=0, atol=1e-4)
 
     dphi = float((phi_triton - phi_torch).abs().max())
     dpsi = float((psi_triton - psi_torch).abs().max())

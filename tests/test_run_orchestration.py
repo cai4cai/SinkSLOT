@@ -50,7 +50,7 @@ def test_speedup_unit_count(cfg):
     units = list(run._units(cfg))
     # 5 seeds x 5 slices x 10 eps x 37 method configurations, plus GeomLoss multiscale
     # with K-means (any d): 5 seeds x 5 slices x 10 eps
-    assert len(units) == 9250 + 250
+    assert len(units) == 7400 + 200
     assert len(set(units)) == len(units)
     per_problem = [u for u in units if u.seed == 0 and u.dataset == "half_moon"
                    and u.eps == units[0].eps]

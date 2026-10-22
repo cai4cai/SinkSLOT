@@ -251,22 +251,45 @@ result = sinkslot_solve(
 
 ## Reproducing the paper
 
-| Result | Config | Grid |
-|---|---|---|
-| Table 1 (speedup) | `configs/speedup.py` | N=M=10,000; half-moons, 8-Gaussians, two-rings at d=2, Gaussian at d=3 and d=64; 10-point ε grid median(C) × [1e-3, 0.5] per slice; potential-change stop, tol 1e-6; L 25 to 5000; 5 seeds. Prepare with `scripts/speedup_prepare.py`, run as a job array with `scripts/slurm/speedup_potential.slurm` |
-| Figure 2, scalability | `configs/scalability.py` via `run.py` | N in {5k,10k,20k,30k,50k} at d in {3,64}; d in {4..1024} at N=10,000; eps at ~5% cost gap per d; 5 seeds |
-| Figure 3, gradient flow | `gradient_flow/config.py` via `gradient_flow/run.py` | N=1000, ε=0.01, L=100, 50 steps; SOT/EOT/SROT/SinkSLOT |
-| Appendix, gradient term split | `gradient_flow/term_norms.py` | same problem; splits the complete gradient into the envelope term and the residual |
-| Appendix, dropped-term finite difference | `gradient_flow/finite_diff.py` | same problem, float64, 6 random directions per point |
-| Gradient accuracy under early stopping | `gradient_flow/appendix_checks/stopping.py` | same problem, inner iterations 1 to 1000 against a 5000-iteration reference |
+Every result in the paper comes from one of the configs or commands below. Synthetic benchmarks run
+through `run.py` (sharded with `--num-shards K --shard-idx k`, resumable, merged with `--merge`);
+colour transfer runs through `color_transfer/`. Each config's docstring says which result it
+produces. Scripts that turn the result CSVs and JSONs into the paper's tables and figures are not
+part of the repository.
+
+### Main text
+
+| Result | How |
+|---|---|
+| Table 1, time to a cost gap (synthetic benchmark) | `configs/speedup.py`, plus `configs/speedup_multiscale_grid.py` (GeomLoss multiscale, grid) and `configs/speedup_sparsink_k.py` (Spar-Sink k = 256, 512). N = M = 10,000; half-moons, 8-Gaussians and two-rings at d = 2, Gaussian at d = 64; 10 eps values per dataset; 5 seeds; potential-change stop at 1e-5 median(C), cap 5e5. Prepare once with `scripts/speedup_prepare.py` |
+| Figure 2, scalability | `configs/scalability_figure2.py`: Gaussian data at eps = 0.1, N from 5,000 to 50,000 at d = 64 and d from 4 to 1024 at N = 10,000; 5 seeds |
+| Table 2, colour transfer | `python -m color_transfer.main --output_dir OUT --eps 0.01 --sinkslot_L 100 --max_iter 500000 --sym_alpha 0.9 --geomloss_truncate 1 --methods sinkslot sinkslot_sym flashsinkhorn_alt flashsinkhorn_alt_fp32 geomloss_online geomloss_multiscale`, then the K-means row with `--methods geomloss_multiscale --geomloss_points_per_cluster 250` into another `--output_dir`. All 132 ordered pairs of the 12 paintings; `--num_shards`/`--shard_idx` split them |
+| Figure 3, colour transfer images | `python -m color_transfer.export_qualitative --output_dir OUT --eps 0.01 --sym_alpha 0.9 --geomloss_truncate 1 --geomloss_points_per_cluster 250 --pair_idx 11 5 3 4 --methods flashsinkhorn geomloss_online geomloss_multiscale sinkslot` (water lilies to haystacks, bridge to garden) |
+
+### Appendix
+
+| Result | How |
+|---|---|
+| Gradient flow, blob to crescent | `python -m gradient_flow.run` (config in `gradient_flow/config.py`): N = 1000, eps = 0.01, L = 100, 50 steps; SOT, EOT, SROT, SinkSLOT |
+| Dropped-term finite-difference check (table) | `python -m gradient_flow.finite_diff` |
+| Gradient term norms along the flow (figure) | `python -m gradient_flow.term_norms` |
+| Precision table (FlashSinkhorn FP32 vs TF32) | the FlashSinkhorn runs of `configs/speedup.py` |
+| Damping table | alpha = 0.9 rows and GeomLoss multiscale (K-means) from `configs/speedup.py`, grid from `configs/speedup_multiscale_grid.py`; alpha = 0.3, 0.5, 0.7 and 0.95 from `configs/speedup_damping.py` with `DAMPING_ALPHA` set to each value |
+| Truncation table (truncate 1 vs 5) | truncate 1 from `configs/speedup.py` (K-means) and `configs/speedup_multiscale_grid.py` (grid); truncate 5 from `configs/speedup_multiscale_truncate5.py` with `MULTISCALE_CLUSTERING=kmeans` and `=grid` |
+| Convergence and memory tables, Pareto figure | the same runs as Table 1 |
+| Memory figure | the same runs as Figure 2 (`configs/scalability_figure2.py`) |
+
+`configs/scalability.py` is not needed to reproduce the paper: it is the base of
+`configs/scalability_figure2.py`.
 
 ```bash
-python run.py --config speedup --dry-run   # list the speedup sweep's commands
-python run.py --config speedup --execute --num-shards 210 --shard-idx 0   # one shard of it
-python run.py --config speedup --merge     # merge shard CSVs into forward_all.csv
-python -m gradient_flow.run                # the gradient-flow figure
-python run.py --config scalability --count                                   # unit counts
-sbatch --export=ALL,CONFIG=scalability,NUM_SHARDS=300 --array=0-299 scripts/slurm/speedup_potential.slurm
+python scripts/speedup_prepare.py                                          # once: medians of the cost, caches
+python run.py --config speedup --count                                     # unit counts
+python run.py --config speedup --execute --num-shards 210 --shard-idx 0    # one shard
+python run.py --config speedup --merge                                     # shard CSVs into forward_all.csv
+DAMPING_ALPHA=0.5 python run.py --config speedup_damping --execute         # one alpha of the damping table
+python run.py --config scalability_figure2 --execute --num-shards 20 --shard-idx 0
+python -m gradient_flow.run                                                # the gradient-flow figure
 ```
 
 Benchmarked against [FlashSinkhorn](https://github.com/ot-triton-lab/flash-sinkhorn),

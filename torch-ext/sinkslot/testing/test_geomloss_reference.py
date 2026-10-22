@@ -42,12 +42,14 @@ def test_online_matches_geomloss_ot_sinkhorn_loop():
     assert torch.allclose(g, ref.g_ab.view(-1), rtol=0, atol=1e-5)
 
 
-def test_without_truncation_it_returns_the_lifted_coarse_solution():
-    """As GeomLoss: no truncation, no update on the points; the lifted coarse solution approximates the online one."""
+def test_cells_below_the_blur_return_the_lifted_coarse_solution():
+    """As GeomLoss: when the grid cells are not wider than the blur, no update on the points;
+    the lifted coarse solution approximates the online one."""
     x, y, a, b = _problem()
-    eps, tol = 0.05, 1e-6
+    eps, tol = 0.5, 1e-6
     _, _, _, conv_o, cost_o, _ = geomloss_online(x, y, a, b, eps, 20000, threshold=tol)
-    fm, gm, iters, conv_m, cost_m, _, info = geomloss_multiscale(x, y, a, b, eps, 20000, threshold=tol, truncate=None)
+    fm, gm, iters, conv_m, cost_m, _, info = geomloss_multiscale(x, y, a, b, eps, 20000, threshold=tol)
+    assert info["cluster_scale"] ** 2 <= eps / 2
     assert conv_o and conv_m
     assert info["kept_fraction"] == 1.0 and info["fine_iters"] == 0 and iters == info["coarse_iters"]
     assert torch.isfinite(fm).all() and torch.isfinite(gm).all()
@@ -66,6 +68,18 @@ def test_truncation_keeps_a_fraction_of_the_pairs():
     # Truncating from the coarse potentials is an approximation: the cost is close, not equal.
     assert abs(cost - cost_o) <= 2e-2 * abs(cost_o)
     assert f.shape == (len(x),) and g.shape == (len(y),)
+
+
+def test_without_margin_the_fine_stage_keeps_every_pair():
+    """truncate=None with cells wider than the blur: as GeomLoss, the fine stage runs on the full kernel,
+    so it reaches the online solution."""
+    x, y, a, b = _problem()
+    eps, tol = 0.01, 1e-5
+    _, _, _, _, cost_o, _ = geomloss_online(x, y, a, b, eps, 50000, threshold=tol)
+    _, _, iters, conv, cost, _, info = geomloss_multiscale(x, y, a, b, eps, 50000, threshold=tol, truncate=None)
+    assert info["cluster_scale"] ** 2 > eps / 2
+    assert conv and info["kept_fraction"] == 1.0 and info["fine_iters"] > 0 and info["support"] is None
+    assert abs(cost - cost_o) <= 1e-3 * abs(cost_o)
 
 
 def test_potentials_come_back_in_input_order():
