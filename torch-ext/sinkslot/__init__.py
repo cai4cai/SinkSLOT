@@ -45,6 +45,7 @@ from .sinkhorn_solvers import (
     launch_cfg,
     sinkslot_solve,
     sparse_transport_plan,
+    sinkslot_attention,
     SinkslotSolveResult,
 )
 from .gradient import (
@@ -66,6 +67,7 @@ __all__ = [
     "launch_cfg",
     "sinkslot_solve",
     "sparse_transport_plan",
+    "sinkslot_attention",
     "SinkslotSolveResult",
     "slot_grad",
     "sparse_barycentric_map",
