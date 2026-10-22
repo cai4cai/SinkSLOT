@@ -8,8 +8,8 @@ figure. Spar-Sink's k = 256 and 512 configurations are configs/speedup_sparsink_
 Stop rule: max(|df|, |dg|) < 1e-5 * median(C) between checkpoints, times alpha for the damped
 symmetric methods (alpha = 0.9), capped at 5e5 iterations.
 
-One config covers all five problem slices: half_moon, 8gaussians and two_rings
-at d=2, and gaussian at d=3 and d=64. Each slice gets its own eps grid, spanning
+One config covers all four problem slices: half_moon, 8gaussians and two_rings
+at d=2, and gaussian at d=64. Each slice gets its own eps grid, spanning
 the 1% and 10% cost-gap crossings (EPS_CROSSINGS), shared by every method.
 median(C) is the lower median of the squared Euclidean cost on the seed-0
 instance (MEDIAN_C, printed by scripts/speedup_prepare.py) and sets the tolerance.
@@ -44,7 +44,6 @@ MEDIAN_C: Dict[Tuple[str, int], Optional[float]] = {
     ("half_moon", 2): 1.9413249492645264,
     ("8gaussians", 2): 7.766776084899902,
     ("two_rings", 2): 4.999881267547607,
-    ("gaussian", 3): 4.734315872192383,
     ("gaussian", 64): 126.7506103515625,
 }
 
@@ -56,7 +55,6 @@ EPS_CROSSINGS: Dict[Tuple[str, int], Tuple[float, float]] = {
     ("half_moon", 2): (0.02325, 0.4669),
     ("8gaussians", 2): (0.003289, 0.03157),
     ("two_rings", 2): (0.01537, 0.1917),
-    ("gaussian", 3): (0.002494, 0.008904),
     ("gaussian", 64): (1.477, 3.774),
 }
 EPS_POINTS = 10
