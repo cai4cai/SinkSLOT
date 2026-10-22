@@ -110,14 +110,11 @@ def geomloss_multiscale(
          the coarse potentials are lifted to the points by one softmin.
       4. fine stage: damped symmetric updates on the points, summing only over the
          kept cluster pairs (KeOps ranges).
-    GeomLoss jumps when its eps schedule falls below cluster_scale**p, and only
-    truncates if that happens before the last iteration. At a fixed eps there is
-    no schedule: the coarse stage runs to the stop rule (or max_iter), and the
-    kernel is truncated when cluster_scale**2 > eps / 2 (GeomLoss's condition
-    for its cost |x-y|**2 / 2). Otherwise, as GeomLoss when its schedule never
-    reaches the cluster scale, the coarse solution lifted to the points is
-    returned with no update on the points; converged then refers to the coarse
-    stage, and the lifted plan need not satisfy the marginals on the points.
+    At a fixed eps there is no schedule: the coarse stage runs to the stop rule (or
+    max_iter), then the kernel is truncated and the fine stage runs to the stop rule,
+    whatever the cluster scale. (GeomLoss truncates only when its eps schedule falls
+    below cluster_scale**p before the last iteration, and otherwise returns the
+    lifted coarse solution, which need not satisfy the marginals on the points.)
 
     geomloss.ot has no multiscale solver: the clustering, the kernel truncation and
     every softmin (coarse updates, lift, fine updates) are GeomLoss's multiscale code
@@ -206,15 +203,14 @@ def geomloss_multiscale(
         C_xy_c, C_yx_c = cost_matrix(x_c, y_c), cost_matrix(y_c, x_c)
         f_c = sinkhorn_initialization(a_log_c, b_log_c, C_xy_c, softmin_sample, balanced)
         g_c = sinkhorn_initialization(b_log_c, a_log_c, C_yx_c, softmin_sample, balanced)
-        f_c, g_c, coarse_iters, coarse_converged, coarse_change = damped_loop(
+        f_c, g_c, coarse_iters, _, _ = damped_loop(
             updates_between(x_c, y_c, a_log_c, b_log_c), f_c, g_c, max_iter)
 
         # Lift to the points: one softmin against the coarse potentials of the other side.
         f_ba = softmin(eps, (x, y_c, None, None, None), b_log_c + g_c / eps)
         g_ab = softmin(eps, (y, x_c, None, None, None), a_log_c + f_c / eps)
 
-        jump = cluster_scale ** 2 > eps / 2
-        if jump and truncate is not None:
+        if truncate is not None:
             # Legacy kernel truncation and block-sparse softmin (KeOps ranges).
             (_, _, _, _, ranges_xy), (_, _, _, _, ranges_yx) = kernel_truncation(
                 (x_c, y_c, ranges_x, ranges_y, None), (y_c, x_c, ranges_y, ranges_x, None),
@@ -236,13 +232,8 @@ def geomloss_multiscale(
             updates = updates_between(x, y, a_log, b_log)
             kept, support = n * m, None
 
-        if not jump:
-            # As GeomLoss when its clusters never exceed the blur: the lifted coarse solution is returned,
-            # with no update on the points; converged refers to the coarse stage.
-            fine_iters, converged, last_change = 0, coarse_converged, coarse_change
-        else:
-            f_ba, g_ab, fine_iters, converged, last_change = damped_loop(
-                updates, f_ba, g_ab, max(max_iter - coarse_iters, 0))
+        f_ba, g_ab, fine_iters, converged, last_change = damped_loop(
+            updates, f_ba, g_ab, max(max_iter - coarse_iters, 0))
 
     f, g = torch.empty_like(f_ba), torch.empty_like(g_ab)
     f[perm_x], g[perm_y] = f_ba, g_ab

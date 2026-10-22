@@ -42,27 +42,25 @@ def test_online_matches_geomloss_ot_sinkhorn_loop():
     assert torch.allclose(g, ref.g_ab.view(-1), rtol=0, atol=1e-5)
 
 
-def test_cells_below_the_blur_return_the_lifted_coarse_solution():
-    """As GeomLoss: when the grid cells are not wider than the blur, no update on the points;
-    the lifted coarse solution approximates the online one."""
+def test_cells_below_the_blur_still_run_the_fine_stage():
+    """Grid cells not wider than the blur: the kernel is truncated and the fine stage runs, so the
+    solution is close to the online one."""
     x, y, a, b = _problem()
     eps, tol = 0.5, 1e-6
     _, _, _, conv_o, cost_o, _ = geomloss_online(x, y, a, b, eps, 20000, threshold=tol)
     fm, gm, iters, conv_m, cost_m, _, info = geomloss_multiscale(x, y, a, b, eps, 20000, threshold=tol)
     assert info["cluster_scale"] ** 2 <= eps / 2
     assert conv_o and conv_m
-    assert info["kept_fraction"] == 1.0 and info["fine_iters"] == 0 and iters == info["coarse_iters"]
+    assert info["fine_iters"] > 0 and iters == info["coarse_iters"] + info["fine_iters"]
     assert torch.isfinite(fm).all() and torch.isfinite(gm).all()
-    assert abs(cost_m - cost_o) <= 5e-2 * abs(cost_o)
+    assert abs(cost_m - cost_o) <= 1e-3 * abs(cost_o)
 
 
 def test_truncation_keeps_a_fraction_of_the_pairs():
-    # Truncation applies when the grid cells are wider than the blur: cluster_scale**2 > eps / 2.
     x, y, a, b = _problem()
     eps, tol = 0.01, 1e-5
     _, _, _, _, cost_o, _ = geomloss_online(x, y, a, b, eps, 50000, threshold=tol)
     f, g, iters, conv, cost, _, info = geomloss_multiscale(x, y, a, b, eps, 50000, threshold=tol)
-    assert info["cluster_scale"] ** 2 > eps / 2
     assert conv and iters == info["coarse_iters"] + info["fine_iters"]
     assert 0 < info["kept_fraction"] < 1
     # Truncating from the coarse potentials is an approximation: the cost is close, not equal.
@@ -71,13 +69,11 @@ def test_truncation_keeps_a_fraction_of_the_pairs():
 
 
 def test_without_margin_the_fine_stage_keeps_every_pair():
-    """truncate=None with cells wider than the blur: as GeomLoss, the fine stage runs on the full kernel,
-    so it reaches the online solution."""
+    """truncate=None: the fine stage runs on the full kernel, so it reaches the online solution."""
     x, y, a, b = _problem()
     eps, tol = 0.01, 1e-5
     _, _, _, _, cost_o, _ = geomloss_online(x, y, a, b, eps, 50000, threshold=tol)
     _, _, iters, conv, cost, _, info = geomloss_multiscale(x, y, a, b, eps, 50000, threshold=tol, truncate=None)
-    assert info["cluster_scale"] ** 2 > eps / 2
     assert conv and info["kept_fraction"] == 1.0 and info["fine_iters"] > 0 and info["support"] is None
     assert abs(cost - cost_o) <= 1e-3 * abs(cost_o)
 
