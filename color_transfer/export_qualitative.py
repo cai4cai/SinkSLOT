@@ -22,9 +22,10 @@ import os
 import torch
 from PIL import Image
 
+import color_transfer.main as ct
 from color_transfer.main import DEFAULT_PAINTINGS_DIR, StopCfg, list_images
 from sinkslot.bench.devices import default_device, describe, methods_for_device
-from sinkslot.bench.reference_solvers import geomloss_online
+from sinkslot.bench.reference_solvers import geomloss_multiscale, geomloss_online, kmeans_labels
 
 
 def load_pixels_weights_inverse(path, device, dtype):
@@ -52,6 +53,24 @@ def _barycentric_dense_chunked(f, g, sc, tc, sw, tw, eps, block_n=2048):
     return T
 
 
+def _barycentric_kept(f, g, sc, tc, sw, tw, eps, support, block_n=2048):
+    """_barycentric_dense_chunked over the entries a truncated GeomLoss multiscale kernel kept
+    (support = (label_x, label_y, keep); None: every pair). Dropped pairs are masked before exp."""
+    if support is None:
+        return _barycentric_dense_chunked(f, g, sc, tc, sw, tw, eps, block_n)
+    label_x, label_y, keep = support
+    T = torch.empty((sc.shape[0], tc.shape[1]), device=sc.device, dtype=sc.dtype)
+    for start in range(0, sc.shape[0], block_n):
+        end = min(start + block_n, sc.shape[0])
+        C_blk = torch.cdist(sc[start:end][None], tc[None], p=2).pow(2)[0]
+        logits = ((f[start:end, None] + g[None, :] - C_blk) / eps).masked_fill(
+            ~keep[label_x[start:end]][:, label_y], float("-inf"))
+        W_blk = tw[None, :] * logits.exp()
+        T[start:end] = (W_blk @ tc) / W_blk.sum(1, keepdim=True).clamp_min(torch.finfo(sc.dtype).tiny)
+        del C_blk, W_blk, logits
+    return T
+
+
 def _barycentric_sparse(phi, psi, rows, cols, S, cost, tc, eps, n):
     tiny = torch.finfo(cost.dtype).tiny
     log_S = S.clamp_min(tiny).log()
@@ -63,7 +82,8 @@ def _barycentric_sparse(phi, psi, rows, cols, S, cost, tc, eps, n):
     return weighted / row_sum[:, None]
 
 
-def solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L=100):
+def solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L=100,
+                      sym_alpha=0.5, geomloss_truncate=5.0, geomloss_points_per_cluster=None):
     n = sc.shape[0]
     if method == "sinkslot":
         from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused
@@ -84,20 +104,29 @@ def solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, s
         print(f"    sinkslot: iters={it} converged={converged} change={change:.3e}")
         return _barycentric_sparse(phi, psi, rows, cols, S, cost, tc, eps, n)
 
+    if method == "geomloss_multiscale":
+        # As color_transfer/main.py: grid clustering, or K-means with round(n / points_per_cluster) clusters.
+        labels = None if geomloss_points_per_cluster is None else tuple(
+            kmeans_labels(z, max(1, round(len(z) / geomloss_points_per_cluster))) for z in (sc, tc))
+        f, g, it, converged, cost_val, _, info = geomloss_multiscale(
+            sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every, truncate=geomloss_truncate,
+            alpha=sym_alpha, labels=labels)
+        print(f"    geomloss_multiscale: iters={it} converged={converged} cost={cost_val:.6f} "
+              f"kept={info['kept_fraction']:.3f}")
+        return _barycentric_kept(f, g, sc, tc, sw, tw, eps, info["support"])
+
     if method == "geomloss_online":
-        # tol/2 for alpha=0.5 damped updates, as in color_transfer/main.py.
+        # Damped by sym_alpha; stops at sym_alpha * tol, as in color_transfer/main.py.
         f, g, it, converged, cost_val, _ = geomloss_online(
-            sc, tc, sw, tw, eps, max_iter, threshold=tol / 2, check_every=check_every)
+            sc, tc, sw, tw, eps, max_iter, threshold=tol, check_every=check_every, alpha=sym_alpha)
         print(f"    geomloss_online: iters={it} converged={converged} cost={cost_val:.6f}")
         return _barycentric_dense_chunked(f, g, sc, tc, sw, tw, eps)
 
     symmetric = method == "flashsinkhorn_symmetric"
     if symmetric:
-        from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_symmetric
-        f, g, it = sinkhorn_flashstyle_symmetric(
-            sc, tc, sw, tw, eps=eps, use_epsilon_scaling=False, n_iters=max_iter,
-            threshold=tol / 2, check_every=check_every, last_extrapolation=False, return_n_iters=True,
-        )
+        # Damped by sym_alpha (ct.SYM_ALPHA): the library's solver at 0.5, flash_symmetric_alpha otherwise.
+        f, g, it = ct._flash_symmetric(sc, tc, sw, tw, eps=eps, n_iters=max_iter, threshold=sym_alpha * tol,
+                                       check_every=check_every, allow_tf32=True)
         it = int(it) - 1  # it counts the initial alpha=1 step
     else:
         from flash_sinkhorn.sinkhorn_solvers import sinkhorn_flashstyle_alternating
@@ -113,10 +142,10 @@ def solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, s
 
 
 def transfer_image(source_path, target_path, method, eps, max_iter, tol, check_every,
-                    device, dtype, sinkslot_L=100):
+                    device, dtype, sinkslot_L=100, **solver_kw):
     sc, sw, s_inverse, (h, w) = load_pixels_weights_inverse(source_path, device, dtype)
     tc, tw, _, _ = load_pixels_weights_inverse(target_path, device, dtype)
-    T = solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L=sinkslot_L)
+    T = solve_and_project(method, sc, tc, sw, tw, eps, max_iter, tol, check_every, sinkslot_L=sinkslot_L, **solver_kw)
     T = T.clamp(0.0, 1.0)
     pixels = T[s_inverse]
     img_tensor = (pixels.reshape(h, w, 3) * 255.0).round().to(torch.uint8).cpu()
@@ -139,6 +168,7 @@ _METHODS = [
     ("flashsinkhorn", "flashsinkhorn"),
     ("flashsinkhorn_symmetric", "flashsinkhorn_symmetric"),
     ("geomloss_online", "geomloss_online"),
+    ("geomloss_multiscale", "geomloss_multiscale"),
 ]
 
 
@@ -155,6 +185,14 @@ def parse_args():
                     help="One or more ordered pairs, flattened: 'i1 j1 i2 j2 ...' "
                          "(e.g. --pair_idx 2 9 5 7 for two pairs). Each pair gets its own "
                          "set of output images, named by its own source/target stem.")
+    p.add_argument("--sym_alpha", type=float, default=0.5,
+                   help="Damping of FlashSinkhorn symmetric and GeomLoss (0.5 the libraries' default, 0.9 the paper's).")
+    p.add_argument("--geomloss_truncate", type=float, default=5.0,
+                   help="GeomLoss multiscale: kernel truncation margin, in units of eps (GeomLoss's default 5; "
+                        "the paper uses 1).")
+    p.add_argument("--geomloss_points_per_cluster", type=int, default=None,
+                   help="GeomLoss multiscale: K-means with round(n / this) clusters per image (the paper: 250); "
+                        "default GeomLoss's grid clustering.")
     p.add_argument("--device", type=str, default=None,
                     help="Default: the best device present (CUDA, then MPS, then CPU). Only "
                          "SinkSLOT runs off CUDA.")
@@ -173,6 +211,7 @@ def main():
     print(f"Device: {describe(device)}")
     dtype = torch.float32
 
+    ct.SYM_ALPHA = args.sym_alpha  # read by ct._flash_symmetric
     os.makedirs(args.output_dir, exist_ok=True)
     paths = list_images(args.paintings_dir)
     pairs = list(zip(args.pair_idx[0::2], args.pair_idx[1::2]))
@@ -191,7 +230,9 @@ def main():
             print(f"  {stem} ...")
             img_tensor = transfer_image(
                 source_path, target_path, method, args.eps, args.max_iter, args.tol,
-                args.check_every, device, dtype, sinkslot_L=args.sinkslot_L)
+                args.check_every, device, dtype, sinkslot_L=args.sinkslot_L, sym_alpha=args.sym_alpha,
+                geomloss_truncate=args.geomloss_truncate,
+                geomloss_points_per_cluster=args.geomloss_points_per_cluster)
             out_path = os.path.join(args.output_dir, f"{pair_stem}_{stem}.png")
             save_image(img_tensor, out_path)
             print(f"    Saved: {out_path}")

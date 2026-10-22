@@ -391,7 +391,8 @@ def test_sinkslot_symmetric_torch_potential_mode_converges():
     phi, psi, it, converged, change = sinkslot_symmetric_torch(
         rows, cols, lam, log_a, log_b, n, m, 20000, stop=stop, eps=eps)
     assert converged
-    assert change < stop.tol
+    # The damped (alpha=0.5) update is compared against alpha * stop.tol.
+    assert change < 0.5 * stop.tol
 
 
 def test_sinkslot_symmetric_converges_to_the_same_plan_as_alternating():
@@ -420,7 +421,7 @@ def test_sinkslot_symmetric_converges_to_the_same_plan_as_alternating():
     assert relerr < 1e-3, f"alternating and symmetric converged to different plans: {relerr:.3e}"
 
 
-def test_sinkslot_solve_all_three_settings_agree_on_gpu(fused):
+def test_sinkslot_solve_all_three_settings_agree_on_gpu(fused, monkeypatch):
     """The fused backend, pure-torch-on-CPU, and pure-torch-on-GPU
     must all solve the same problem and agree. The fused path and torch-on-CPU
     are covered elsewhere; this is the one that needs a GPU to even attempt --
@@ -439,13 +440,22 @@ def test_sinkslot_solve_all_three_settings_agree_on_gpu(fused):
         x, y, a, b, eps, L, seed=0, n_iters=20000, **stop_kwargs, backend=backend)
     phi_torch, psi_torch, *_, conv_g, viol_g = sinkslot_solve(
         x, y, a, b, eps, L, seed=0, n_iters=20000, **stop_kwargs, backend="torch")
+    import sinkslot.sinkhorn_solvers as solvers
+    fused_calls = []
+    fused_loop = solvers.sinkslot_alternating_fused
+    monkeypatch.setattr(solvers, "sinkslot_alternating_fused",
+                        lambda *args, **kw: fused_calls.append(1) or fused_loop(*args, **kw))
     phi_auto, psi_auto, *_ = sinkslot_solve(
         x, y, a, b, eps, L, seed=0, n_iters=20000, **stop_kwargs, backend="auto")
 
     assert conv_t and viol_t <= 1e-6
     assert conv_g and viol_g <= 1e-6
-    # auto must pick the fused backend when it's available on a GPU tensor.
-    assert torch.equal(phi_auto, phi_fused) and torch.equal(psi_auto, psi_fused)
+    # auto must pick the fused backend when it's available on a GPU tensor. Two
+    # fused solves are not bitwise identical run to run, so the values are
+    # compared closely rather than exactly.
+    assert fused_calls, f"backend='auto' did not use the fused loop on a {device} tensor"
+    torch.testing.assert_close(phi_auto, phi_fused, rtol=0, atol=1e-4)
+    torch.testing.assert_close(psi_auto, psi_fused, rtol=0, atol=1e-4)
 
     dphi = float((phi_fused - phi_torch).abs().max())
     dpsi = float((psi_fused - psi_torch).abs().max())

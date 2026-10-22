@@ -70,6 +70,15 @@ def empty_cache(device) -> None:
         torch.mps.empty_cache()
 
 
+def empty_caches() -> None:
+    """`empty_cache` on every GPU device type present, for code that has no
+    device at hand (e.g. after an out-of-memory error in a metrics helper)."""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+
+
 def reset_peak_memory(device) -> None:
     """Start a fresh peak-memory window on `device` (CUDA only; see `peak_memory`)."""
     if torch.device(device).type == "cuda":
@@ -91,6 +100,7 @@ def peak_memory(device) -> float:
 CUDA_ONLY = {
     "flash": "FlashSinkhorn is Triton-only",
     "geomloss_online": "GeomLoss online is KeOps, which has no MPS support",
+    "geomloss_multiscale": "GeomLoss multiscale is KeOps, which has no MPS support",
     "ott": "OTT-JAX runs on JAX's own devices, not torch's MPS",
 }
 

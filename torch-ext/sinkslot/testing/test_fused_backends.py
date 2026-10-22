@@ -127,8 +127,13 @@ def test_sinkslot_solve_fused_matches_torch(fused, variant, stop_mode):
     """The acceptance criterion: both schemes, all three stop modes."""
     device, backend = fused
     x, y, a, b = _problem(device=device)
+    # The potential-mode tolerance has to sit above float32 resolution: the check
+    # is eps * max|dphi| < tol (alpha * tol for symmetric), and with |phi| ~ 300
+    # one ulp is already ~3e-6 of that. At 1e-5 the stop point is decided by
+    # rounding noise and Metal and torch drift tens of iterations apart; at 1e-4
+    # they stop on the same iteration.
     kw = dict(eps=0.05, L=40, seed=0, n_iters=300, stop_mode=stop_mode,
-              stop_max_iter=20000, stop_tol=1e-6 if stop_mode == "marginal" else 1e-5,
+              stop_max_iter=20000, stop_tol=1e-6 if stop_mode == "marginal" else 1e-4,
               stop_check_every=5, variant=variant)
     got = sinkslot_solve(x, y, a, b, backend=backend, **kw)
     want = sinkslot_solve(x, y, a, b, backend="torch", **kw)
