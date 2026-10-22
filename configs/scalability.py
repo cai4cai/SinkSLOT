@@ -1,5 +1,8 @@
 """Scalability: runtime to convergence against N and against d, Gaussian data.
 
+Not used by the paper directly: its scalability figure is configs/scalability_figure2.py, which
+builds on the grids and settings defined here.
+
 Experiment 1: d=3,  N in N_SWEEP.
 Experiment 2: d=64, N in N_SWEEP.
 Experiment 3: N=10,000, d in D_SWEEP.

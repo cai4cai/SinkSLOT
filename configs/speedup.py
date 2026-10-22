@@ -1,7 +1,12 @@
 """Speedup benchmark: time to a potential-change tolerance at N=M=10,000.
 
-Stop rule: max(|df|, |dg|) < 1e-5 * median(C) between checkpoints (tol/2 for the
-alpha=0.5 damped methods).
+Paper: main-text Table 1 (all rows except GeomLoss multiscale with grid clustering, which is
+configs/speedup_multiscale_grid.py), and in the appendix the precision and damping tables (the
+alpha = 0.9 rows and the K-means multiscale row), the convergence and memory tables, and the Pareto
+figure. Spar-Sink's k = 256 and 512 configurations are configs/speedup_sparsink_k.py.
+
+Stop rule: max(|df|, |dg|) < 1e-5 * median(C) between checkpoints, times alpha for the damped
+symmetric methods (alpha = 0.9), capped at 5e5 iterations.
 
 One config covers all five problem slices: half_moon, 8gaussians and two_rings
 at d=2, and gaussian at d=3 and d=64. Each slice gets its own eps grid, spanning
@@ -10,7 +15,8 @@ median(C) is the lower median of the squared Euclidean cost on the seed-0
 instance (MEDIAN_C, printed by scripts/speedup_prepare.py) and sets the tolerance.
 
 Methods: SROT, SinkSLOT-CUDA and SinkSLOT-CUDA-symmetric over L; FlashSinkhorn
-alternating and symmetric, each in strict FP32 and TF32; GeomLoss online;
+alternating and symmetric, each in strict FP32 and TF32; GeomLoss online; GeomLoss
+multiscale with K-means clustering (about 250 points per cluster, truncate 1);
 Spar-Sink (one kernel draw) over s = k * s0(n), s0(n) = 1e-3 * n * ln(n)^4,
 k in {1, 2, 4, ..., 128}. Every other method runs in strict FP32.
 

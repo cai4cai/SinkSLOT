@@ -1,4 +1,6 @@
-"""The Gaussian d=3 slice of configs/speedup.py with max_iter=500,000 instead of
+"""Not needed to reproduce the paper: configs/speedup.py now uses the 5e5 cap.
+
+The Gaussian d=3 slice of configs/speedup.py with max_iter=500,000 instead of
 20,000. Same eps grid, stop rule, seeds and timing protocol (warmup, rep).
 
 GAUSS3_LONG_OUTPUT_DIR overrides the output directory. GAUSS3_LONG_SKIP ("+"-separated

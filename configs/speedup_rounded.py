@@ -1,4 +1,6 @@
-"""Rounded-plan pass over the speedup benchmark: every unit of configs/speedup.py
+"""Not used by the paper, whose tables report the unrounded cost gap.
+
+Rounded-plan pass over the speedup benchmark: every unit of configs/speedup.py
 solved once, untimed (warmup=0, rep=1), recording rounded_cost_gap_pct, the cost
 gap of the plan rounded onto the transport polytope (Altschuler, Weed, Rigollet
 2017, Algorithm 2). Runtimes for the rounded table come from the timed speedup run.

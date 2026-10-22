@@ -1,5 +1,7 @@
-"""GeomLoss multiscale with GeomLoss's grid clustering (d <= 3 only) on the problems of configs/speedup.py:
-the grid row of the appendix damping table. Everything else as configs/speedup.py."""
+"""GeomLoss multiscale with GeomLoss's grid clustering (d <= 3 only) on the problems of configs/speedup.py.
+
+Paper: the GeomLoss (multiscale, grid) row of main-text Table 1, and the same row in the appendix
+damping, convergence and memory tables and the Pareto figure. Everything else as configs/speedup.py."""
 
 import dataclasses
 import os

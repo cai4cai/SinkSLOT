@@ -1,6 +1,9 @@
 """The paper's scalability figure: every method at one fixed eps = 0.1 (Gaussian data), on the
 N-sweep at d = 64 (N in N_SWEEP) and the d-sweep at N = 10,000 (d in D_SWEEP), 5 seeds.
 
+Paper: main-text Figure 2 (runtime) and the appendix memory figure (peak memory of the same runs).
+GeomLoss online is run but not plotted.
+
 Methods and parameters, as in the figure:
   SinkSLOT-CUDA alternating at L = 0.1 N and L = 1000; SROT at L = 0.1 N; Spar-Sink at k = 512
   (s = k * s0(N)); FlashSinkhorn alternating with TF32 matrix products; GeomLoss online; GeomLoss

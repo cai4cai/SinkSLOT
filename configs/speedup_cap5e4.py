@@ -1,4 +1,6 @@
-"""configs/speedup.py with max_iter=50,000 instead of 20,000, for rerunning the
+"""Not needed to reproduce the paper: configs/speedup.py now uses the 5e5 cap.
+
+configs/speedup.py with max_iter=50,000 instead of 20,000, for rerunning the
 runs that hit the 20,000 cap. Same eps grids, stop rule, seeds and timing
 protocol. SPEEDUP_CAP_SLICES (dataset:d entries separated by "+" or ",", e.g.
 "half_moon:2+gaussian:64"; "+" survives sbatch --export) restricts the slices; CAP5E4_OUTPUT_DIR overrides the

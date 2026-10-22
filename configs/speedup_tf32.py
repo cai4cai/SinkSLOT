@@ -1,4 +1,6 @@
-"""The FlashSinkhorn TF32 units of configs/speedup.py only (alternating and
+"""Not needed to reproduce the paper: configs/speedup.py already runs these units.
+
+The FlashSinkhorn TF32 units of configs/speedup.py only (alternating and
 symmetric), timed like the full benchmark. Its units and keys are those of the
 speedup config, so it can write into the same output directory
 (SPEEDUP_OUTPUT_DIR) and the full run skips them on resume.
@@ -14,7 +16,7 @@ from configs import speedup
 def build_config():
     return dataclasses.replace(
         speedup.build_config(), flash_tf32=[True], no_srot=True, no_sinkslot=True,
-        no_sinkslotcuda=True, no_sinkslotcuda_symmetric=True, no_sparsink=True, no_geomloss=True)
+        no_sinkslotcuda=True, no_sinkslotcuda_symmetric=True, no_sparsink=True, no_geomloss=True, no_geomloss_multiscale=True)
 
 
 def __getattr__(name):
