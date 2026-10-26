@@ -16,13 +16,9 @@ Four methods, one figure:
     MAX_ITER for typical eps, not comparable to the other three arms' fixed
     budget), with envelope-theorem gradients (see that function's own
     docstring).
-  * SROT (Nguyen 2026): `srot_divergence` -- SinkSLOT's own sparse
-    solve machinery with the sliced-lifted prior smoothed by gamma=1e-8
-    (Nguyen 2026's own P^SOT_gamma convention), rather than the separately-
-    vendored dense implementation, which turned numerically unstable at
-    eps=0.01 once its Gibbs-kernel floor was removed. Also envelope-theorem
-    gradients, matching eot_divergence and slot_grad below (see that
-    function's own docstring for both caveats).
+  * SROT (Nguyen 2026): `srot_divergence`, the debiased SROT divergence with the dense
+    reference (1 - gamma) * P^SOT + gamma * a b^T (gamma = 1e-8) on every pair, solved in
+    the log domain with no floor on the kernel, with envelope-theorem gradients.
   * SinkSLOT (ours): the native solver (torch-ext/sinkslot/sinkhorn_solvers.py),
     the exact pipeline this repo's own speed benchmarks exercise,
     plus the closed-form envelope-theorem gradient
@@ -34,7 +30,7 @@ Four methods, one figure:
     against full backprop-through-every-iteration at X0 in each case.
 
     All four arms run in float64 throughout (DTYPE below): POT and GeomLoss's
-    own kernels for SOT/EOT, SinkSLOT's own sparse solve machinery for SROT,
+    own kernels for SOT/EOT, dense torch for SROT,
     and slot_grad's pure-torch fallback for SinkSLOT -- none of these force a
     narrower dtype, so nothing here needs to downcast. The one exception is
     SinkSLOT's fused Triton cost kernel (sparse_sqeuclidean_cost, used only
@@ -66,8 +62,7 @@ from gradient_flow.config import (
     METHOD_NAMES, ROW_LABELS,
 )
 from sinkslot.gradient import slot_grad
-from sinkslot.solver import sot_plan_coo, sparse_sqeuclidean_cost
-from sinkslot.sinkhorn_solvers import sinkslot_alternating_torch
+from sinkslot.solver import sot_plan_coo
 
 
 def eot_divergence(X_t, Y_t, a_t, b_t, eps, n_iters):
@@ -114,56 +109,30 @@ def eot_divergence(X_t, Y_t, a_t, b_t, eps, n_iters):
 
 
 def srot_divergence(X, Y, a, b, eps, L, seed, n_iters, gamma):
-    """SROT arm via SinkSLOT's own sparse solve machinery, with the sliced-
-    lifted prior smoothed toward the independent coupling by `gamma` --
-    P^SOT_gamma = (1-gamma)*P^SOT + gamma*(a (x) b), Nguyen 2026's own
-    convention (same gamma as DELTA_SROT elsewhere in this repo) -- instead
-    of the separately-vendored dense implementation.
+    """SROT divergence (Nguyen 2026, Def. 2) up to its X-independent Y-Y term: OT(X, Y) - OT(X, X) / 2.
 
-    `sot_plan_coo`'s own docstring notes the gamma blend is "deliberately
-    absent" there because it's meant to be folded into the potentials
-    analytically rather than materialised; this instead smooths `S` directly
-    on the sparse support sot_plan_coo already builds; the fully-dense
-    a_i*b_j term at every off-support pair is not added, so at N=1000 with
-    a well-covered support this only approximates Nguyen 2026's dense SROT,
-    it does not reproduce it exactly.
-
-    Envelope-theorem gradients, matching eot_divergence and slot_grad: each
-    term's plan is solved entirely under torch.no_grad() (once the plan is
-    held fixed, sinkslot_alternating_torch's fixed-point loop needs no
-    autograd bookkeeping at all), then the cost is recomputed WITH gradient
-    tracking and multiplied by the detached plan, so only the explicit
-    <C, P> term is differentiated, never the Sinkhorn iteration itself.
-    Verified against the previous full-backprop-through-every-iteration
-    version at X0: grad_norm 0.064156 (envelope) vs 0.064335 (full backprop),
-    3.1% relative difference, consistent with sinkslot_alternating_torch's
-    fixed point not being exactly converged at n_iters and the xx term's
-    self-plan being only approximately symmetric. Also ~3.9x faster (3.6s vs
-    14.1s at X0), since there is no backward pass through the fixed-point
-    loop at all.
-
-    ot_yy is skipped entirely: d(ot_yy)/dX = 0 exactly, since Y doesn't
-    depend on X -- computing it would be pure waste, as the debiased loss
-    VALUE returned here is never used for anything except differentiating it
-    with respect to X.
+    Each OT term uses the dense reference (1 - gamma) * P^SOT + gamma * a b^T on every pair, with P^SOT
+    from the same slices as SinkSLOT (sot_plan_coo, same seed), and n_iters log-domain Sinkhorn
+    iterations with no floor on the kernel. Envelope-theorem gradient: each plan is solved without
+    gradient tracking and only <C, P> is differentiated.
     """
     def term(Xp, Yp, ap, bp):
-        n, m = Xp.shape[0], Yp.shape[0]
         with torch.no_grad():
             rows, cols, S = sot_plan_coo(Xp, Yp, ap, bp, L=L, seed=seed)
-            S = (1.0 - gamma) * S + gamma * ap[rows] * bp[cols]
-            cost_ng = sparse_sqeuclidean_cost(Xp, Yp, rows, cols, use_triton=False)
-            lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost_ng / eps
+            ref = torch.zeros(len(ap), len(bp), dtype=Xp.dtype, device=Xp.device)
+            ref.index_put_((rows, cols), S, accumulate=True)
+            ref = (1.0 - gamma) * ref + gamma * torch.outer(ap, bp)
+            log_k = ref.log() - torch.cdist(Xp, Yp) ** 2 / eps
             log_a, log_b = ap.log(), bp.log()
-            phi, psi, _, _, _ = sinkslot_alternating_torch(
-                rows, cols, lam, log_a, log_b, n, m, n_iters, stop=None)
-            vals = (phi[rows] + psi[cols] + lam).exp()
-        cost = sparse_sqeuclidean_cost(Xp, Yp, rows, cols, use_triton=False)  # recomputed WITH grad
-        return (vals * cost).sum()
+            f, g = torch.zeros_like(ap), torch.zeros_like(bp)
+            for _ in range(n_iters):
+                f = log_a - torch.logsumexp(log_k + g[None, :], dim=1)
+                g = log_b - torch.logsumexp(log_k + f[:, None], dim=0)
+            plan = (log_k + f[:, None] + g[None, :]).exp()
+        cost = ((Xp[:, None, :] - Yp[None, :, :]) ** 2).sum(-1)  # differentiable; finite gradient at x_i = y_j
+        return (plan * cost).sum()
 
-    ot_xy = term(X, Y, a, b)
-    ot_xx = term(X, X, a, a)
-    return ot_xy - 0.5 * ot_xx
+    return term(X, Y, a, b) - 0.5 * term(X, X, a, a)
 
 DATA_DIR = Path(__file__).parent / "data"
 OUT_DIR = Path(__file__).parent / "outputs"
