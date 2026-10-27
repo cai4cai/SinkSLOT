@@ -2,9 +2,7 @@
 
     python -m gradient_flow.run
 
-Runs on CPU or CUDA. A CUDA GPU with Triton reproduces the reported numbers
-(the fused kernels, see sinkslot/sinkhorn_solvers.py); without one, slot_grad
-falls back to a pure-torch path (same algorithm, much slower) automatically.
+Runs on CPU or CUDA, in float64 throughout.
 
 Four methods, one figure:
   * SOT (Bonneel et al., 2015): the plain, unregularized sliced W2 distance --
@@ -29,16 +27,9 @@ Four methods, one figure:
     term is differentiated, never the Sinkhorn iteration itself -- verified
     against full backprop-through-every-iteration at X0 in each case.
 
-    All four arms run in float64 throughout (DTYPE below): POT and GeomLoss's
-    own kernels for SOT/EOT, dense torch for SROT,
-    and slot_grad's pure-torch fallback for SinkSLOT -- none of these force a
-    narrower dtype, so nothing here needs to downcast. The one exception is
-    SinkSLOT's fused Triton cost kernel (sparse_sqeuclidean_cost, used only
-    when a CUDA GPU is present): it accumulates its cost term in fp32
-    internally regardless of input dtype (see that function's own docstring),
-    an unavoidable property of the fused kernel itself, not something this
-    script controls. That fp32 accumulation is invisible at this script's
-    4-decimal reporting precision either way.
+    All four arms run in float64 (DTYPE below): POT for SOT/EOT, dense torch for
+    SROT, and slot_grad's torch backend for SinkSLOT (its Triton kernels are
+    float32-only).
 
 Compiled figure formatting: compact vertically with no dead space between
 adjacent method rows; for every intermediate checkpoint (step > 0), the
@@ -189,7 +180,7 @@ def run_flow(method, X0, Y, a_t, eps):
     for step in range(N_STEPS + 1):
         if method == "SinkSLOT":
             x_i_d = x_i.detach()
-            g = slot_grad(x_i_d, Y, a_t, a_t, eps, L, seed=0, n_iters=MAX_ITER)
+            g = slot_grad(x_i_d, Y, a_t, a_t, eps, L, seed=0, n_iters=MAX_ITER, backend="torch")
         else:
             x_i.requires_grad_(True)
             if method == "SOT":
@@ -213,11 +204,6 @@ def run_flow(method, X0, Y, a_t, eps):
 
 
 def main():
-    if DEVICE != "cuda":
-        print("gradient_flow/run.py: no CUDA GPU found, running the SinkSLOT arm on the "
-              "pure-torch fallback (slot_grad's backend='auto') -- much slower than the "
-              "fused Triton kernels the reported numbers use, but the same algorithm.")
-
     rng = torch.Generator(device="cpu").manual_seed(1)
     X0 = draw_samples(DATA_DIR / "density_a.png", N, rng, device=DEVICE)
     Y = draw_samples(DATA_DIR / "density_b.png", N, rng, device=DEVICE)
