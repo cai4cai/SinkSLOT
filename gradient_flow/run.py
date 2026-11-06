@@ -1,43 +1,24 @@
-"""Gradient flow, blob -> crescent: SOT / EOT / SROT / SinkSLOT, one compiled figure.
+"""Gradient flow, blob -> crescent, for SOT, EOT, SROT and SinkSLOT; one figure per eps.
 
     python -m gradient_flow.run
 
-Runs on CPU or CUDA. A CUDA GPU with Triton reproduces the reported numbers
-(the fused kernels, see sinkslot/sinkhorn_solvers.py); without one, slot_grad
-falls back to a pure-torch path (same algorithm, much slower) automatically.
+Each step moves the source points by X <- X - LR * N * grad_X D(X, Y), in float64 on CPU or CUDA:
+  * SOT (Bonneel et al., 2015): sliced W2 (`ot.sliced_wasserstein_distance`), gradient by autograd.
+  * EOT (Feydy et al., 2019): debiased Sinkhorn divergence (`eot_divergence`), envelope-theorem gradient.
+  * SROT (Nguyen 2026): debiased SROT divergence with the dense smoothed reference (`srot_divergence`),
+    envelope-theorem gradient.
+  * SinkSLOT (ours): `sinkslot.gradient.slot_grad`, the closed-form envelope-theorem gradient
+    grad_X SLOT_eps(X, Y) = 2 diag(a) (X - T_eps(X)), on its torch backend.
+The regularised arms run MAX_ITER Sinkhorn iterations per step; envelope-theorem gradients hold the plan
+fixed and differentiate only the cost.
 
-Four methods, one figure:
-  * SOT (Bonneel et al., 2015): the plain, unregularized sliced W2 distance --
-    no Sinkhorn solve at all, each projection's 1-D transport is exact (a
-    sort), so autograd through `ot.sliced_wasserstein_distance` already gives
-    the analytical gradient.
-  * EOT (Feydy et al., 2019): `sinkhorn_divergence_torch_autograd`.
-  * SROT (Nguyen 2026): `sr_sinkhorn_divergence_torch_autograd`, delta=1e-8.
-  * SinkSLOT (ours): the native solver (torch-ext/sinkslot/sinkhorn_solvers.py),
-    the exact pipeline this repo's own speed benchmarks exercise,
-    plus the closed-form envelope-theorem gradient
-    grad_X SLOT_eps(X,Y) = 2*diag(a)*(X - T_eps(X)) (see sinkslot/gradient.py).
-
-    SOT/EOT/SROT run in float64 (vendor/sinkhorn_methods.py, ported from a
-    sibling research repository's own copy, which has no CUDA/Triton
-    dependency). SinkSLOT runs in float32 on the Triton path: its fused cost
-    kernel accumulates in fp32 regardless of input dtype (see
-    sparse_sqeuclidean_cost's own docstring), so there is no float64 path
-    there. The pure-torch fallback (used automatically without a GPU) has no
-    such restriction and follows X/Y/a's own dtype, but this script still
-    passes fp32 either way for a like-for-like comparison across both
-    backends. In practice the float32-vs-float64 difference is invisible at
-    4-decimal reporting precision: this script's Triton-path output (W2^2 per
-    step, per method) matches a float64 reference run exactly, digit for
-    digit.
-
-Compiled figure formatting: compact vertically with no dead space between
-adjacent method rows; for every intermediate checkpoint (step > 0), the
-lowest -- i.e. best -- W2^2 across the 4 methods is bolded.
+The figure shows each method (rows) at the checkpoints in STEPS (columns), labelled with the exact W2^2;
+at each intermediate checkpoint, the lowest W2^2 is in bold.
 """
 from __future__ import annotations
 
 import time
+import warnings
 from pathlib import Path
 
 import ot
@@ -51,10 +32,52 @@ from gradient_flow.config import (
     N, STEPS, N_STEPS, LR, EPS_VALUES, MAX_ITER, L, DELTA_SROT, DATA_SCALE,
     METHOD_NAMES, ROW_LABELS,
 )
-from gradient_flow.vendor.sinkhorn_methods import (
-    sinkhorn_divergence_torch_autograd, sr_sinkhorn_divergence_torch_autograd,
-)
 from sinkslot.gradient import slot_grad
+from sinkslot.solver import sot_plan_coo
+
+
+def eot_divergence(X_t, Y_t, a_t, b_t, eps, n_iters):
+    """Debiased Sinkhorn divergence OT(X, Y) - OT(X, X) / 2 - OT(Y, Y) / 2, each term
+    <C, P> + eps KL(P | a b^T) with C = ||x - y||^2 (POT's `solve_sample`, `debias=True`).
+
+    Exactly n_iters log-domain Sinkhorn iterations per term (tol=-1 disables the early stop; the
+    resulting non-convergence warning is suppressed). grad="envelope" sets the gradient from the
+    converged plan with the plan held fixed.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Sinkhorn did not converge")
+        res = ot.solve_sample(
+            X_t, Y_t, a_t, b_t, reg=eps, max_iter=n_iters, tol=-1.0,
+            grad="envelope", debias=True,
+        )
+    return res.value
+
+
+def srot_divergence(X, Y, a, b, eps, L, seed, n_iters, gamma):
+    """Surrogate <C, P_XY> - <C, P_XX> / 2 whose gradient in X is the envelope-theorem gradient of
+    the debiased SROT divergence (Nguyen 2026, Def. 2); the Y-Y term does not depend on X.
+
+    Each plan solves SROT with the dense reference (1 - gamma) P^SOT + gamma a b^T on every pair
+    (P^SOT from sot_plan_coo, the same slices as SinkSLOT) by n_iters log-domain Sinkhorn
+    iterations, without gradient tracking; only the cost is differentiated.
+    """
+    def term(Xp, Yp, ap, bp):
+        with torch.no_grad():
+            rows, cols, S = sot_plan_coo(Xp, Yp, ap, bp, L=L, seed=seed)
+            ref = torch.zeros(len(ap), len(bp), dtype=Xp.dtype, device=Xp.device)
+            ref.index_put_((rows, cols), S, accumulate=True)
+            ref = (1.0 - gamma) * ref + gamma * torch.outer(ap, bp)
+            log_k = ref.log() - torch.cdist(Xp, Yp) ** 2 / eps
+            log_a, log_b = ap.log(), bp.log()
+            f, g = torch.zeros_like(ap), torch.zeros_like(bp)
+            for _ in range(n_iters):
+                f = log_a - torch.logsumexp(log_k + g[None, :], dim=1)
+                g = log_b - torch.logsumexp(log_k + f[:, None], dim=0)
+            plan = (log_k + f[:, None] + g[None, :]).exp()
+        cost = ((Xp[:, None, :] - Yp[None, :, :]) ** 2).sum(-1)  # finite gradient at x_i = y_j, unlike cdist
+        return (plan * cost).sum()
+
+    return term(X, Y, a, b) - 0.5 * term(X, X, a, a)
 
 DATA_DIR = Path(__file__).parent / "data"
 OUT_DIR = Path(__file__).parent / "outputs"
@@ -63,10 +86,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def load_density(fname):
-    """Grayscale density in [0,1]; row-flipped and inverted, matching Feydy et al. (2019).
-
-    Reads PIL's raw bytes straight into a torch tensor (torch.frombuffer), no numpy.
-    """
+    """Grayscale density in [0, 1], row-flipped and inverted as in Feydy et al. (2019)."""
     img = Image.open(fname).convert("L")
     w, h = img.size
     buf = torch.frombuffer(bytearray(img.tobytes()), dtype=torch.uint8).reshape(h, w)
@@ -76,7 +96,7 @@ def load_density(fname):
 
 
 def draw_samples(fname, n, rng, dtype=DTYPE, device="cpu"):
-    """`rng` is a torch.Generator (CPU); sampling happens on CPU, moved to `device` last."""
+    """n density-weighted pixel samples with sub-pixel jitter, scaled by DATA_SCALE; `rng` is a CPU torch.Generator."""
     A = load_density(fname)
     h, w = A.shape
     xg, yg = torch.meshgrid(torch.linspace(0, 1, h, dtype=torch.float64),
@@ -92,12 +112,7 @@ def draw_samples(fname, n, rng, dtype=DTYPE, device="cpu"):
 
 
 def exact_ot_cost(X, Y):
-    """Raw squared-W2 exact OT cost (not sqrt'd). X, Y: torch tensors, any device.
-
-    Calls POT directly (ot.dist, ot.emd2) rather than through vendor's
-    exact_ot/build_cost -- POT's own backend accepts torch tensors natively
-    (verified against 0.9.7), so no numpy round-trip is needed here at all.
-    """
+    """Exact W2^2 between uniform point clouds X and Y (POT's network simplex, float64, CPU)."""
     n, m = X.shape[0], Y.shape[0]
     Xc, Yc = X.detach().cpu().double(), Y.detach().cpu().double()
     a = torch.full((n,), 1.0 / n, dtype=torch.float64)
@@ -111,17 +126,16 @@ def run_flow(method, X0, Y, a_t, eps):
     for step in range(N_STEPS + 1):
         if method == "SinkSLOT":
             x_i_d = x_i.detach()
-            g = slot_grad(x_i_d.float(), Y.float(), a_t.float(), a_t.float(), eps, L,
-                          seed=0, n_iters=MAX_ITER).double()
+            g = slot_grad(x_i_d, Y, a_t, a_t, eps, L, seed=0, n_iters=MAX_ITER, backend="torch")
         else:
             x_i.requires_grad_(True)
             if method == "SOT":
                 loss = ot.sliced_wasserstein_distance(x_i, Y, n_projections=L, p=2, seed=0)
             elif method == "EOT":
-                loss = sinkhorn_divergence_torch_autograd(x_i, Y, eps, max_iter=MAX_ITER, tol=0.0)
+                loss = eot_divergence(x_i, Y, a_t, a_t, eps, n_iters=MAX_ITER)
             else:  # SROT
-                loss = sr_sinkhorn_divergence_torch_autograd(
-                    x_i, Y, eps, L=L, max_iter=MAX_ITER, tol=0.0, delta=DELTA_SROT)
+                loss = srot_divergence(
+                    x_i, Y, a_t, a_t, eps, L, seed=0, n_iters=MAX_ITER, gamma=DELTA_SROT)
             (g,) = torch.autograd.grad(loss, [x_i])
             x_i_d = x_i.detach()
 
@@ -136,11 +150,6 @@ def run_flow(method, X0, Y, a_t, eps):
 
 
 def main():
-    if DEVICE != "cuda":
-        print("gradient_flow/run.py: no CUDA GPU found, running the SinkSLOT arm on the "
-              "pure-torch fallback (slot_grad's backend='auto') -- much slower than the "
-              "fused Triton kernels the reported numbers use, but the same algorithm.")
-
     rng = torch.Generator(device="cpu").manual_seed(1)
     X0 = draw_samples(DATA_DIR / "density_a.png", N, rng, device=DEVICE)
     Y = draw_samples(DATA_DIR / "density_b.png", N, rng, device=DEVICE)
@@ -166,9 +175,7 @@ def main():
                 print(f"[{method} eps={eps:g}] step {step:>3}/{N_STEPS} "
                       f"W2={w2:.4f} ({time.perf_counter()-t0:.1f}s)", flush=True)
 
-        # For every intermediate checkpoint, find the best (lowest) W2 across
-        # methods so its label can be bolded. Step 0 (shared start, identical
-        # for all methods) and step 50 (final step) are excluded.
+        # Lowest W2^2 per intermediate checkpoint (first and last steps excluded), shown in bold.
         best_method_at = {}
         for step in STEPS:
             if step in (0, N_STEPS):
@@ -214,9 +221,12 @@ def main():
                 if j == 0:
                     ax.set_ylabel(ROW_LABELS[method], fontsize=10)
         out = OUT_DIR / f"gradient_flow_eps_{eps:g}.pdf"
+        out_png = OUT_DIR / f"gradient_flow_eps_{eps:g}.png"
         fig.savefig(out, bbox_inches="tight", facecolor="white")
+        fig.savefig(out_png, bbox_inches="tight", facecolor="white", dpi=200)
         plt.close(fig)
         print(f"wrote {out}")
+        print(f"wrote {out_png}")
 
 
 if __name__ == "__main__":
