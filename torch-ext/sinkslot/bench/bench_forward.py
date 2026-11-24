@@ -1127,7 +1127,7 @@ def bench_geomloss_multiscale(
     kernel truncation margin truncate (in units of eps; GeomLoss's default 5) and the
     potential-change check in both stages. Damping and stop threshold as bench_geomloss_online.
     clustering: "grid" (GeomLoss's default, with its default cluster_scale; d <= 3) or "kmeans" (round(n / points_per_cluster) K-means
-    clusters per cloud, about 250 points each as in Feydy et al. 2019, and their cluster size as
+    clusters per cloud, and their cluster size as
     cluster_scale; any d). The timed solve includes the clustering. nnz is the number of point pairs the
     fine stage sums over (every pair when the kernel is not truncated); the plan
     metrics are those of the plan on these pairs.
@@ -3014,7 +3014,7 @@ def main() -> None:
                         help="GeomLoss multiscale clustering: GeomLoss's grid (d <= 3) or K-means (any d).")
     parser.add_argument("--geomloss-points-per-cluster", type=int, default=250,
                         help="GeomLoss multiscale with K-means clustering: points per cluster "
-                             "(round(n / it) clusters per cloud; Feydy et al.'s ~250).")
+                             "(round(n / it) clusters per cloud).")
     parser.add_argument("--geomloss-truncate", type=float, default=5.0,
                         help="GeomLoss multiscale: kernel truncation margin, in units of eps (GeomLoss's default 5).")
     parser.add_argument("--no-flash-symmetric", action="store_true", help="Skip FlashSinkhorn symmetric backend.")
