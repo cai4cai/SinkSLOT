@@ -112,9 +112,8 @@ def geomloss_multiscale(
          kept cluster pairs (KeOps ranges).
     At a fixed eps there is no schedule: the coarse stage runs to the stop rule (or
     max_iter), then the kernel is truncated and the fine stage runs to the stop rule,
-    whatever the cluster scale. (GeomLoss truncates only when its eps schedule falls
-    below cluster_scale**p before the last iteration, and otherwise returns the
-    lifted coarse solution, which need not satisfy the marginals on the points.)
+    whatever the cluster scale. GeomLoss instead returns the lifted coarse solution
+    when its eps schedule does not fall below cluster_scale**p.
 
     geomloss.ot has no multiscale solver: the clustering, the kernel truncation and
     every softmin (coarse updates, lift, fine updates) are GeomLoss's multiscale code
