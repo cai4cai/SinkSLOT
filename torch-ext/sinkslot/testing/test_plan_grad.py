@@ -160,6 +160,39 @@ def test_attention_matches_plan_values():
         torch.testing.assert_close(got.grad, want.grad, rtol=1e-7, atol=1e-10)
 
 
+@pytest.mark.parametrize("mass_change", [0.0, 0.3])
+def test_weight_gradients_through_sot_plan(mass_change):
+    """With P^SOT rebuilt from (a, b), the weight gradients of P @ V (attention and the
+    sparse plan) match finite differences that re-solve and rebuild P^SOT."""
+    from sinkslot import sinkslot_attention
+
+    x, y, a, b, *_ = _problem(n=30, m=35, d=2)
+    g = torch.Generator().manual_seed(8)
+    V = torch.randn(len(y), 4, generator=g, dtype=DT)
+    T = torch.randn(len(x), 4, generator=g, dtype=DT)
+    kw = dict(eps=EPS, L=8, stop_mode="potential", stop_tol=1e-14, stop_max_iter=10**6, adjoint_tol=1e-12)
+    loss = lambda O: (O - T).square().sum()
+
+    def plan_mm(a_, b_, **extra):
+        P = sparse_transport_plan(x, y, a_, b_, **kw, **extra)
+        r, c = P.indices()
+        return torch.zeros(len(x), 4, dtype=DT).index_add_(0, r, P.values()[:, None] * V[c])
+
+    da = torch.randn(len(a), generator=g, dtype=DT)
+    db = torch.randn(len(b), generator=g, dtype=DT)
+    da = da - da.mean() + mass_change / len(a)
+    db = db - db.mean() + mass_change / len(b)
+    h = 1e-7  # P^SOT is piecewise linear in (a, b); larger steps can cross a kink
+    with torch.no_grad():
+        fd = (loss(plan_mm(a + h * da, b + h * db)) - loss(plan_mm(a - h * da, b - h * db))) / (2 * h)
+
+    for f in (lambda a_, b_: sinkslot_attention(x, y, V, a_, b_, **kw),
+              lambda a_, b_: plan_mm(a_, b_, differentiable=True)):
+        ag, bg = a.clone().requires_grad_(), b.clone().requires_grad_()
+        loss(f(ag, bg)).backward()
+        torch.testing.assert_close(ag.grad @ da + bg.grad @ db, fd, rtol=1e-6, atol=1e-8)
+
+
 def test_attention_chunking():
     from sinkslot.plan_grad import _plan_matmul, _sampled_dot
 

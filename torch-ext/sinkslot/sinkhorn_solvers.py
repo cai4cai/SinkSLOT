@@ -722,6 +722,27 @@ def sinkslot_solve(X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
     return SinkslotSolveResult(phi, psi, rows, cols, S, it, converged, viol)
 
 
+def _solve_for_plan_grad(x, y, a, b, eps, L, seed, n_iters, stop_mode, stop_max_iter, stop_tol,
+                         stop_check_every, backend, variant, alpha):
+    """Solved potentials, support and log P^SOT for the differentiable plan.
+
+    The solve runs without autograd. When `a` or `b` requires grad, P^SOT's
+    values are rebuilt from them with autograd enabled (same builder, seed and
+    support), so the plan's backward reaches the weights through P^SOT as well.
+    """
+    with torch.no_grad():
+        phi, psi, rows, cols, S, *_ = sinkslot_solve(
+            x.detach(), y.detach(), a.detach(), b.detach(), eps, L, seed, n_iters,
+            stop_mode=stop_mode, stop_max_iter=stop_max_iter, stop_tol=stop_tol,
+            stop_check_every=stop_check_every, backend=backend, variant=variant, alpha=alpha)
+    if torch.is_grad_enabled() and (a.requires_grad or b.requires_grad):
+        ot1d = _ot_1d_coo_batched_cuda if x.is_cuda else _ot_1d_coo_batched
+        rows_g, cols_g, S = sot_plan_coo(x.detach(), y.detach(), a, b, L=L, seed=seed, ot1d=ot1d)
+        if not (torch.equal(rows_g, rows) and torch.equal(cols_g, cols)):
+            raise RuntimeError("P^SOT rebuilt for the weight gradient has a different support than the solve's")
+    return phi, psi, rows, cols, S.clamp_min(torch.finfo(S.dtype).tiny).log()
+
+
 @jaxtyped(typechecker=beartype)
 def sparse_transport_plan(x: Float[torch.Tensor, "n d"], y: Float[torch.Tensor, "m d"],
                            a: Float[torch.Tensor, "n"] | None = None,
@@ -741,8 +762,9 @@ def sparse_transport_plan(x: Float[torch.Tensor, "n d"], y: Float[torch.Tensor, 
     `differentiable=False` (default): the plan carries no gradient, like
     `SamplesLoss(potentials=True)`. `differentiable=True`: the plan's values
     are differentiable with respect to x, y, a and b by implicit
-    differentiation at the Sinkhorn fixed point, with P^SOT and its support
-    held fixed (see `plan_grad`); the backward solves one adjoint system with
+    differentiation at the Sinkhorn fixed point, with the support held fixed
+    and P^SOT's values differentiated with respect to a and b (see
+    `plan_grad`); the backward solves one adjoint system with
     MINRES to relative tolerance `adjoint_tol`, at most `adjoint_max_iter`
     iterations.
 
@@ -759,12 +781,9 @@ def sparse_transport_plan(x: Float[torch.Tensor, "n d"], y: Float[torch.Tensor, 
             a = torch.full((n,), 1.0 / n, device=x.device, dtype=x.dtype)
         if b is None:
             b = torch.full((m,), 1.0 / m, device=y.device, dtype=y.dtype)
-        with torch.no_grad():
-            phi, psi, rows, cols, S, *_ = sinkslot_solve(
-                x.detach(), y.detach(), a.detach(), b.detach(), eps, L, seed, n_iters,
-                stop_mode=stop_mode, stop_max_iter=stop_max_iter, stop_tol=stop_tol,
-                stop_check_every=stop_check_every, backend=backend, variant=variant, alpha=alpha)
-        log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
+        phi, psi, rows, cols, log_S = _solve_for_plan_grad(
+            x, y, a, b, eps, L, seed, n_iters, stop_mode, stop_max_iter, stop_tol,
+            stop_check_every, backend, variant, alpha)
         plan_vals = plan_values(x, y, a, b, rows, cols, log_S, phi, psi, eps,
                                 adjoint_tol, adjoint_max_iter)
         return torch.sparse_coo_tensor(
@@ -813,10 +832,7 @@ def sinkslot_attention(x: Float[torch.Tensor, "n d"], y: Float[torch.Tensor, "m 
         a = torch.full((n,), 1.0 / n, device=x.device, dtype=x.dtype)
     if b is None:
         b = torch.full((m,), 1.0 / m, device=y.device, dtype=y.dtype)
-    with torch.no_grad():
-        phi, psi, rows, cols, S, *_ = sinkslot_solve(
-            x.detach(), y.detach(), a.detach(), b.detach(), eps, L, seed, n_iters,
-            stop_mode=stop_mode, stop_max_iter=stop_max_iter, stop_tol=stop_tol,
-            stop_check_every=stop_check_every, backend=backend, variant=variant, alpha=alpha)
-    log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
+    phi, psi, rows, cols, log_S = _solve_for_plan_grad(
+        x, y, a, b, eps, L, seed, n_iters, stop_mode, stop_max_iter, stop_tol,
+        stop_check_every, backend, variant, alpha)
     return plan_matmul(x, y, a, b, V, rows, cols, log_S, phi, psi, eps, adjoint_tol, adjoint_max_iter)

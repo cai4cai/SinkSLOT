@@ -155,7 +155,7 @@ Tx, Ty = sparse_barycentric_map(P, x, y)
 
 ### Differentiable Plan and Attention
 
-`sparse_transport_plan(..., differentiable=True)` returns a plan whose values carry gradients with respect to `x`, `y`, `a` and `b`, by implicit differentiation at the Sinkhorn fixed point (one MINRES solve in the backward, needs `torchsparsegradutils`). The sliced plan P^SOT and its support are held fixed, so the weight gradients are those with P^SOT fixed, defined up to an additive constant shared with opposite signs by `a` and `b`.
+`sparse_transport_plan(..., differentiable=True)` returns a plan whose values carry gradients with respect to `x`, `y`, `a` and `b`, by implicit differentiation at the Sinkhorn fixed point (one MINRES solve in the backward, needs `torchsparsegradutils`). The support of the sliced plan P^SOT is held fixed (it depends on the points only through rank orders); its values depend on `a` and `b` through the cumulative sums of the sorted weights, and the weight gradients include that dependence. They are defined up to an additive constant shared with opposite signs by `a` and `b`.
 
 For attention, use `sinkslot_attention`, which returns `P @ V` with gradients for `V` as well. Its backward memory is O(|S|); multiplying the sparse plan with `torch.sparse.mm` instead makes autograd build a dense `(n, m)` gradient.
 

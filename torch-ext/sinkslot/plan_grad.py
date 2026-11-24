@@ -12,13 +12,16 @@ direction (1, -1)), then returns
 
     dL/dC_ij = Gamma_ij = -(1/eps) P_ij (G_ij - alpha_i - beta_j),
     dL/dx_i  = 2 sum_j Gamma_ij (x_i - y_j),   dL/dy_j = 2 sum_i Gamma_ij (y_j - x_i),
-    dL/da    = alpha,                          dL/db   = beta.
+    dL/da    = alpha,                          dL/db   = beta,
+    dL/dlog S_ij = -eps Gamma_ij = P_ij (G_ij - alpha_i - beta_j).
 
-P^SOT and its support are treated as constants: their dependence on the
-points is piecewise constant, but their values depend on (a, b), so alpha and
-beta are the weight gradients with P^SOT held fixed. They are defined up to
-the gauge (alpha + c, beta - c), which does not change the gradient along
-perturbations with sum(da) = sum(db). Backward memory is O(|S|).
+The support of P^SOT depends on the points only through rank orders, so it is
+piecewise constant in (x, y) and held fixed. The values of P^SOT depend on
+(a, b) through the cumulative sums of the sorted weights; when log S is built
+from (a, b) inside the autograd graph, autograd chains dL/dlog S through that
+construction and adds it to (alpha, beta). The weight gradients are defined up
+to the gauge (c, -c), which does not change the gradient along perturbations
+with sum(da) = sum(db). Backward memory is O(|S|).
 """
 
 from __future__ import annotations
@@ -53,7 +56,8 @@ class _SparsePlanFn(torch.autograd.Function):
         grad_x, grad_y = points_grad(gamma, rows, cols, x, y, ctx.needs_input_grad[0], ctx.needs_input_grad[1])
         grad_a = alpha if ctx.needs_input_grad[2] else None
         grad_b = beta if ctx.needs_input_grad[3] else None
-        return grad_x, grad_y, grad_a, grad_b, None, None, None, None, None, None, None, None
+        grad_log_S = -ctx.eps * gamma if ctx.needs_input_grad[6] else None
+        return grad_x, grad_y, grad_a, grad_b, None, None, grad_log_S, None, None, None, None, None
 
 
 def adjoint(p, grad_vals, rows, cols, n, m, eps, tol, max_iter, w=None):
@@ -156,10 +160,11 @@ def plan_values(x, y, a, b, rows, cols, log_S, phi, psi, eps, adjoint_tol=1e-5, 
 
     `phi`, `psi` must be converged potentials for (x, y, a, b) on this support;
     they are not differentiated through directly (the backward differentiates
-    the fixed point implicitly). `adjoint_tol`, `adjoint_max_iter`: MINRES
+    the fixed point implicitly). `log_S` receives dL/dlog S, so gradients reach
+    (a, b) through P^SOT when `log_S` was built from them with grad enabled. `adjoint_tol`, `adjoint_max_iter`: MINRES
     relative tolerance and iteration cap for the adjoint solve.
     """
-    return _SparsePlanFn.apply(x, y, a, b, rows, cols, log_S.detach(), phi.detach(), psi.detach(),
+    return _SparsePlanFn.apply(x, y, a, b, rows, cols, log_S, phi.detach(), psi.detach(),
                                eps, adjoint_tol, adjoint_max_iter)
 
 
@@ -203,15 +208,16 @@ class _SparsePlanMatmulFn(torch.autograd.Function):
         grad_a = alpha if ctx.needs_input_grad[2] else None
         grad_b = beta if ctx.needs_input_grad[3] else None
         grad_V = grad_V if ctx.needs_input_grad[4] else None
-        return grad_x, grad_y, grad_a, grad_b, grad_V, *([None] * 9)
+        grad_log_S = -ctx.eps * gamma if ctx.needs_input_grad[7] else None
+        return grad_x, grad_y, grad_a, grad_b, grad_V, None, None, grad_log_S, *([None] * 6)
 
 
 def plan_matmul(x, y, a, b, V, rows, cols, log_S, phi, psi, eps, adjoint_tol=1e-5, adjoint_max_iter=1000,
                 chunk=2**20):
     """Differentiable P @ V for the plan of `plan_values`, with O(|S|) backward memory.
 
-    Gradients flow to x, y, a, b (as in `plan_values`) and V. `chunk` bounds the
+    Gradients flow to x, y, a, b, log_S (as in `plan_values`) and V. `chunk` bounds the
     support entries processed at once, so transients stay O(chunk * V.shape[1]).
     """
-    return _SparsePlanMatmulFn.apply(x, y, a, b, V, rows, cols, log_S.detach(), phi.detach(), psi.detach(),
+    return _SparsePlanMatmulFn.apply(x, y, a, b, V, rows, cols, log_S, phi.detach(), psi.detach(),
                                      eps, adjoint_tol, adjoint_max_iter, chunk)
