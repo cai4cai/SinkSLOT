@@ -1,17 +1,12 @@
-"""Gradient flow experiment parameters: blob -> crescent, N=1000, eps in {0.1, 0.01}.
-
-A plain module of constants rather than a configs/-style BenchConfig -- see
-configs/base.py for why that dataclass exists (it sweeps datasets/eps/methods
-for run.py; this experiment only sweeps EPS_VALUES, everything else fixed).
-"""
+"""Gradient flow experiment parameters: blob -> crescent, N = M = 1000, one run per eps in EPS_VALUES."""
 
 N = 1000
 STEPS = [0, 5, 10, 20, 30, 50]
 N_STEPS = 50
 LR = 0.05
 EPS_VALUES = [0.1, 0.01]
-MAX_ITER = 1000  # gradient steps per method, and SinkSLOT-arm inner Sinkhorn iterations
-L = 100  # random projections (SOT, SROT, SinkSLOT all share this slice count)
+MAX_ITER = 1000  # Sinkhorn iterations per gradient step (EOT, SROT, SinkSLOT)
+L = 100  # slice count shared by SOT, SROT and SinkSLOT
 DELTA_SROT = 1e-8
 DATA_SCALE = 2.0
 

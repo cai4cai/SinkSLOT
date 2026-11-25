@@ -35,9 +35,8 @@ def get_random_projections(d: int, L: int, seed: int) -> Float[torch.Tensor, "L 
     Standard-normal draws, L2-normalised -- the standard way to sample
     uniformly on the sphere.
 
-    Same construction as vendor/sinkhorn_methods.py's build_sot_plan, but on
-    torch's own RNG rather than numpy's, so the two no longer agree bit-for-bit
-    on a shared seed (different generator, same distribution).
+    Same construction as build_sot_plan in khainb/SROT (lib/sinkhorn_methods.py),
+    with torch's RNG instead of numpy's.
 
     Dtype: there's no tensor input to take a dtype from (d, L, seed are plain
     Python ints), so this always returns float64, on purpose, for an accurate
