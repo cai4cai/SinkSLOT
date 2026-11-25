@@ -1,12 +1,13 @@
 """Exact OT with POT's network simplex on the benchmark instances (CPU, float64).
 
     python -m sinkslot.bench.pot_exact --datasets half_moon:2 gaussian:64 --n 10000 --seeds 0 1 2 3 4 \
-        --kinds dense_1 dense_24 --out pot_exact.csv
+        --kinds dense --out pot_exact.csv
 
 Kinds:
-  dense_T  ot.dist then ot.emd2 on the dense cost matrix with T OpenMP threads;
-           setup_ms is the cost matrix, mean_ms the solve, total_ms their sum.
-  lazy     ot.emd2_lazy, which computes the cost on the fly (O(N + M) memory).
+  dense  ot.dist then ot.emd2 on the dense cost matrix; setup_ms is the cost
+         matrix, mean_ms the solve, total_ms their sum.
+  lazy   ot.emd2_lazy, which computes the cost on the fly (O(N + M) memory).
+The network simplex is single-threaded in POT 0.9.7 (numThreads is ignored).
 
 Instances come from bench_forward._sample_problem. They are drawn on --device
 (default: CUDA when available), so they match the GPU benchmark only when drawn
@@ -33,12 +34,11 @@ def _solve(kind, xs, xt, a, b, queue):
                                  return_matrix=False)
         solve_s = time.perf_counter() - t0
     else:
-        threads = int(kind.split("_")[1])
         t0 = time.perf_counter()
         M = ot.dist(xs, xt, metric="sqeuclidean")
         setup_s = time.perf_counter() - t0
         t0 = time.perf_counter()
-        cost, log = ot.emd2(a, b, M, numItermax=100_000_000, log=True, numThreads=threads)
+        cost, log = ot.emd2(a, b, M, numItermax=100_000_000, log=True)
         solve_s = time.perf_counter() - t0
     try:
         import resource
@@ -47,7 +47,7 @@ def _solve(kind, xs, xt, a, b, queue):
         peak = None
     queue.put(dict(setup_ms=1e3 * setup_s, mean_ms=1e3 * solve_s, total_ms=1e3 * (setup_s + solve_s),
                    cost=float(cost), result_code=int(log.get("result_code", -1)),
-                   warning=str(log.get("warning")), peak_rss_mb=peak))
+                   warning=str(log.get("warning")), peak_rss_mb=peak, pot_version=ot.__version__))
 
 
 def _result(queue, proc, label):
@@ -91,7 +91,7 @@ def main():
                    help="name:d pairs")
     p.add_argument("--n", type=int, default=10000)
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
-    p.add_argument("--kinds", nargs="+", default=["dense_1"], help="dense_T (T threads) or lazy")
+    p.add_argument("--kinds", nargs="+", default=["dense"], choices=["dense", "lazy"])
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",
                    help="device the instances are drawn on")
     p.add_argument("--out", default="pot_exact.csv")
