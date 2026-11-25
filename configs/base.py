@@ -70,7 +70,7 @@ class BenchConfig:
             Sparse O(L(N+M)), so unlike SROT it is not gated by max_dense_size.
 
         no_sinkslotcuda: Skip SinkSLOT-CUDA: the same method and solve kernels as
-            SinkSLOT with a CUDA-optimised setup path (fused Triton cost, CUDA 1-D OT
+            SinkSLOT with a CUDA-optimised setup path (fused Triton cost, transposed 1-D OT
             scan in fp32, int32 CSC key). It keeps its own RMAE reference.
         sinkslotcuda_slices: L values to sweep for SinkSLOT-CUDA and
             SinkSLOT-CUDA-symmetric. Kept separate from sinkslot_slices so the two

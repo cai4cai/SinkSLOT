@@ -1,4 +1,5 @@
-"""SinkSLOT: fused-Triton sparse Sinkhorn on the unsmoothed sliced OT plan.
+"""SinkSLOT: fused sparse Sinkhorn (Triton on CUDA, Metal on Apple silicon) on the
+unsmoothed sliced OT plan.
 
 This is the paper's own contribution -- a distinct algorithm from FlashSinkhorn
 (sparse, built on a sliced-OT reference plan, rather than FlashSinkhorn's dense
@@ -20,10 +21,10 @@ GeomLoss-style `SamplesLoss` callable -- unlike flash_sinkhorn's own, with no
 Package name: sinkslot
 """
 
-# sinkslot_alternating_triton/_torch are deliberately not exported here:
+# sinkslot_alternating_fused/_torch are deliberately not exported here:
 # they're the low-level solve loops sinkslot_solve already wraps and
 # dispatches between, not something a caller should reach for directly.
-# `sinkslot.sinkhorn_solvers.sinkslot_alternating_triton` still works for
+# `sinkslot.sinkhorn_solvers.sinkslot_alternating_fused` still works for
 # anyone who genuinely needs it (the benchmark harness and
 # gradient_flow/appendix_checks/stopping.py do, since they need the raw
 # CSR/CSC-based loop, not the whole build-plan-then-solve pipeline

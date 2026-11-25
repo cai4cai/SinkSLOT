@@ -50,16 +50,17 @@ def truncation_check(steps, iters, n_):
     falls. Cached to TRUNC because it is the one control not saved by any of the
     sweep scripts.
     """
-    from sinkslot.solver import _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo
+    from sinkslot.solver import ot1d_for, sot_plan_coo
     from gradient_flow.along_flow import _cosine
     from gradient_flow.estimators import SEED, three_gradients
+    from sinkslot.bench.devices import empty_cache
     from gradient_flow.run import DATA_DIR, DEVICE, draw_samples
 
     rng = torch.Generator(device="cpu").manual_seed(1)
-    X = draw_samples(DATA_DIR / "density_a.png", n_, rng, device=DEVICE).float()
-    Y = draw_samples(DATA_DIR / "density_b.png", n_, rng, device=DEVICE).float()
+    X = draw_samples(DATA_DIR / "density_a.png", n_, rng, dtype=torch.float32, device=DEVICE)
+    Y = draw_samples(DATA_DIR / "density_b.png", n_, rng, dtype=torch.float32, device=DEVICE)
     a = torch.full((n_,), 1.0 / n_, dtype=torch.float32, device=DEVICE)
-    ot1d = _ot_1d_coo_batched_cuda if DEVICE == "cuda" else _ot_1d_coo_batched
+    ot1d = ot1d_for(DEVICE)
 
     from gradient_flow.config import LR
     for _ in range(steps):
@@ -79,8 +80,7 @@ def truncation_check(steps, iters, n_):
         out["viol"].append(viol)
         print(f"  k={k:>4}  cos={out['cos'][-1]:.6f}  viol={viol:.2e}", flush=True)
         del ge, gf
-        if DEVICE == "cuda":
-            torch.cuda.empty_cache()
+        empty_cache(DEVICE)
     return out
 
 
@@ -97,9 +97,9 @@ def main():
     noise = json.loads(NOISE.read_text())
 
     if args.recompute_truncation or not TRUNC.exists():
-        if not torch.cuda.is_available():
-            print("gradient_flow/figure.py: no CUDA GPU found, running the truncation "
-                  "check on CPU (pure torch throughout -- much slower, same algorithm).")
+        from sinkslot.bench.devices import describe
+        from gradient_flow.run import DEVICE
+        print(f"gradient_flow/figure.py: truncation check on {describe(DEVICE)}")
         print(f"computing truncation check (not cached at {TRUNC})")
         TRUNC.write_text(json.dumps(
             truncation_check(sweep["steps"], sweep["iters"], sweep["n"])))

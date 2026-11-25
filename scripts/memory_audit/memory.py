@@ -255,13 +255,13 @@ def _probe_sinkslot(cuda_path: bool, args) -> Dict[str, Callable]:
 
     def setup(state):
         from sinkslot.solver import (
-            _ot_1d_coo_batched, _ot_1d_coo_batched_cuda, sot_plan_coo,
+            _ot_1d_coo_batched, _ot_1d_coo_batched_transposed, sot_plan_coo,
             sparse_sqeuclidean_cost, to_csr,
         )
 
         x, y, a, b = state["xyab"]
         n, m = x.shape[0], y.shape[0]
-        ot1d = _ot_1d_coo_batched_cuda if cuda_path else _ot_1d_coo_batched
+        ot1d = _ot_1d_coo_batched_transposed if cuda_path else _ot_1d_coo_batched
         rows, cols, S = sot_plan_coo(x, y, a, b, L=args.slices, seed=0, ot1d=ot1d)
         if cuda_path:
             cost = sparse_sqeuclidean_cost(x, y, rows, cols)
@@ -277,11 +277,11 @@ def _probe_sinkslot(cuda_path: bool, args) -> Dict[str, Callable]:
 
     def solve(state):
         from sinkslot.bench.bench_forward import StopCfg
-        from sinkslot.sinkhorn_solvers import sinkslot_alternating_triton
+        from sinkslot.sinkhorn_solvers import sinkslot_alternating_fused
 
         n, m = state["nm"]
         log_a, log_b = state["log_ab"]
-        sinkslot_alternating_triton(*state["csr"], log_a, log_b, n, m, args.iters, StopCfg.fixed())
+        sinkslot_alternating_fused(*state["csr"], log_a, log_b, n, m, args.iters, StopCfg.fixed())
 
     return {"imports": imports, "setup": setup, "solve": solve}
 

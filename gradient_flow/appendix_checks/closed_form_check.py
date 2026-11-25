@@ -51,6 +51,7 @@ import torch
 from gradient_flow.along_flow import trajectory
 from gradient_flow.config import L, N, N_STEPS
 from gradient_flow.estimators import EPS
+from sinkslot.bench.devices import describe
 from gradient_flow.run import DATA_DIR, DEVICE, OUT_DIR, draw_samples
 from gradient_flow.term_norms import C_I, C_II, _save
 
@@ -63,14 +64,12 @@ def main():
     p.add_argument("--eps", type=float, default=EPS)
     args = p.parse_args()
 
-    if DEVICE != "cuda":
-        print("gradient_flow/closed_form_check.py: no CUDA GPU found, running on CPU "
-              "(pure torch throughout -- much slower, same algorithm).")
+    print(f"gradient_flow/closed_form_check.py: running on {describe(DEVICE)}")
 
     n = args.n
     rng = torch.Generator(device="cpu").manual_seed(1)
-    X = draw_samples(DATA_DIR / "density_a.png", n, rng, device=DEVICE).float()
-    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, device=DEVICE).float()
+    X = draw_samples(DATA_DIR / "density_a.png", n, rng, dtype=torch.float32, device=DEVICE)
+    Y = draw_samples(DATA_DIR / "density_b.png", n, rng, dtype=torch.float32, device=DEVICE)
     a = torch.full((n,), 1.0 / n, dtype=torch.float32, device=DEVICE)
 
     print(f"N={n}  L={L}  eps={args.eps:g}  steps={args.steps}  "

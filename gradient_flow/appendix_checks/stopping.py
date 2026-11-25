@@ -27,8 +27,9 @@ proxy.
 
 Setup is identical to run.py's (same densities, same rng seed, same N, L, eps),
 and the measurement is taken at the first gradient step, where X is still the
-source blob. fp32 throughout. Runs on CPU or CUDA (see _build_support/_grad_at's
-own dispatch between the fused Triton loop and its pure-torch fallback).
+source blob. fp32 throughout. Runs on CUDA, Apple-silicon MPS or CPU (see
+_build_support/_grad_at's own dispatch between the fused loop -- Triton or
+Metal -- and its pure-torch fallback).
 """
 from __future__ import annotations
 
@@ -40,20 +41,20 @@ import torch
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+from sinkslot._backends import fused_backend  # noqa: E402
 from sinkslot.solver import (  # noqa: E402
-    _HAS_TRITON,
-    _ot_1d_coo_batched,
-    _ot_1d_coo_batched_cuda,
+    ot1d_for,
     sot_plan_coo,
     sparse_sqeuclidean_cost,
     to_csr,
 )
 from sinkslot.sinkhorn_solvers import (  # noqa: E402
-    sinkslot_alternating_triton,
+    sinkslot_alternating_fused,
     sinkslot_alternating_torch,
 )
 from sinkslot.gradient import sparse_barycentric_map  # noqa: E402
 from gradient_flow.config import DATA_SCALE, L, N  # noqa: E402
+from sinkslot.bench.devices import describe  # noqa: E402
 from gradient_flow.run import DATA_DIR, DEVICE, OUT_DIR, draw_samples  # noqa: E402
 
 # Geometric-ish ladder: the interesting behaviour is all in the first ~200
@@ -72,16 +73,16 @@ def _build_support(X, Y, a, eps, slices, seed):
     iteration count below solves the *same* problem -- otherwise the curves
     would confound solver progress with a re-randomised support.
 
-    CSR/CSC are only needed for the fused Triton loop (sinkslot_alternating_triton); on the
+    CSR/CSC are only needed for the fused loop (sinkslot_alternating_fused); on the
     pure-torch path (sinkslot_alternating_torch) they're skipped entirely -- it operates
     on the COO (rows, cols, lam) directly, so there's nothing to hoist there.
     """
     n, m = X.shape[0], Y.shape[0]
-    ot1d = _ot_1d_coo_batched_cuda if X.is_cuda else _ot_1d_coo_batched
+    ot1d = ot1d_for(X.device)
     rows, cols, S = sot_plan_coo(X, Y, a, a, L=slices, seed=seed, ot1d=ot1d)
     cost = sparse_sqeuclidean_cost(X, Y, rows, cols)
     lam = S.clamp_min(torch.finfo(S.dtype).tiny).log() - cost / eps
-    if _HAS_TRITON and X.is_cuda:
+    if fused_backend(X.device) is not None:
         csr = to_csr(rows, cols, lam, n, narrow_key=True)
         csc = to_csr(cols, rows, lam, m, narrow_key=True)
     else:
@@ -92,10 +93,10 @@ def _build_support(X, Y, a, eps, slices, seed):
 def _grad_at(n_iters, X, Y, a, rows, cols, lam, csr, csc):
     """(gradient, max marginal violation) after exactly `n_iters` inner iterations.
 
-    `sinkslot_alternating_triton`/`sinkslot_alternating_torch` both initialise the potentials to zero, so
+    `sinkslot_alternating_fused`/`sinkslot_alternating_torch` both initialise the potentials to zero, so
     running with n_iters=k reproduces the state the solver would be in after
     k iterations -- no need to checkpoint a single long run. Dispatches on
-    whether `_build_support` built CSR/CSC (Triton available and X on CUDA)
+    whether `_build_support` built CSR/CSC (X's device has a fused backend)
     or not (pure-torch path).
     """
     n, m = X.shape[0], Y.shape[0]
@@ -103,7 +104,7 @@ def _grad_at(n_iters, X, Y, a, rows, cols, lam, csr, csc):
     if csr is not None:
         r_ptr, r_idx, r_lam, _ = csr
         c_ptr, c_idx, c_lam, _ = csc
-        phi, psi, _, _, _ = sinkslot_alternating_triton(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
+        phi, psi, _, _, _ = sinkslot_alternating_fused(r_ptr, r_idx, r_lam, c_ptr, c_idx, c_lam,
                                     log_a, log_a, n, m, n_iters)
     else:
         phi, psi, _, _, _ = sinkslot_alternating_torch(rows, cols, lam, log_a, log_a, n, m, n_iters)
@@ -119,14 +120,12 @@ def _grad_at(n_iters, X, Y, a, rows, cols, lam, csr, csc):
 
 
 def main():
-    if DEVICE != "cuda":
-        print("gradient_flow/stopping.py: no CUDA GPU found, running on CPU "
-              "(pure torch throughout -- much slower, same algorithm).")
+    print(f"gradient_flow/stopping.py: running on {describe(DEVICE)}")
 
     # Same rng draw order as run.py's main(), so X0/Y are the identical clouds.
     rng = torch.Generator(device="cpu").manual_seed(1)
-    X = draw_samples(DATA_DIR / "density_a.png", N, rng, device=DEVICE).float()
-    Y = draw_samples(DATA_DIR / "density_b.png", N, rng, device=DEVICE).float()
+    X = draw_samples(DATA_DIR / "density_a.png", N, rng, dtype=torch.float32, device=DEVICE)
+    Y = draw_samples(DATA_DIR / "density_b.png", N, rng, dtype=torch.float32, device=DEVICE)
     a = torch.full((N,), 1.0 / N, dtype=torch.float32, device=DEVICE)
 
     rows, cols, lam, csr, csc = _build_support(X, Y, a, EPS, L, SEED)

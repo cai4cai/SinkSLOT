@@ -5,8 +5,10 @@ This is the paper's own contribution -- a distinct algorithm from FlashSinkhorn
 fused kernel over the full cost matrix).
 
 This module holds the pieces with no FlashSinkhorn equivalent to mirror: the
-sliced-OT support construction (`sot_plan_coo`, `_ot_1d_coo_batched[_cuda]`),
+sliced-OT support construction (`sot_plan_coo`, `_ot_1d_coo_batched[_transposed]`),
 CSR conversion (`to_csr`), and the sparse cost (`sparse_sqeuclidean_cost`).
+The fused kernels themselves live in one module per backend (`_triton.py`,
+`_metal.py`), dispatched through `_backends.py`.
 The Sinkhorn solve loops live in `sinkhorn_solvers.py`, the envelope-theorem
 gradient in `gradient.py`, the Hessian-vector product in `hvp.py` -- split out
 to mirror flash_sinkhorn's own {sinkhorn_solvers,implicit_grad,hvp}.py layout.
@@ -20,12 +22,7 @@ import torch
 from beartype import beartype
 from jaxtyping import Float, Int, jaxtyped
 
-try:
-    import triton
-    import triton.language as tl
-    _HAS_TRITON = True
-except ImportError:
-    _HAS_TRITON = False
+from ._backends import fused_ops, resolve_backend
 
 
 @jaxtyped(typechecker=beartype)
@@ -104,13 +101,17 @@ def _ot_1d_coo_batched(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: t
     return R[keep], Cc[keep], mass[keep]
 
 
-def _ot_1d_coo_batched_cuda(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
-    """CUDA-optimised `_ot_1d_coo_batched`: same plan, transposed layout, fp32 scan.
+def _ot_1d_coo_batched_transposed(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor, b: torch.Tensor):
+    """`_ot_1d_coo_batched` in the transposed (C, len) layout: same plan, faster.
 
-    This is the SinkSLOT-CUDA setup path. Identical construction to the naive
-    version above, restructured for the GPU: everything runs in the
-    TRANSPOSED (C, len) layout, since the cumsum's scan dimension is
-    contiguous that way instead of strided.
+    Identical construction to the naive version above, restructured so that
+    everything runs in the TRANSPOSED (C, len) layout: the cumsum's scan
+    dimension is contiguous that way instead of strided, and the gather
+    indices stay contiguous too. Plain torch, so it runs on any device; it is
+    the builder `sinkslot_solve` uses on every GPU tensor (it is the setup of
+    the paper's SinkSLOT-CUDA variant, and 1.3-1.4x faster than the naive
+    builder on MPS too). No upcast: the scan runs in the input dtype, like the
+    naive builder's.
     """
     n, C = PX.shape
     m = PY.shape[0]
@@ -150,6 +151,14 @@ def _ot_1d_coo_batched_cuda(PX: torch.Tensor, PY: torch.Tensor, a: torch.Tensor,
     return R.reshape(-1)[sel], Cc.reshape(-1)[sel], mass.reshape(-1)[sel]
 
 
+def ot1d_for(device):
+    """The 1-D OT builder to use on `device`: the naive `_ot_1d_coo_batched`
+    on CPU, `_ot_1d_coo_batched_transposed` on any GPU (CUDA or MPS), where
+    its contiguous scans are 1.3-50x faster. The one place that rule lives,
+    shared by `sinkslot_solve` and the experiment scripts."""
+    return _ot_1d_coo_batched if torch.device(device).type == "cpu" else _ot_1d_coo_batched_transposed
+
+
 @jaxtyped(typechecker=beartype)
 def sot_plan_coo(
     X: Float[torch.Tensor, "n d"], Y: Float[torch.Tensor, "m d"],
@@ -173,20 +182,17 @@ def sot_plan_coo(
     the key array and the sort workspace inside `unique`.
 
     `ot1d` selects the per-slice 1-D OT builder: the naive `_ot_1d_coo_batched`
-    (the SinkSLOT baseline) or `_ot_1d_coo_batched_cuda` (the SinkSLOT-CUDA fp64
-    path). Only the plan differs; the coalesce is identical.
+    (the SinkSLOT baseline) or `_ot_1d_coo_batched_transposed` (the faster
+    transposed layout, SinkSLOT-CUDA's setup). Only the plan's layout and
+    scan order differ; the coalesce is identical.
 
-    Dtype: with `ot1d=_ot_1d_coo_batched_cuda`, the returned `vals` are always
-    float32, whatever dtype `X`/`Y`/`a`/`b` are (see that function's own
-    docstring) -- passing float64 in does not get you a float64 plan. With the
-    naive `_ot_1d_coo_batched` there's no such ceiling; the output follows the
-    input dtype. Either way, there is no way to get a float64-precision plan
-    on a CUDA tensor: `gradient_flow/finite_diff.py`'s `build_support`, which
-    needs float64 for everything downstream, doesn't try -- it explicitly
-    passes `.float()` inputs to whichever builder the device selects, accepts
-    the float32-quality plan either way, and only upcasts the *returned*
-    tensor to float64 afterward so the rest of its pipeline has a consistent
-    dtype. That's a container cast, not recovered precision.
+    Dtype: both builders follow the input dtype -- float64 in gives a float64
+    plan on CPU (MPS has no float64). `gradient_flow/finite_diff.py`'s
+    `build_support`, which needs float64 for everything downstream, still
+    passes `.float()` inputs to whichever builder the device selects and only
+    upcasts the *returned* tensor to float64 afterward so the rest of its
+    pipeline has a consistent dtype. That's a container cast, not recovered
+    precision.
     """
     n, d = X.shape
     m = Y.shape[0]
@@ -276,52 +282,27 @@ def to_csr(rows: torch.Tensor, cols: torch.Tensor, vals: torch.Tensor, n: int,
         (vals if perm is None else vals[perm]), perm
 
 
-if _HAS_TRITON:
-    @triton.jit
-    def _cost_kernel(X, Y, ROWS, COLS, OUT, NNZ, D: tl.constexpr, BLOCK: tl.constexpr):
-        """out[k] = ||x[rows[k]] - y[cols[k]]||^2, one pass, no (nnz, d) temporaries.
-
-        Dtype: `acc` is a fixed float32 accumulator, independent of whatever dtype
-        X/Y actually are -- this kernel is written for, and only tested against,
-        float32 input. See `sparse_sqeuclidean_cost`'s dtype check, which is the
-        enforcement point (this kernel itself has no way to check or error).
-        """
-        k = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-        mask = k < NNZ
-        r = tl.load(ROWS + k, mask=mask, other=0).to(tl.int64)
-        c = tl.load(COLS + k, mask=mask, other=0).to(tl.int64)
-        acc = tl.zeros([BLOCK], dtype=tl.float32)
-        for j in tl.static_range(D):
-            xv = tl.load(X + r * D + j, mask=mask, other=0.0)
-            yv = tl.load(Y + c * D + j, mask=mask, other=0.0)
-            dv = xv - yv
-            acc += dv * dv
-        tl.store(OUT + k, acc, mask=mask)
-
-
 @jaxtyped(typechecker=beartype)
 def sparse_sqeuclidean_cost(
     x: Float[torch.Tensor, "n d"], y: Float[torch.Tensor, "m d"],
     rows: Int[torch.Tensor, "nnz"], cols: Int[torch.Tensor, "nnz"],
-    block: int = 1024, use_triton=None,
+    backend: str = "auto",
 ) -> Float[torch.Tensor, "nnz"]:
     """Squared-euclidean cost on the sparse support.
 
-    Fused Triton kernel when `x` is CUDA and Triton is installed (the
-    SinkSLOT-CUDA path). Otherwise falls back to the obvious torch expression,
-    which is what the fused kernel is optimised away from in the first place --
-    same formula, just three (nnz, d) intermediates instead of one fused pass.
-    Only the fused path was ever measured for speed; the fallback exists so the
-    function (and everything built on it) also works without a CUDA GPU or
-    without Triton installed at all.
+    Fused kernel when `x`'s device has a fused backend (`_backends.py`): Triton
+    on CUDA (the SinkSLOT-CUDA path), Metal on MPS. Otherwise falls back to the
+    obvious torch expression, which is what the fused kernel is optimised away
+    from in the first place -- same formula, just three (nnz, d) intermediates
+    instead of one fused pass. Only the fused path was ever measured for speed;
+    the fallback exists so the function (and everything built on it) also
+    works without a GPU or without Triton installed at all.
 
-    `use_triton`: None (default) auto-detects from `_HAS_TRITON and x.is_cuda`.
-    Pass explicitly to override -- e.g. `False` to force the torch fallback on
-    a CUDA tensor even though Triton is available, which `sinkslot_solve`'s own
-    `backend="torch"` needs (auto-detection alone can't express "torch path,
-    but on GPU": that combination is CUDA-true, Triton-available-true, and
-    auto-detection always picks Triton there). `True` raises if Triton isn't
-    actually usable, rather than silently falling back.
+    `backend`: "auto" (default) picks the device's fused backend when it's
+    available, torch otherwise. Pass explicitly to override -- e.g. "torch" to
+    force the fallback on a GPU tensor even though a fused backend is
+    available, which `sinkslot_solve`'s own `backend="torch"` needs. A fused
+    name raises if it can't run on `x`, rather than silently falling back.
 
     Fused-path notes: materialising the (nnz, d) intermediates costs 832 MB each
     at nnz=26M, d=8, against 104 MB of output. Measured 9-10x faster fused across
@@ -330,30 +311,21 @@ def sparse_sqeuclidean_cost(
     (fp32 reassociation of the d-term sum); the resulting shift in the dual
     objective is below 2e-7.
 
-    Dtype: the fused path always returns float32, matching `_cost_kernel`'s
+    Dtype: the fused path always returns float32, matching the kernels'
     fixed float32 accumulator -- not inferred from `x`/`y`, and checked below
-    rather than left implicit, since Triton has no way to promote a mismatched
-    accumulator and would otherwise return quietly-wrong numbers. The torch
-    fallback (`use_triton=False`) has no such restriction: it follows `x`/`y`'s
-    own dtype, since it's the plain `(x[rows]-y[cols]).square().sum(1)`
+    rather than left implicit, since neither kernel language promotes a
+    mismatched accumulator and would otherwise return quietly-wrong numbers.
+    The torch fallback (`backend="torch"`) has no such restriction: it follows
+    `x`/`y`'s own dtype, since it's the plain `(x[rows]-y[cols]).square().sum(1)`
     expression with nothing fixed-precision underneath.
     """
-    if use_triton is None:
-        use_triton = _HAS_TRITON and x.is_cuda
-    elif use_triton and not _HAS_TRITON:
-        raise ValueError("use_triton=True but Triton isn't importable")
-    if not use_triton:
+    backend = resolve_backend(backend, x.device)
+    if backend == "torch":
         return (x[rows] - y[cols]).square().sum(1)
     if x.dtype != torch.float32 or y.dtype != torch.float32:
         raise ValueError(
-            f"sparse_sqeuclidean_cost's Triton path is float32-only (the "
+            f"sparse_sqeuclidean_cost's {backend} path is float32-only (the "
             f"kernel's accumulator is a fixed float32); got x.dtype={x.dtype}, "
-            f"y.dtype={y.dtype}. Cast to float32 first, or pass use_triton=False."
+            f"y.dtype={y.dtype}. Cast to float32 first, or pass backend='torch'."
         )
-    nnz, d = rows.numel(), x.shape[1]
-    out = torch.empty(nnz, device=x.device, dtype=torch.float32)
-    _cost_kernel[(triton.cdiv(nnz, block),)](
-        x.contiguous(), y.contiguous(), rows, cols, out, nnz,
-        D=d, BLOCK=block, num_warps=4,
-    )
-    return out
+    return fused_ops(backend).sqeuclidean_cost(x, y, rows, cols)

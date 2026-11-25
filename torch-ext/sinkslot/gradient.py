@@ -79,18 +79,15 @@ def slot_grad(
     from does. `a`, `b` positional and required, matching `sinkslot_solve`'s
     own `(X, Y, a, b, ...)` convention.
 
-    Built on `sinkslot_solve`, so it works on CPU or CUDA-without-Triton via
-    the same `backend` override ("auto" / "triton" / "torch", see
-    `sinkslot_solve`'s own docstring) -- not CUDA/Triton-only anymore. Same
-    fp32 caveat as `sparse_sqeuclidean_cost`'s Triton path when `backend`
-    resolves to Triton; the torch path follows X/Y/a's own dtype.
+    Built on `sinkslot_solve`, so it works on CPU, CUDA-without-Triton or MPS
+    via the same `backend` override ("auto" / "torch" / "triton" / "metal",
+    see `sinkslot_solve`'s own docstring) -- not CUDA/Triton-only anymore.
+    Same fp32 caveat as `sparse_sqeuclidean_cost`'s fused path when `backend`
+    resolves to a fused backend; the torch path follows X/Y/a's own dtype.
     """
     phi, psi, rows, cols, S, _, _, _ = sinkslot_solve(
         X, Y, a, b, eps, L, seed, n_iters, backend=backend)
-    cost = sparse_sqeuclidean_cost(
-        X, Y, rows, cols,
-        use_triton=(backend == "triton") if backend != "auto" else None,
-    )
+    cost = sparse_sqeuclidean_cost(X, Y, rows, cols, backend=backend)
     log_S = S.clamp_min(torch.finfo(S.dtype).tiny).log()
     lam = log_S - cost / eps
 
